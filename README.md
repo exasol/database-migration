@@ -1,0 +1,10 @@
+# database-migration
+SQL scripts for automatically importing data from various data management systems into EXASOL. 
+
+You'll find a list of SQL scripts which you can execute on EXASOL to load data from certain databases or 
+database management systems. The scripts try to extract the meta data from the sources and create the 
+appropriate IMPORT statements automatically so that you don't have to care about table names and column 
+names and types. 
+
+If you want to optimize existing scripts or create new scripts for additional systems, we would be very 
+glad if you share your work with the EXASOL user community.
