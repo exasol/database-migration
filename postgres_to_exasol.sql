@@ -1,11 +1,11 @@
-create schema load_metadata;
+create schema database_migration;
 
 /* 
     This script will generate create schema, create table and create import statements 
     to load all needed data from a postgres database. Automatic datatype conversion is 
     applied whenever needed. Feel free to adjust it. 
 */
-create or replace script load_metadata.LOAD_FROM_POSTGRES(
+create or replace script database_migration.POSTGRES_TO_EXASOL(
 CONNECTION_NAME              -- name of the database connection inside exasol -> e.g. postgres_db
 ,IDENTIFIER_CASE_INSENSITIVE -- true if identifiers should be stored case-insensitiv (will be stored upper_case)
 ,SCHEMA_FILTER               -- filter for the schemas to generate and load (except information_schema and pg_catalog) -> '%' to load all
@@ -84,7 +84,7 @@ with vv_pg_columns as (
 	order by "exa_table_catalog","exa_table_schema","exa_table_name"
 )
 , vv_imports as (
-	select 'import into "' || "exa_table_schema" || '"."' || "exa_table_name" || '" from jdbc at POSTGRES_DB statement ''select ' || group_concat( 
+	select 'import into "' || "exa_table_schema" || '"."' || "exa_table_name" || '" from jdbc at ]]..CONNECTION_NAME..[[ statement ''select ' || group_concat( 
 	case 
 	when "data_type" = 'ARRAY' then "column_name" ||'::text'
 	when "data_type" = 'USER-DEFINED' then "column_name" ||'::text' 
@@ -130,10 +130,10 @@ return(res)
 /
 
 -- Create a connection to the Postgres database
-create connection postgres_db to 'jdbc:postgresql://192.168.59.103:5432/docker' user 'docker' identified by 'docker';
+create connection postgres_db to 'jdbc:postgresql://192.168.59.103:5432/dbname' user 'username' identified by 'exasolRocks!';
 
 -- Finally start the import process
-execute script load_metadata.LOAD_FROM_POSTGRES(
+execute script database_migration.POSTGRES_TO_EXASOL(
     'postgres_db', -- name of your database connection
     true,          -- case sensitivity handling for identifiers -> false: handle them case sensitiv / true: handle them case insensitiv --> recommended: true
     '%',           -- schema filter --> '%' to load all schemas except 'information_schema' and 'pg_catalog' / '%publ%' to load all schemas like '%pub%'
