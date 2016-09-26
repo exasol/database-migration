@@ -13,14 +13,15 @@ Automatic datatype conversion is applied whenever needed. Feel free to adjust it
 
 create or replace script load_metadata.LOAD_FROM_VECTOR(
 CONNECTION_NAME --name of the database connection inside exasol -> e.g. vector_conn
+,IDENTIFIER_CASE_INSENSITIVE -- if true then all is converted to uppercase in EXASOL, if false identifiers are double-qouted (")
 ,TABLE_FILTER --filter for the tables to generate and load -> '%' to load all
 ) RETURNS TABLE
 AS
-exa_upper_begin=''
-exa_upper_end=''
+exa_upper_begin='"'
+exa_upper_end='"'
 if IDENTIFIER_CASE_INSENSITIVE == true then
-	exa_upper_begin='upper('
-	exa_upper_end=')'
+	exa_upper_begin=''
+	exa_upper_end=''
 end
 suc, res = pquery([[
 with tbl_cols as (
@@ -28,7 +29,7 @@ select * from (import from jdbc at ]]..CONNECTION_NAME..[[ statement 'select t.t
 from iitables t left join iicolumns c on c.table_name = t.table_name
 where t.table_type = ''T'' and system_use = ''U'' and t.table_name not like ''ii%'' and t.table_name like '']]..TABLE_FILTER..[['' order by table_name, column_sequence asc')
 ),
-tbl_ddl as (select 'create table "' || rtrim("table_name") || '"( '|| group_concat('"' || rtrim("column_name") || '" ' || 
+tbl_ddl as (select 'create table ]]..exa_upper_begin..[[' || rtrim("table_name") || ']]..exa_upper_end..[[( '|| group_concat(']]..exa_upper_begin..[[' || rtrim("column_name") || ']]..exa_upper_end..[[ ' || 
 	case 
 		when rtrim("column_datatype") = 'INTEGER' then 'DECIMAL(' || "column_length" || ',' || "column_scale" || ')'
 		when rtrim("column_datatype") = 'DECIMAL' then 'DECIMAL(' || "column_length" || ',' || "column_scale" || ')'
@@ -53,12 +54,12 @@ tbl_ddl as (select 'create table "' || rtrim("table_name") || '"( '|| group_conc
  || ' ); ' 
 	as stmts from tbl_cols group by "table_name"),
 
-tbl_imp as (select 'IMPORT INTO "' || rtrim("table_name") || '"(' || group_concat('"'|| rtrim("column_name") || '"' order by "column_sequence" ) || ') '  ||' FROM jdbc AT vector_conn STATEMENT ''select ' || group_concat(
+tbl_imp as (select 'IMPORT INTO ]]..exa_upper_begin..[[' || rtrim("table_name") || ']]..exa_upper_end..[[(' || group_concat(']]..exa_upper_begin..[['|| rtrim("column_name") || ']]..exa_upper_end..[[' order by "column_sequence" ) || ') '  ||' FROM jdbc AT vector_conn STATEMENT ''select ' || group_concat(
 	case 
-		when rtrim("column_datatype") = 'IPV4' then 'cast('|| rtrim("column_name") || ' as varchar(16)) as ' || rtrim("column_name")
-		when rtrim("column_datatype") = 'IPV6' then 'cast('|| rtrim("column_name") || ' as varchar(40)) as ' || rtrim("column_name")
-		when rtrim("column_datatype") = 'MONEY' then 'cast('|| rtrim("column_name") || ' as decimal(14,2)) as ' || rtrim("column_name")
-		else rtrim("column_name")
+		when rtrim("column_datatype") = 'IPV4' then 'cast('|| rtrim("column_name") || ' as varchar(16)) as ]]..exa_upper_begin..[[' || rtrim("column_name") || ']]..exa_upper_end..[['
+		when rtrim("column_datatype") = 'IPV6' then 'cast('|| rtrim("column_name") || ' as varchar(40)) as ]]..exa_upper_begin..[[' || rtrim("column_name") || ']]..exa_upper_end..[['
+		when rtrim("column_datatype") = 'MONEY' then 'cast('|| rtrim("column_name") || ' as decimal(14,2)) as ]]..exa_upper_begin..[[' || rtrim("column_name") || ']]..exa_upper_end..[['
+		else ']]..exa_upper_begin..[[' || rtrim("column_name") || ']]..exa_upper_end..[['
 	end
  order by "column_sequence"
 ) -- group_concat bracket
@@ -77,6 +78,7 @@ return(res)
 /
 
 execute script load_metadata.LOAD_FROM_VECTOR('vector_conn' --name of your database connection
+,true
 ,'%' -- table filter --> '%' to load all tables (
 );
 
