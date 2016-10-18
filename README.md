@@ -1,5 +1,8 @@
 # database-migration
-SQL scripts for automatically importing data from various data management systems into EXASOL. 
+
+###### Please note that this is an open source project which is *not officially supported* by EXASOL. We will try to help you as much as possible, but can't guarantee anything since this is not an official EXASOL product.
+
+This project contains SQL scripts for automatically importing data from various data management systems into EXASOL. 
 
 You'll find a list of SQL scripts which you can execute on EXASOL to load data from certain databases or 
 database management systems. The scripts try to extract the meta data from the sources and create the 
