@@ -1,4 +1,4 @@
-open schema load_metadata;
+create schema load_metadata;
 
 /* This script will generate create schema, create table and create import statements to load all needed data from a postgres database. Automatic datatype conversion is applied whenever needed. Feel free to adjust it. */
 create or replace script load_metadata.LOAD_FROM_MYSQL(
@@ -96,13 +96,15 @@ end
 return(res)
 /
 
+
+create or replace connection mysql_conn 
+to 'jdbc:mysql://192.168.137.5:3306'
+user 'user'
+identified by 'exasolRocks!';
+
 execute script load_metadata.LOAD_FROM_MYSQL('mysql_conn' --name of your database connection
 ,TRUE -- case sensitivity handling for identifiers -> false: handle them case sensitiv / true: handle them case insensitiv --> recommended: true
 ,'mb%' -- schema filter --> '%' to load all schemas except 'information_schema' and 'mysql' and 'performance_schema' / '%publ%' to load all schemas like '%pub%'
 ,'%' -- table filter --> '%' to load all tables (
 );
 
-create or replace connection mysql_conn 
-to 'jdbc:mysql://192.168.137.5:3306'
-user 'marcel'
-identified by 'exasol';
