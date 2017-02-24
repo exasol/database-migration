@@ -50,18 +50,38 @@ if not success then error(res.error_message) end
 all_tab_cols = [[]]
 
 if #res == 0 then --no identity column
-	all_tab_cols = exa_upper_begin..[[ owner ]]..exa_upper_end..[[ as EXA_SCHEMA_NAME , owner , table_name, ]]..exa_upper_begin..[[ table_name ]]..exa_upper_end..[[ as EXA_TABLE_NAME , COLUMN_NAME, ]]..exa_upper_begin..[[column_name]]..exa_upper_end..[[  as EXA_COLUMN_NAME, data_type, data_length, data_precision, data_scale, nullable, column_id, data_default, null identity_column]]
+	all_tab_cols = exa_upper_begin..[[ owner ]]..exa_upper_end..[[ as EXA_SCHEMA_NAME , owner , table_name, ]]..exa_upper_begin..[[ table_name ]]..exa_upper_end..[[ as EXA_TABLE_NAME , COLUMN_NAME, ]]..exa_upper_begin..[[column_name]]..exa_upper_end..[[  as EXA_COLUMN_NAME, data_type, data_length, data_precision, data_scale, char_length, nullable, column_id, data_default, null identity_column]]
 else
-  	all_tab_cols = exa_upper_begin..[[ owner ]]..exa_upper_end..[[ as EXA_SCHEMA_NAME , owner , table_name, ]]..exa_upper_begin..[[ table_name ]]..exa_upper_end..[[ as EXA_TABLE_NAME , COLUMN_NAME, ]]..exa_upper_begin..[[column_name]]..exa_upper_end..[[  as EXA_COLUMN_NAME, data_type, data_length, data_precision, data_scale, nullable, column_id, data_default, identity_column]]
+  	all_tab_cols = exa_upper_begin..[[ owner ]]..exa_upper_end..[[ as EXA_SCHEMA_NAME , owner , table_name, ]]..exa_upper_begin..[[ table_name ]]..exa_upper_end..[[ as EXA_TABLE_NAME , COLUMN_NAME, ]]..exa_upper_begin..[[column_name]]..exa_upper_end..[[  as EXA_COLUMN_NAME, data_type, data_length, data_precision, data_scale, char_length, nullable, column_id, data_default, identity_column]]
 end
 
-success, res = pquery([[with ora_base as( 
+success, res = pquery([[with ora_cols as( 
 
 	select * from(
 		import from jdbc at ::c
 		statement 'select ]]..all_tab_cols..[[  from all_tab_columns where owner ]]..SCHEMA_STR..[[ and table_name ]]..TABLE_STR..[['
 				)
 			),
+	ora_base as ( --cast to correct types
+		SELECT
+			EXA_SCHEMA_NAME, 
+			OWNER, 
+			TABLE_NAME, 
+			EXA_TABLE_NAME, 
+			COLUMN_NAME, 
+			EXA_COLUMN_NAME, 
+			DATA_TYPE, 
+			cast(DATA_LENGTH as integer) DATA_LENGTH, 
+			cast(DATA_PRECISION as integer) DATA_PRECISION, 
+			cast(DATA_SCALE as integer) DATA_SCALE, 
+			cast(CHAR_LENGTH as integer) CHAR_LENGTH, 
+			NULLABLE, 
+			cast(COLUMN_ID as integer) COLUMN_ID, 
+			DATA_DEFAULT, 
+			IDENTITY_COLUMN
+		FROM
+			ora_cols
+	),
 	nls_format as (
 		select * from (import from jdbc at ::c statement 'select * from nls_database_parameters where parameter in (''NLS_TIMESTAMP_FORMAT'',''NLS_DATE_FORMAT'',''NLS_DATE_LANGUAGE'',''NLS_CHARACTERSET'')')
 	),
@@ -77,8 +97,8 @@ success, res = pquery([[with ora_base as(
 (select EXA_SCHEMA_NAME, EXA_TABLE_NAME, 
 		group_concat( 
 		case 
-			when data_type in ('CHAR', 'NCHAR') then '"' || EXA_COLUMN_NAME || '"' || ' ' ||  'char(' || data_length || ')'
-			when data_type in ('VARCHAR','VARCHAR2', 'NVARCHAR2') then '"' || EXA_COLUMN_NAME || '"' || ' ' ||  'varchar(' || data_length || ')'
+			when data_type in ('CHAR', 'NCHAR') then '"' || EXA_COLUMN_NAME || '"' || ' ' ||  'char(' || char_length || ')'
+			when data_type in ('VARCHAR','VARCHAR2', 'NVARCHAR2') then '"' || EXA_COLUMN_NAME || '"' || ' ' ||  'varchar(' || char_length || ')'
 			when data_type = 'CLOB' then '"' || EXA_COLUMN_NAME || '"' || ' ' ||  'varchar(2000000)'
 			when data_type = 'XMLTYPE' then '"' || EXA_COLUMN_NAME || '"' || ' ' ||  'varchar(2000000)'
 			when data_type in ('DECIMAL') and (data_precision is not null and data_scale is not null) then '"' || EXA_COLUMN_NAME || '"' || ' ' ||  'decimal(' || data_precision || ',' || data_scale || ')'
@@ -177,5 +197,7 @@ CREATE CONNECTION MY_ORACLE  --Install JDBC driver first via EXAoperation, see h
 	IDENTIFIED BY '********';
 
 
-EXECUTE SCRIPT database_migration.ORACLE_TO_EXASOL('MY_ORACLE', 'HR','%',true);
+EXECUTE SCRIPT database_migration.ORACLE_TO_EXASOL('MY_ORACLE_12C', '%APEX%','%',true);
+
+EXECUTE SCRIPT database_migration.ORACLE_TO_EXASOL('MY_ORACLE_12C', '%HR%','%',true);
 
