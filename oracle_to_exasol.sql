@@ -50,9 +50,9 @@ if not success then error(res.error_message) end
 all_tab_cols = [[]]
 
 if #res == 0 then --no identity column
-	all_tab_cols = exa_upper_begin..[[ owner ]]..exa_upper_end..[[ as EXA_SCHEMA_NAME , owner , table_name, ]]..exa_upper_begin..[[ table_name ]]..exa_upper_end..[[ as EXA_TABLE_NAME , COLUMN_NAME, ]]..exa_upper_begin..[[column_name]]..exa_upper_end..[[  as EXA_COLUMN_NAME, data_type, data_length, data_precision, data_scale, char_length, nullable, column_id, data_default, null identity_column]]
+	all_tab_cols = exa_upper_begin..[[ owner ]]..exa_upper_end..[[ as EXA_SCHEMA_NAME , owner , table_name, ]]..exa_upper_begin..[[ table_name ]]..exa_upper_end..[[ as EXA_TABLE_NAME , COLUMN_NAME, ]]..exa_upper_begin..[[column_name]]..exa_upper_end..[[  as EXA_COLUMN_NAME, data_type, cast(data_length as decimal(9,0)) data_length, cast(data_precision as decimal(9,0)) data_precision, cast(data_scale as decimal(9,0)) data_scale, cast(char_length as decimal(9,0)) char_length , nullable, cast(column_id as decimal(9,0)) column_id, data_default, null identity_column]]
 else
-  	all_tab_cols = exa_upper_begin..[[ owner ]]..exa_upper_end..[[ as EXA_SCHEMA_NAME , owner , table_name, ]]..exa_upper_begin..[[ table_name ]]..exa_upper_end..[[ as EXA_TABLE_NAME , COLUMN_NAME, ]]..exa_upper_begin..[[column_name]]..exa_upper_end..[[  as EXA_COLUMN_NAME, data_type, data_length, data_precision, data_scale, char_length, nullable, column_id, data_default, identity_column]]
+  	all_tab_cols = exa_upper_begin..[[ owner ]]..exa_upper_end..[[ as EXA_SCHEMA_NAME , owner , table_name, ]]..exa_upper_begin..[[ table_name ]]..exa_upper_end..[[ as EXA_TABLE_NAME , COLUMN_NAME, ]]..exa_upper_begin..[[column_name]]..exa_upper_end..[[  as EXA_COLUMN_NAME, data_type, cast(data_length as decimal(9,0)) data_length, cast(data_precision as decimal(9,0)) data_precision, cast(data_scale as decimal(9,0)) data_scale, cast(char_length as decimal(9,0)) char_length , nullable, cast(column_id as decimal(9,0)) column_id, data_default, identity_column]]
 end
 
 success, res = pquery([[with ora_cols as( 
@@ -200,4 +200,3 @@ CREATE CONNECTION MY_ORACLE  --Install JDBC driver first via EXAoperation, see h
 EXECUTE SCRIPT database_migration.ORACLE_TO_EXASOL('MY_ORACLE_12C', '%APEX%','%',true);
 
 EXECUTE SCRIPT database_migration.ORACLE_TO_EXASOL('MY_ORACLE_12C', '%HR%','%',true);
-
