@@ -69,10 +69,10 @@ with vv_mysql_columns as (
 	select 'import into "' || "exa_table_schema" || '"."' || "exa_table_name" || '" from jdbc at ]]..CONNECTION_NAME..[[ statement ''select ' 
            || group_concat(
                            case 
-	                       when upper(data_type) = 'BINARY' then 'cast('||column_name||' as char('||character_maximum_length||'))'
-                           when upper(data_type) = 'VARBINARY' then 'cast('||column_name||' as char('||character_maximum_length||'))'
-                           when upper(data_type) = 'BLOB' then 'cast('||column_name||' as char(2000000))'
-                           else column_name end order by ordinal_position) 
+	                       when upper(data_type) = 'BINARY' then 'cast(`'||column_name||'` as char('||character_maximum_length||'))'
+                           when upper(data_type) = 'VARBINARY' then 'cast(`'||column_name||'` as char('||character_maximum_length||'))'
+                           when upper(data_type) = 'BLOB' then 'cast(`'||column_name||'` as char(2000000))'
+                           else '`' || column_name || '`' end order by ordinal_position) 
            || ' from ' || table_schema|| '.' || table_name|| ''';' as sql_text
 	from vv_mysql_columns group by "exa_table_catalog","exa_table_schema","exa_table_name", table_schema,table_name
 	order by "exa_table_catalog", "exa_table_schema","exa_table_name", table_schema,table_name
