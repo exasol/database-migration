@@ -2,11 +2,78 @@ create schema database_migration;
 
 create or replace script database_migration.ORACLE_TO_EXASOL (
 CONNECTION_NAME
+,IDENTIFIER_CASE_INSENSITIVE 	-- TRUE if identifiers should be put uppercase
 ,SCHEMA_FILTER 					-- filter for the schemas to generate and load, e.g. 'my_schema', 'my%', 'schema1, schema2', '%'
 ,TABLE_FILTER  					-- filter for the tables to generate and load, e.g. 'my_table', 'my%', 'table1, table2', '%'
-,IDENTIFIER_CASE_INSENSITIVE 	-- TRUE if identifiers should be put uppercase
 ) RETURNS TABLE 
 AS
+
+-- Functions
+function string.startsWith(String,word)
+   return string.sub(String,1,string.len(word))==word
+end
+
+
+function get_connection_type_by_testing(CONNECTION_NAME)
+	-- TEST OCI/ORA
+	success, res = pquery([[
+	
+	select * from(
+			import from ora at ::c
+			statement 'select owner from ALL_TAB_COLUMNS'
+					);]], {c=CONNECTION_NAME})
+	if success then
+		return 'ORA' 
+	end
+
+	-- TEST JDBC
+	success, res = pquery([[
+	
+	select * from(
+			import from jdbc at ::c
+			statement 'select owner from ALL_TAB_COLUMNS'
+					);]], {c=CONNECTION_NAME})
+	if success then
+		return 'JDBC' 
+	end
+	return 'unknown'
+end
+
+
+function get_connection_type(CONNECTION_NAME)
+	CONNECTION_TYPE='unknown'
+	-- check system table for connection type first
+	success, res = pquery([[select CONNECTION_STRING from SYS.EXA_DBA_CONNECTIONS
+		where CONNECTION_NAME = :c ]] , {c=CONNECTION_NAME})
+
+	output(res.statement_text)
+	
+	if success then
+		if string.startsWith(string.upper(res[1][1]), 'JDBC') then 
+			CONNECTION_TYPE = 'JDBC'
+		else 
+			CONNECTION_TYPE = 'ORA'
+		end
+
+	else -- if user can't access this table --> try oci and jdbc
+		output([[Can't access table SYS.EXA_DBA_CONNECTIONS ... will try to determine connection type by trying it out ]])
+		CONNECTION_TYPE = get_connection_type_by_testing(CONNECTION_NAME)
+	end
+	
+	output('Connection detected as '..CONNECTION_TYPE..' connection')
+	-- error handling
+	if CONNECTION_TYPE == 'unknown' then
+		error([[Your connection seems to fit neither an JDBC nor an OCI connection pattern, please verify that ]]..CONNECTION_NAME..[[ is setup properly]])
+	end
+	return CONNECTION_TYPE
+end
+
+-- Actual script
+
+-- check whether connection is OCI or JDBC Connection
+CONNECTION_TYPE = get_connection_type(CONNECTION_NAME)
+
+
 
 exa_upper_begin=''
 exa_upper_end=''
@@ -31,7 +98,7 @@ end
 success, res = pquery([[
 
 select * from(
-		import from jdbc at ::c statement
+		import from ]]..CONNECTION_TYPE..[[ at ::c statement
 			'
 			select 
 			COLUMN_NAME
@@ -50,15 +117,15 @@ if not success then error(res.error_message) end
 all_tab_cols = [[]]
 
 if #res == 0 then --no identity column
-	all_tab_cols = exa_upper_begin..[[ owner ]]..exa_upper_end..[[ as EXA_SCHEMA_NAME , owner , table_name, ]]..exa_upper_begin..[[ table_name ]]..exa_upper_end..[[ as EXA_TABLE_NAME , COLUMN_NAME, ]]..exa_upper_begin..[[column_name]]..exa_upper_end..[[  as EXA_COLUMN_NAME, data_type, cast(data_length as decimal(9,0)) data_length, cast(data_precision as decimal(9,0)) data_precision, cast(data_scale as decimal(9,0)) data_scale, cast(char_length as decimal(9,0)) char_length , nullable, cast(column_id as decimal(9,0)) column_id, data_default, null identity_column]]
+	all_tab_cols = exa_upper_begin..[[ owner ]]..exa_upper_end..[[ as EXA_SCHEMA_NAME , owner , table_name, ]]..exa_upper_begin..[[ table_name ]]..exa_upper_end..[[ as EXA_TABLE_NAME , COLUMN_NAME, ]]..exa_upper_begin..[[column_name]]..exa_upper_end..[[  as EXA_COLUMN_NAME, data_type, cast(data_length as decimal(9,0)) data_length, cast(data_precision as decimal(9,0)) data_precision, cast(data_scale as decimal(9,0)) data_scale, cast(char_length as decimal(9,0)) char_length , nullable, cast(column_id as decimal(9,0)) column_id, null identity_column]]
 else
-  	all_tab_cols = exa_upper_begin..[[ owner ]]..exa_upper_end..[[ as EXA_SCHEMA_NAME , owner , table_name, ]]..exa_upper_begin..[[ table_name ]]..exa_upper_end..[[ as EXA_TABLE_NAME , COLUMN_NAME, ]]..exa_upper_begin..[[column_name]]..exa_upper_end..[[  as EXA_COLUMN_NAME, data_type, cast(data_length as decimal(9,0)) data_length, cast(data_precision as decimal(9,0)) data_precision, cast(data_scale as decimal(9,0)) data_scale, cast(char_length as decimal(9,0)) char_length , nullable, cast(column_id as decimal(9,0)) column_id, data_default, identity_column]]
+  	all_tab_cols = exa_upper_begin..[[ owner ]]..exa_upper_end..[[ as EXA_SCHEMA_NAME , owner , table_name, ]]..exa_upper_begin..[[ table_name ]]..exa_upper_end..[[ as EXA_TABLE_NAME , COLUMN_NAME, ]]..exa_upper_begin..[[column_name]]..exa_upper_end..[[  as EXA_COLUMN_NAME, data_type, cast(data_length as decimal(9,0)) data_length, cast(data_precision as decimal(9,0)) data_precision, cast(data_scale as decimal(9,0)) data_scale, cast(char_length as decimal(9,0)) char_length , nullable, cast(column_id as decimal(9,0)) column_id, identity_column]]
 end
 
 success, res = pquery([[with ora_cols as( 
 
 	select * from(
-		import from jdbc at ::c
+		import from ]]..CONNECTION_TYPE..[[ at ::c
 		statement 'select ]]..all_tab_cols..[[  from all_tab_columns where owner ]]..SCHEMA_STR..[[ and table_name ]]..TABLE_STR..[['
 				)
 			),
@@ -77,13 +144,12 @@ success, res = pquery([[with ora_cols as(
 			cast(CHAR_LENGTH as integer) CHAR_LENGTH, 
 			NULLABLE, 
 			cast(COLUMN_ID as integer) COLUMN_ID, 
-			DATA_DEFAULT, 
 			IDENTITY_COLUMN
 		FROM
 			ora_cols
 	),
 	nls_format as (
-		select * from (import from jdbc at ::c statement 'select * from nls_database_parameters where parameter in (''NLS_TIMESTAMP_FORMAT'',''NLS_DATE_FORMAT'',''NLS_DATE_LANGUAGE'',''NLS_CHARACTERSET'')')
+		select * from (import from ]]..CONNECTION_TYPE..[[ at ::c statement 'select * from nls_database_parameters where parameter in (''NLS_TIMESTAMP_FORMAT'',''NLS_DATE_FORMAT'',''NLS_DATE_LANGUAGE'',''NLS_CHARACTERSET'')')
 	),
 	cr_schema as (
 		with EXA_SCHEMAS as (select distinct EXA_SCHEMA_NAME as EXA_SCHEMA from ora_base )
@@ -144,7 +210,7 @@ success, res = pquery([[with ora_cols as(
 	)
 || 
 
-') from jdbc at ]]..CONNECTION_NAME..[[ statement 
+') from ]]..CONNECTION_TYPE..[[ at ]]..CONNECTION_NAME..[[ statement 
 ''select 
 ' || 
 		group_concat(
@@ -186,17 +252,24 @@ union all
 select * from cr_tables
 union all
 select * from cr_import_stmts]],{c=CONNECTION_NAME, s=SCHEMA_FILTER, t=TABLE_FILTER})
+
 if not success then error(res.error_message) end
 
 return(res)
 /
 
-CREATE CONNECTION MY_ORACLE  --Install JDBC driver first via EXAoperation, see https://www.exasol.com/support/browse/SOL-179
+-- For JDBC Connection
+CREATE CONNECTION JDBC_ORACLE  --Install JDBC driver first via EXAoperation, see https://www.exasol.com/support/browse/SOL-179
 	TO 'jdbc:oracle:thin:@//192.168.99.100:1521/xe'
 	USER 'system'
 	IDENTIFIED BY '********';
 
+EXECUTE SCRIPT database_migration.ORACLE_TO_EXASOL('JDBC_ORACLE', true, '%APEX%','%');
 
-EXECUTE SCRIPT database_migration.ORACLE_TO_EXASOL('MY_ORACLE_12C', '%APEX%','%',true);
+-- For OCI Connection
+CREATE OR REPLACE CONNECTION OCI_ORACLE
+	TO '192.168.99.100:1521/xe'
+	USER 'system'
+IDENTIFIED BY '********';
 
-EXECUTE SCRIPT database_migration.ORACLE_TO_EXASOL('MY_ORACLE_12C', '%HR%','%',true);
+EXECUTE SCRIPT database_migration.ORACLE_TO_EXASOL('OCI_ORACLE', true, '%APEX%','%');
