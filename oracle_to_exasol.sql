@@ -5,6 +5,7 @@ CONNECTION_NAME
 ,IDENTIFIER_CASE_INSENSITIVE 	-- TRUE if identifiers should be put uppercase
 ,SCHEMA_FILTER 					-- filter for the schemas to generate and load, e.g. 'my_schema', 'my%', 'schema1, schema2', '%'
 ,TABLE_FILTER  					-- filter for the tables to generate and load, e.g. 'my_table', 'my%', 'table1, table2', '%'
+,TABLE_FILTER                -- filter for the tables to generate and load, e.g. 'my_table', 'my%', 'table1, table2', '%'
 ) RETURNS TABLE 
 AS
 
@@ -49,6 +50,9 @@ function get_connection_type(CONNECTION_NAME)
 	output(res.statement_text)
 	
 	if success then
+		if #res == 0 then
+			error([[The connection ]]..CONNECTION_NAME..[[ doesn't exist, please try again with a valid connection name]])
+		end
 		if string.startsWith(string.upper(res[1][1]), 'JDBC') then 
 			CONNECTION_TYPE = 'JDBC'
 		else 
@@ -63,7 +67,7 @@ function get_connection_type(CONNECTION_NAME)
 	output('Connection detected as '..CONNECTION_TYPE..' connection')
 	-- error handling
 	if CONNECTION_TYPE == 'unknown' then
-		error([[Your connection seems to fit neither an JDBC nor an OCI connection pattern, please verify that ]]..CONNECTION_NAME..[[ is setup properly]])
+		error([[The connection ]]..CONNECTION_NAME..[[ seems to fit neither an JDBC nor an OCI connection pattern, please verify that ]]..CONNECTION_NAME..[[ is a valid OCI/JDBC connection]])
 	end
 	return CONNECTION_TYPE
 end
