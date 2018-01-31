@@ -2,9 +2,8 @@ create schema database_migration;
 
 create or replace script database_migration.ORACLE_TO_EXASOL (
 CONNECTION_NAME
-,IDENTIFIER_CASE_INSENSITIVE 	-- TRUE if identifiers should be put uppercase
-,SCHEMA_FILTER 					-- filter for the schemas to generate and load, e.g. 'my_schema', 'my%', 'schema1, schema2', '%'
-,TABLE_FILTER  					-- filter for the tables to generate and load, e.g. 'my_table', 'my%', 'table1, table2', '%'
+,IDENTIFIER_CASE_INSENSITIVE -- TRUE if identifiers should be put uppercase
+,SCHEMA_FILTER               -- filter for the schemas to generate and load, e.g. 'my_schema', 'my%', 'schema1, schema2', '%'
 ,TABLE_FILTER                -- filter for the tables to generate and load, e.g. 'my_table', 'my%', 'table1, table2', '%'
 ) RETURNS TABLE 
 AS
