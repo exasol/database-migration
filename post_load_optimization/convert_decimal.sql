@@ -1,4 +1,14 @@
 /*
+
+
+--------------------------------------------------------------------------------------------
+	UPDATED VERSION OF THIS SCRIPT AVAILABLE
+	--> have a look at convert_datatypes which 
+	offers the same conversions as this script but even more
+--------------------------------------------------------------------------------------------
+
+
+
   short:
      This script creates datatype optimization suggestions for you. You can run this after
      importing your data. Selecting smaller datatypes might improve performance.
