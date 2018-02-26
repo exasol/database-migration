@@ -1,7 +1,13 @@
 create schema database_migration;
 
+/* 
+	This script will generate create schema, create table and create import statements 
+	to load all needed data from an oracle database. Automatic datatype conversion is
+	applied whenever needed. Feel free to adjust it. 
+*/
+
 create or replace script database_migration.ORACLE_TO_EXASOL (
-CONNECTION_NAME
+CONNECTION_NAME				 -- name of the database connection inside exasol -> e.g. mysql_db
 ,IDENTIFIER_CASE_INSENSITIVE -- TRUE if identifiers should be put uppercase
 ,SCHEMA_FILTER               -- filter for the schemas to generate and load, e.g. 'my_schema', 'my%', 'schema1, schema2', '%'
 ,TABLE_FILTER                -- filter for the tables to generate and load, e.g. 'my_table', 'my%', 'table1, table2', '%'

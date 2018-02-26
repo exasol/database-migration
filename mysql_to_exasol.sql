@@ -1,11 +1,16 @@
-create schema load_metadata;
+create schema database_migration;
 
-/* This script will generate create schema, create table and create import statements to load all needed data from a postgres database. Automatic datatype conversion is applied whenever needed. Feel free to adjust it. */
-create or replace script load_metadata.LOAD_FROM_MYSQL(
-CONNECTION_NAME --name of the database connection inside exasol -> e.g. mysql_db
-,IDENTIFIER_CASE_INSENSITIVE -- true if identifiers should be stored case-insensitiv (will be stored upper_case)
-,SCHEMA_FILTER --filter for the schemas to generate and load (except information_schema and pg_catalog) -> '%' to load all
-,TABLE_FILTER --filter for the tables to generate and load -> '%' to load all
+/* 
+	This script will generate create schema, create table and create import statements 
+	to load all needed data from a postgres database. Automatic datatype conversion is
+	applied whenever needed. Feel free to adjust it. 
+*/
+
+create or replace script database_migration.MYSQL_TO_EXASOL(
+CONNECTION_NAME 				-- name of the database connection inside exasol -> e.g. mysql_db
+,IDENTIFIER_CASE_INSENSITIVE 	-- true if identifiers should be stored case-insensitiv (will be stored upper_case)
+,SCHEMA_FILTER 					-- filter for the schemas to generate and load (except information_schema and pg_catalog) -> '%' to load all
+,TABLE_FILTER 					-- filter for the tables to generate and load -> '%' to load all
 ) RETURNS TABLE
 AS
 exa_upper_begin=''
@@ -102,7 +107,7 @@ to 'jdbc:mysql://192.168.137.5:3306'
 user 'user'
 identified by 'exasolRocks!';
 
-execute script load_metadata.LOAD_FROM_MYSQL('mysql_conn' --name of your database connection
+execute script database_migration.MYSQL_TO_EXASOL('mysql_conn' --name of your database connection
 ,TRUE -- case sensitivity handling for identifiers -> false: handle them case sensitiv / true: handle them case insensitiv --> recommended: true
 ,'mb%' -- schema filter --> '%' to load all schemas except 'information_schema' and 'mysql' and 'performance_schema' / '%publ%' to load all schemas like '%pub%'
 ,'%' -- table filter --> '%' to load all tables (

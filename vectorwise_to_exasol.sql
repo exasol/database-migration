@@ -1,4 +1,4 @@
-open schema load_metadata;
+open schema database_migration;
 
 /* This script will generate create table and create import statements to load all needed data from a Vectorwise database. 
 Automatic datatype conversion is applied whenever needed. Feel free to adjust it. */
@@ -11,7 +11,7 @@ Automatic datatype conversion is applied whenever needed. Feel free to adjust it
 -- Port is the Data Access Server (DAS) Port (in my case 17031 - Actian Vector AP 3.5.1) or the replacement (AP7)
 -- see in Actian Director Server -> Management -> Data Access Servers -> (default) -> ... [right click, "Properties"]; then "Protocols"
 
-create or replace script load_metadata.LOAD_FROM_VECTOR(
+create or replace script database_migration.VECTORWISE_TO_EXASOL(
 CONNECTION_NAME --name of the database connection inside exasol -> e.g. vector_conn
 ,IDENTIFIER_CASE_INSENSITIVE -- if true then all is converted to uppercase in EXASOL, if false identifiers are double-qouted (")
 ,TABLE_FILTER --filter for the tables to generate and load -> '%' to load all
@@ -77,7 +77,7 @@ end
 return(res)
 /
 
-execute script load_metadata.LOAD_FROM_VECTOR('vector_conn' --name of your database connection
+execute script database_migration.VECTORWISE_TO_EXASOL('vector_conn' --name of your database connection
 ,true
 ,'%' -- table filter --> '%' to load all tables (
 );
