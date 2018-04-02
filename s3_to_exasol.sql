@@ -1,8 +1,6 @@
-create schema if not exists database_migration;
-open schema database_migration;
+CREATE SCHEMA IF NOT EXISTS DATABASE_MIGRATION;
 
-
-CREATE OR REPLACE PYTHON SCALAR SCRIPT database_migration."S3_GET_FILENAMES" ("force_http" BOOLEAN, "connection_name" VARCHAR(1024), "folder_name" VARCHAR(1024) UTF8, "generate_urls" BOOLEAN) 
+CREATE OR REPLACE PYTHON SCALAR SCRIPT DATABASE_MIGRATION."S3_GET_FILENAMES" ("force_http" BOOLEAN, "connection_name" VARCHAR(1024), "folder_name" VARCHAR(1024) UTF8, "generate_urls" BOOLEAN) 
 EMITS ("BUCKET_NAME" VARCHAR(1024) UTF8, "URL" VARCHAR(4096) UTF8, "LAST_MODIFIED" TIMESTAMP) AS
 import sys
 import glob
@@ -59,29 +57,118 @@ def run(ctx):
             ctx.emit(bucket_name, localpath, boto.utils.parse_ts(key.last_modified))
 /
 
+-- select DATABASE_MIGRATION.s3_get_filenames(true, 'S3_DEST', '', false);
+
+
+
+CREATE OR REPLACE LUA SCALAR SCRIPT DATABASE_MIGRATION.GET_CONNECTION_NAME(connection_name VARCHAR(2000))
+			RETURNS VARCHAR(20000) AS
+			function run(ctx)
+				url = exa.get_connection(ctx.connection_name).address
+				return url
+			end
+/
+
 ------------------------------------------------------------------------------------------------------------------------
 
 -- # parallel_connections: number of parallel files imported in one import statement
 -- # file_opts:			 search EXASolution_User_Manual for 'file_opts' to see all possible options
-CREATE OR REPLACE LUA SCRIPT database_migration.S3_PARALLEL_READ(execute_statements, connection_name,table_name,folder_name, parallel_connections, file_opts, force_http, generate_urls) RETURNS TABLE AS
-	
-    local pre = "IMPORT INTO " .. table_name .. " FROM CSV AT "..connection_name
+CREATE OR REPLACE LUA SCRIPT DATABASE_MIGRATION.S3_PARALLEL_READ(execute_statements, table_name, connection_name, folder_name, parallel_connections, file_opts, force_http, generate_urls) RETURNS TABLE AS
 
-    local res = query([[
-         select database_migration.s3_get_filenames(:fh,:c,:fn, :gu) order by 1
-    ]], {fh=force_http, c=connection_name, fn=folder_name, gu=generate_urls})
+------------------------------------------------------------------------------------------------------------------------
+-- returns the string between the two defined strings
+-- example: get_string_between('abcdef', 'ab', 'f') --> 'cde'
+function get_string_between(str, str_before, str_after)
+	_, start_pos = string.find(str, str_before)
+	end_pos = string.find(str, str_after)
+	return url.sub(str, start_pos+1, end_pos-1)
+end
+
+------------------------------------------------------------------------------------------------------------------------
+
+-- function for debugging, prints table
+function debug(table)
+	if table == nil or table[1] == nil or table[1][1] == nil then
+		return
+	end
+
+	output(string.rep('-',50))
+	for i = 1,#table do
+		tmp = ''
+		for j = 1,#table[i] do
+			tmp = tmp .. table[i][j] ..'	'
+		end
+		output(tmp)
+	end
+	output(string.rep('-',50))
+end
+
+
+------------------------------------------------------------------------------------------------------------------------
+
+
+	-- Create logging table for this bucket if not exists
+	-- Used to keep track of which files have already been imported
+	logging_schema = "S3_IMPORT_LOGGING"
+	script_schema = "DATABASE_MIGRATION"
+
+	status_done				='done'
+	waiting_for_update 		= 'waiting for update'
+	waiting_for_insertion 	= 'waiting for insertion'
+
+	res = query([[select ::ss.GET_CONNECTION_NAME(:c)]], {ss=script_schema, c=connection_name})
+	url = res[1][1]
+
+	bucket_name = get_string_between(url, '://', '.s3.')
+	-- create a regular name by removing special characters
+	logging_table = "LOG_".. string.gsub(bucket_name, "[^a-zA-Z0-9]", "")
+
+	query([[CREATE SCHEMA IF NOT EXISTS ::s]], {s=logging_schema})
 	
+	query([[CREATE TABLE IF NOT EXISTS ::s.::t (file_name varchar(2000), last_modified timestamp, status varchar(200))]],
+		{s=logging_schema, t=logging_table})
+
+
+	-- update logging table: for all new files, add an entry
+	-- for all existing files, update last_modified column and status column
+	query([[
+		merge into ::lt as l using 
+		( select DATABASE_MIGRATION.s3_get_filenames(:fh,:c,:fn, :gu) order by 1) as p
+		on p.url = l.file_name
+		WHEN MATCHED THEN UPDATE SET l.status = :wu, l.last_modified = p.last_modified where p.last_modified > l.last_modified or status not = :sd
+		WHEN NOT MATCHED THEN INSERT (file_name, last_modified, status) VALUES (p.url, p.last_modified, :wi);
+	]], {fh=force_http, c=connection_name, fn=folder_name, gu=generate_urls, lt=logging_table, sd=status_done, wu=waiting_for_update, wi=waiting_for_insertion})
+
+
+
+	-- get the bucket name and the file names of the files that should be modified
+    local res = query([[
+			select * from ::lt where status like 'waiting%'   
+    ]], {lt=logging_table})
+
+
+	if(#res == 0) then
+		exit({{}}, "queries varchar(2000000)") 
+	end
+	
+
+	-- generate query text for parallel import
     local queries = {}
     local stmt = ''
 	local s3_keys = ''
-
+    local pre = "IMPORT INTO " .. table_name .. " FROM CSV AT "..connection_name
 
     for i = 1, #res do
+
+		local curr_file_name 	= "'"..res[i][1].."'"
+		local curr_last_modified = res[i][2]
+		
+
         if math.fmod(i,parallel_connections) == 1 or parallel_connections == 1 then
             stmt = pre
         end
-        stmt = stmt .. "\n\tFILE '" .. res[i][2] .. "'"
-		s3_keys = s3_keys ..res[i][2]..", "
+        stmt = stmt .. "\n\tFILE " .. curr_file_name
+		s3_keys = s3_keys ..curr_file_name..", "
         if (math.fmod(i,parallel_connections) == 0 or i == #res) then
             stmt = stmt .. "\n\t"..file_opts..";"
 			-- remove the last comma from s3_keys
@@ -99,12 +186,23 @@ CREATE OR REPLACE LUA SCRIPT database_migration.S3_PARALLEL_READ(execute_stateme
 	local log_tbl = {}
 	for i = 1, #queries do
 		-- execute query
-		suc, res = pquery(queries[i][1])
+		curr_query = queries[i][1]
+		curr_files = queries[i][2]
+		suc, res = pquery(curr_query)
 		if not suc then
 			output(res.statement_text)
-			table.insert(log_tbl,{'Error while inserting: '.. res.error_message,queries[i][2],queries[i][i]})
+			status_error = 'Error: '.. res.error_message
+			query([[
+				update ::lt set status = :se
+				where file_name in (]]..curr_files..[[)
+			]],{lt=logging_table, se = status_error})
+			table.insert(log_tbl,{'Error while inserting: '.. res.error_message,curr_query, curr_files})
 		else	
-			table.insert(log_tbl,{'Inserted',queries[i][2], queries[i][1]})
+			query([[
+				update ::lt set status = :sd
+				where file_name in (]]..curr_files..[[)
+			]],{lt=logging_table, sd = status_done})
+			table.insert(log_tbl,{'Inserted',curr_query, curr_files})
 		end
 		
 	end
@@ -113,14 +211,16 @@ CREATE OR REPLACE LUA SCRIPT database_migration.S3_PARALLEL_READ(execute_stateme
 /
 
 
-execute script database_migration.s3_parallel_read(
-true						-- if true, statement is directly executed, if false only the text is generated
+execute script DATABASE_MIGRATION.s3_parallel_read(
+true						-- if true, statements are executed immediately, if false only statements are generated
+,'DATABASE_MIGRATION.test' 	-- schema and table name of the table you want to import into
 ,'S3_DEST'					-- connection name
-,'database_migration.test' 	-- schema and table name
-,'' 						-- folder name
+,'' 						-- folder name, if you want to import everything, leave blank
 ,2 							-- parallel connections
-,'ENCODING=''ASCII'' SKIP=1  ROW SEPARATOR = ''CRLF''' -- file options
+,'ENCODING=''ASCII'' SKIP=1  ROW SEPARATOR = ''CRLF''' -- file options, see manual, section 'import' for further information
 , true 						-- If true, use http instead of https
 , false						-- If true, urls are generated to access the S3 storage, if false, only key names are used
-);
+)
+-- with output
+;
 
