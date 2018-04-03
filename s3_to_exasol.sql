@@ -137,12 +137,11 @@ end
 	-- for all existing files, update last_modified column and status column
 	query([[
 		merge into ::ls.::lt as l using 
-		( select DATABASE_MIGRATION.s3_get_filenames(:fh,:c,:fn, :gu, :fi) order by 1) as p
+		( select ::ss.s3_get_filenames(:fh,:c,:fn, :gu, :fi) order by 1) as p
 		on p.url = l.file_name and p.bucket_name = l.bucket_name
 		WHEN MATCHED THEN UPDATE SET l.status = :wu, l.last_modified = p.last_modified where p.last_modified > l.last_modified or status not = :sd
 		WHEN NOT MATCHED THEN INSERT (bucket_name, file_name, last_modified, status) VALUES (p.bucket_name, p.url, p.last_modified, :wi);
-	]], {fh=force_http, c=connection_name, fn=folder_name, fi=filter_string, gu=generate_urls, ls=logging_schema, lt=logging_table, sd=status_done, wu=waiting_for_update, wi=waiting_for_insertion})
-
+	]], {ss=script_schema, fh=force_http, c=connection_name, fn=folder_name, fi=filter_string, gu=generate_urls, ls=logging_schema, lt=logging_table, sd=status_done, wu=waiting_for_update, wi=waiting_for_insertion})
 
 
 	-- get the bucket name and the file names of the files that should be modified
