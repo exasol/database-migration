@@ -59,7 +59,7 @@ def run(ctx):
             ctx.emit(bucket_name, localpath, boto.utils.parse_ts(key.last_modified))
 /
 
--- select DATABASE_MIGRATION.s3_get_filenames(true, 'S3_DEST', '', false);
+-- select DATABASE_MIGRATION.s3_get_filenames(true, 'S3_DEST', '', false, '');
 
 
 
@@ -129,26 +129,26 @@ end
 
 	query([[CREATE SCHEMA IF NOT EXISTS ::s]], {s=logging_schema})
 	
-	query([[CREATE TABLE IF NOT EXISTS ::s.::t (file_name varchar(2000), last_modified timestamp, status varchar(200))]],
+	query([[CREATE TABLE IF NOT EXISTS ::s.::t (bucket_name varchar(2000), file_name varchar(2000), last_modified timestamp, status varchar(200))]],
 		{s=logging_schema, t=logging_table})
 
 
 	-- update logging table: for all new files, add an entry
 	-- for all existing files, update last_modified column and status column
 	query([[
-		merge into ::lt as l using 
+		merge into ::ls.::lt as l using 
 		( select DATABASE_MIGRATION.s3_get_filenames(:fh,:c,:fn, :gu, :fi) order by 1) as p
-		on p.url = l.file_name 
+		on p.url = l.file_name and p.bucket_name = l.bucket_name
 		WHEN MATCHED THEN UPDATE SET l.status = :wu, l.last_modified = p.last_modified where p.last_modified > l.last_modified or status not = :sd
-		WHEN NOT MATCHED THEN INSERT (file_name, last_modified, status) VALUES (p.url, p.last_modified, :wi);
-	]], {fh=force_http, c=connection_name, fn=folder_name, fi=filter_string, gu=generate_urls, lt=logging_table, sd=status_done, wu=waiting_for_update, wi=waiting_for_insertion})
+		WHEN NOT MATCHED THEN INSERT (bucket_name, file_name, last_modified, status) VALUES (p.bucket_name, p.url, p.last_modified, :wi);
+	]], {fh=force_http, c=connection_name, fn=folder_name, fi=filter_string, gu=generate_urls, ls=logging_schema, lt=logging_table, sd=status_done, wu=waiting_for_update, wi=waiting_for_insertion})
 
 
 
 	-- get the bucket name and the file names of the files that should be modified
     local res = query([[
-			select * from ::lt where status like 'waiting%'   
-    ]], {lt=logging_table})
+			select * from ::ls.::lt where status like 'waiting%'   
+    ]], {ls=logging_schema, lt=logging_table})
 
 
 	if(#res == 0) then
@@ -163,9 +163,9 @@ end
     local pre = "IMPORT INTO ".. schema_name.. ".".. table_name .. " FROM CSV AT "..connection_name
 
     for i = 1, #res do
-
-		local curr_file_name 	= "'"..res[i][1].."'"
-		local curr_last_modified = res[i][2]
+		local curr_bucket_name = res[i][1]
+		local curr_file_name 	= "'"..res[i][2].."'"
+		local curr_last_modified = res[i][3]
 		
 
         if math.fmod(i,parallel_connections) == 1 or parallel_connections == 1 then
@@ -177,7 +177,7 @@ end
             stmt = stmt .. "\n\t"..file_opts..";"
 			-- remove the last comma from s3_keys
 			s3_keys = string.sub(s3_keys, 0, #s3_keys -2)
-            table.insert(queries,{stmt, s3_keys})
+            table.insert(queries,{stmt, bucket_name, s3_keys})
 			s3_keys = ''
         end
     end
@@ -191,21 +191,22 @@ end
 	for i = 1, #queries do
 		-- execute query
 		curr_query = queries[i][1]
-		curr_files = queries[i][2]
+		curr_bucket = queries[i][2]
+		curr_files = queries[i][3]
 		suc, res = pquery(curr_query)
 		if not suc then
 			output(res.statement_text)
 			status_error = 'Error: '.. res.error_message
 			query([[
-				update ::lt set status = :se
-				where file_name in (]]..curr_files..[[)
-			]],{lt=logging_table, se = status_error})
+				update ::ls.::lt set status = :se
+				where file_name in (]]..curr_files..[[) and bucket_name = :b
+			]],{ls=logging_schema, lt=logging_table, se=status_error, b=curr_bucket})
 			table.insert(log_tbl,{'Error while inserting: '.. res.error_message,curr_query, curr_files})
 		else	
 			query([[
-				update ::lt set status = :sd
-				where file_name in (]]..curr_files..[[)
-			]],{lt=logging_table, sd = status_done})
+				update ::ls.::lt set status = :sd
+				where file_name in (]]..curr_files..[[) and bucket_name = :b
+			]],{ls=logging_schema, lt=logging_table, sd = status_done, b=curr_bucket})
 			table.insert(log_tbl,{'Inserted',curr_query, curr_files})
 		end
 		
