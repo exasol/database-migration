@@ -1,6 +1,6 @@
 CREATE SCHEMA IF NOT EXISTS DATABASE_MIGRATION;
 
-CREATE OR REPLACE PYTHON SCALAR SCRIPT DATABASE_MIGRATION."S3_GET_FILENAMES" ("force_http" BOOLEAN, "connection_name" VARCHAR(1024), "folder_name" VARCHAR(1024) UTF8, "generate_urls" BOOLEAN) 
+CREATE OR REPLACE PYTHON SCALAR SCRIPT DATABASE_MIGRATION."S3_GET_FILENAMES" ("force_http" BOOLEAN, "connection_name" VARCHAR(1024), "folder_name" VARCHAR(1024) UTF8, "generate_urls" BOOLEAN, "filter_string" VARCHAR(1024)) 
 EMITS ("BUCKET_NAME" VARCHAR(1024) UTF8, "URL" VARCHAR(4096) UTF8, "LAST_MODIFIED" TIMESTAMP) AS
 import sys
 import glob
@@ -44,6 +44,8 @@ def run(ctx):
     bucket = s3conn.get_bucket(bucket_name)
     rs = bucket.list(prefix=ctx.folder_name)
     for key in rs:
+      # if not ctx.filter_string checks for empty string
+      if not ctx.filter_string or ctx.filter_string in key.name:
         # http://stackoverflow.com/questions/9954521/s3-boto-list-keys-sometimes-returns-directory-key
         if not key.name.endswith('/'):
             if ctx.generate_urls:
@@ -73,7 +75,7 @@ CREATE OR REPLACE LUA SCALAR SCRIPT DATABASE_MIGRATION.GET_CONNECTION_NAME(conne
 
 -- # parallel_connections: number of parallel files imported in one import statement
 -- # file_opts:			 search EXASolution_User_Manual for 'file_opts' to see all possible options
-CREATE OR REPLACE LUA SCRIPT DATABASE_MIGRATION.S3_PARALLEL_READ(execute_statements, table_name, connection_name, folder_name, parallel_connections, file_opts, force_http, generate_urls) RETURNS TABLE AS
+CREATE OR REPLACE LUA SCRIPT DATABASE_MIGRATION.S3_PARALLEL_READ(execute_statements, schema_name, table_name, connection_name, folder_name, filter_string, parallel_connections, file_opts, force_http, generate_urls) RETURNS TABLE AS
 
 ------------------------------------------------------------------------------------------------------------------------
 -- returns the string between the two defined strings
@@ -121,7 +123,9 @@ end
 
 	bucket_name = get_string_between(url, '://', '.s3.')
 	-- create a regular name by removing special characters
-	logging_table = "LOG_".. string.gsub(bucket_name, "[^a-zA-Z0-9]", "")
+	-- logging_table = "LOG_".. string.gsub(bucket_name, "[^a-zA-Z0-9]", "")
+	logging_table = "LOG_".. schema_name .. "_" .. table_name
+
 
 	query([[CREATE SCHEMA IF NOT EXISTS ::s]], {s=logging_schema})
 	
@@ -133,11 +137,11 @@ end
 	-- for all existing files, update last_modified column and status column
 	query([[
 		merge into ::lt as l using 
-		( select DATABASE_MIGRATION.s3_get_filenames(:fh,:c,:fn, :gu) order by 1) as p
-		on p.url = l.file_name
+		( select DATABASE_MIGRATION.s3_get_filenames(:fh,:c,:fn, :gu, :fi) order by 1) as p
+		on p.url = l.file_name 
 		WHEN MATCHED THEN UPDATE SET l.status = :wu, l.last_modified = p.last_modified where p.last_modified > l.last_modified or status not = :sd
 		WHEN NOT MATCHED THEN INSERT (file_name, last_modified, status) VALUES (p.url, p.last_modified, :wi);
-	]], {fh=force_http, c=connection_name, fn=folder_name, gu=generate_urls, lt=logging_table, sd=status_done, wu=waiting_for_update, wi=waiting_for_insertion})
+	]], {fh=force_http, c=connection_name, fn=folder_name, fi=filter_string, gu=generate_urls, lt=logging_table, sd=status_done, wu=waiting_for_update, wi=waiting_for_insertion})
 
 
 
@@ -156,7 +160,7 @@ end
     local queries = {}
     local stmt = ''
 	local s3_keys = ''
-    local pre = "IMPORT INTO " .. table_name .. " FROM CSV AT "..connection_name
+    local pre = "IMPORT INTO ".. schema_name.. ".".. table_name .. " FROM CSV AT "..connection_name
 
     for i = 1, #res do
 
@@ -207,20 +211,21 @@ end
 		
 	end
 
-	exit(log_tbl, "status varchar(200),files varchar(20000), executed_queries varchar(2000000)")
+	exit(log_tbl, "status varchar(200),executed_queries varchar(20000),files  varchar(2000000)")
 /
 
 
 execute script DATABASE_MIGRATION.s3_parallel_read(
 true						-- if true, statements are executed immediately, if false only statements are generated
-,'DATABASE_MIGRATION.test' 	-- schema and table name of the table you want to import into
+,'DATABASE_MIGRATION'		-- name of the schema that includes the table you want to import into
+,'test' 					-- name of the table you want to import into
 ,'S3_DEST'					-- connection name
-,'' 						-- folder name, if you want to import everything, leave blank
+,'first_folder/' 			-- folder name, if you want to import everything, leave blank
+, ''					    -- filter for file-names, optional. if you want to include all files, put '', for filtering put something like: 'pref'
 ,2 							-- parallel connections
 ,'ENCODING=''ASCII'' SKIP=1  ROW SEPARATOR = ''CRLF''' -- file options, see manual, section 'import' for further information
 , true 						-- If true, use http instead of https
 , false						-- If true, urls are generated to access the S3 storage, if false, only key names are used
 )
--- with output
 ;
 
