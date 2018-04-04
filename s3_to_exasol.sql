@@ -115,6 +115,10 @@ end
 	force_http = false
 	script_schema = 'DATABASE_MIGRATION'
 
+	logging_schema = quote(logging_schema)
+	schema_name = quote(schema_name)
+	table_name = quote(table_name)
+
 	status_done				='done'
 	waiting_for_update 		= 'waiting for update'
 	waiting_for_insertion 	= 'waiting for insertion'
@@ -125,7 +129,7 @@ end
 	bucket_name = get_string_between(url, '://', '.s3.')
 	-- create a regular name by removing special characters
 	-- logging_table = "LOG_".. string.gsub(bucket_name, "[^a-zA-Z0-9]", "")
-	logging_table = "LOG_".. schema_name .. "_" .. table_name
+	logging_table = [["LOG_]].. string.gsub(schema_name, "[^a-zA-Z0-9]", "") .. [[_]] .. string.gsub(table_name, "[^a-zA-Z0-9]", "")..[["]]
 
 
 	-- query([[CREATE SCHEMA IF NOT EXISTS ::s]], {s=logging_schema})
@@ -134,7 +138,8 @@ end
 		{s=logging_schema, t=logging_table})
 
 	if(force_reload) then
-		query([[TRUNCATE TABLE ::s.::t]],{s= logging_schema, t= logging_table})
+		query([[TRUNCATE TABLE ::ls.::lt]],{ls= logging_schema, lt= logging_table})
+		query([[TRUNCATE TABLE ::s.::t]],{s= schema_name, t= table_name})
 	end
 
 
@@ -227,7 +232,7 @@ CREATE CONNECTION S3_MY_BUCKETNAME
 
 execute script DATABASE_MIGRATION.s3_parallel_read(
 true						-- if true, statements are executed immediately, if false only statements are generated
-, true						-- force reload: if true, all files in bucket will be loaded, even if they've been imported before
+, true						-- force reload: if true, table and logging table will be truncated, all files in bucket will be loaded again
 , 'S3_IMPORT_LOGGING'		-- schema you want to use for the logging tables
 ,'PRODUCT'					-- name of the schema that holds the table you want to import into
 ,'test' 					-- name of the table you want to import into
