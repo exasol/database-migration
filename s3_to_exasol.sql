@@ -61,7 +61,8 @@ def run(ctx):
 
 -- select DATABASE_MIGRATION.s3_get_filenames(true, 'S3_DEST', '', false, '');
 
-
+------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------
 
 CREATE OR REPLACE LUA SCALAR SCRIPT DATABASE_MIGRATION.GET_CONNECTION_NAME(connection_name VARCHAR(2000))
 			RETURNS VARCHAR(20000) AS
@@ -72,10 +73,11 @@ CREATE OR REPLACE LUA SCALAR SCRIPT DATABASE_MIGRATION.GET_CONNECTION_NAME(conne
 /
 
 ------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------
 
 -- # parallel_connections: number of parallel files imported in one import statement
 -- # file_opts:			 search EXASolution_User_Manual for 'file_opts' to see all possible options
-CREATE OR REPLACE LUA SCRIPT DATABASE_MIGRATION.S3_PARALLEL_READ(execute_statements, force_reload, logging_schema, script_schema, schema_name, table_name, connection_name, folder_name, filter_string, parallel_connections, file_opts, force_http, generate_urls) RETURNS TABLE AS
+CREATE OR REPLACE LUA SCRIPT DATABASE_MIGRATION.S3_PARALLEL_READ(execute_statements, force_reload, logging_schema, schema_name, table_name, connection_name, folder_name, filter_string, parallel_connections, file_opts) RETURNS TABLE AS
 
 ------------------------------------------------------------------------------------------------------------------------
 -- returns the string between the two defined strings
@@ -108,6 +110,10 @@ end
 
 ------------------------------------------------------------------------------------------------------------------------
 
+	-- additional parameters that won't need to be modified normally
+	generate_urls = false
+	force_http = false
+	script_schema = 'DATABASE_MIGRATION'
 
 	status_done				='done'
 	waiting_for_update 		= 'waiting for update'
@@ -214,21 +220,22 @@ end
 	exit(log_tbl, "status varchar(200),executed_queries varchar(20000),files  varchar(2000000)")
 /
 
+CREATE CONNECTION S3_MY_BUCKETNAME
+    TO 'http://my_bucketname.s3.my_region.amazonaws.com' -- my_region could e.g. be eu-west-1
+    USER 'my_access_key' -- optional, if you don't need user and password, just delete these two lines
+    IDENTIFIED BY 'my_secret_key';
 
 execute script DATABASE_MIGRATION.s3_parallel_read(
 true						-- if true, statements are executed immediately, if false only statements are generated
-, false						-- force reload: if true, all files in bucket will be loaded, even if they've been imported before
+, true						-- force reload: if true, all files in bucket will be loaded, even if they've been imported before
 , 'S3_IMPORT_LOGGING'		-- schema you want to use for the logging tables
-, 'DATABASE_MIGRATION'		-- schema that contains the scripts "S3_GET_FILENAMES" and "GET_CONNECTION_NAME"
 ,'PRODUCT'					-- name of the schema that holds the table you want to import into
 ,'test' 					-- name of the table you want to import into
-,'S3_DEST'					-- connection name
-,'first_folder/' 			-- folder name, if you want to import everything, leave blank
-, ''					    -- filter for file-names, optional. if you want to include all files, put '', for filtering put something like: 'pref'
-,2 							-- parallel connections
+,'S3_MY_BUCKETNAME'			-- connection name ( see statement above)
+,'my_project/' 				-- folder name, if you want to import everything, leave blank
+, ''					    -- filter for file-names, to include all files, put empty string, for using only files that include the word banana, put: 'banana'
+,2 							-- number of parallel connections you want to use
 ,'ENCODING=''ASCII'' SKIP=1  ROW SEPARATOR = ''CRLF''' -- file options, see manual, section 'import' for further information
-, true 						-- If true, use http instead of https
-, false						-- If true, urls are generated to access the S3 storage, if false, only key names are used
 )
 ;
 
