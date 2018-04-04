@@ -41,7 +41,7 @@ def s3_connection_helper(connection_name):
 def run(ctx):
     
     s3conn, bucket_name = s3_connection_helper(ctx.connection_name)
-    bucket = s3conn.get_bucket(bucket_name)
+    bucket = s3conn.get_bucket(bucket_name,validate=False)
     rs = bucket.list(prefix=ctx.folder_name)
     for key in rs:
       # if not ctx.filter_string checks for empty string
@@ -75,7 +75,7 @@ CREATE OR REPLACE LUA SCALAR SCRIPT DATABASE_MIGRATION.GET_CONNECTION_NAME(conne
 
 -- # parallel_connections: number of parallel files imported in one import statement
 -- # file_opts:			 search EXASolution_User_Manual for 'file_opts' to see all possible options
-CREATE OR REPLACE LUA SCRIPT DATABASE_MIGRATION.S3_PARALLEL_READ(execute_statements, schema_name, table_name, connection_name, folder_name, filter_string, parallel_connections, file_opts, force_http, generate_urls) RETURNS TABLE AS
+CREATE OR REPLACE LUA SCRIPT DATABASE_MIGRATION.S3_PARALLEL_READ(execute_statements, force_reload, logging_schema, script_schema, schema_name, table_name, connection_name, folder_name, filter_string, parallel_connections, file_opts, force_http, generate_urls) RETURNS TABLE AS
 
 ------------------------------------------------------------------------------------------------------------------------
 -- returns the string between the two defined strings
@@ -109,11 +109,6 @@ end
 ------------------------------------------------------------------------------------------------------------------------
 
 
-	-- Create logging table for this bucket if not exists
-	-- Used to keep track of which files have already been imported
-	logging_schema = "S3_IMPORT_LOGGING"
-	script_schema = "DATABASE_MIGRATION"
-
 	status_done				='done'
 	waiting_for_update 		= 'waiting for update'
 	waiting_for_insertion 	= 'waiting for insertion'
@@ -127,10 +122,14 @@ end
 	logging_table = "LOG_".. schema_name .. "_" .. table_name
 
 
-	query([[CREATE SCHEMA IF NOT EXISTS ::s]], {s=logging_schema})
+	-- query([[CREATE SCHEMA IF NOT EXISTS ::s]], {s=logging_schema})
 	
 	query([[CREATE TABLE IF NOT EXISTS ::s.::t (bucket_name varchar(2000), file_name varchar(2000), last_modified timestamp, status varchar(200))]],
 		{s=logging_schema, t=logging_table})
+
+	if(force_reload) then
+		query([[TRUNCATE TABLE ::s.::t]],{s= logging_schema, t= logging_table})
+	end
 
 
 	-- update logging table: for all new files, add an entry
@@ -151,7 +150,7 @@ end
 
 
 	if(#res == 0) then
-		exit({{}}, "queries varchar(2000000)") 
+		exit({{'No queries generated, either bucket is empty or files have already been imported'}}, "message varchar(2000000)") 
 	end
 	
 
@@ -186,6 +185,7 @@ end
 		exit(queries, "queries varchar(2000000)")
 	end
 
+
 	local log_tbl = {}
 	for i = 1, #queries do
 		-- execute query
@@ -217,7 +217,10 @@ end
 
 execute script DATABASE_MIGRATION.s3_parallel_read(
 true						-- if true, statements are executed immediately, if false only statements are generated
-,'DATABASE_MIGRATION'		-- name of the schema that includes the table you want to import into
+, false						-- force reload: if true, all files in bucket will be loaded, even if they've been imported before
+, 'S3_IMPORT_LOGGING'		-- schema you want to use for the logging tables
+, 'DATABASE_MIGRATION'		-- schema that contains the scripts "S3_GET_FILENAMES" and "GET_CONNECTION_NAME"
+,'PRODUCT'					-- name of the schema that holds the table you want to import into
 ,'test' 					-- name of the table you want to import into
 ,'S3_DEST'					-- connection name
 ,'first_folder/' 			-- folder name, if you want to import everything, leave blank
