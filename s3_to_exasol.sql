@@ -107,17 +107,60 @@ function debug(table)
 	output(string.rep('-',50))
 end
 
+------------------------------------------------------------------------------------------------------------------------
+-- type: 'table' or 'schema'
+-- name: name of the table/ schema you want to check
+-- returns true if object exists, false if it doesn't exist, second return parameter is error message you can output
+function check_exists(type,name)
+
+	-- schema
+	if type == 'schema' or type == 's' then
+		res = query([[select current_schema]])
+		curr_schem = res[1][1]
+		suc_schem, res = pquery([[open schema ::s]], {s=name})
+		-- restore old schema
+		if curr_schem == null then
+			query([[close schema]])
+		else
+			query([[open schema ::cs]],{cs=curr_schem})
+		end
+		-- check if schema named 'name' existed
+		if suc_schem then 
+			return true, 'Schema '..name..' already exists'
+		else
+		 	return false, 'Schema '..name..' does not exist'
+		end
+	end
+	-- table  for table names you should add the schema
+	-- like this: check_name('table', 'my_schema.my_table')
+	if type == 'table' or type == 't' then
+		suc, res = pquery([[desc ::t]],{t=name})
+		if suc then 
+			return true, 'Table '..name..' already exists'
+		else
+		 	return false, 'Table '..name..' does not exist'
+		end
+	end
+end
 
 ------------------------------------------------------------------------------------------------------------------------
 
 	-- additional parameters that won't need to be modified normally
 	generate_urls = false
 	force_http = false
-	script_schema = 'DATABASE_MIGRATION'
+	script_schema = quote(exa.meta.script_schema)
 
+	-- quote everything to handle case sensitivity
 	logging_schema = quote(logging_schema)
 	schema_name = quote(schema_name)
 	table_name = quote(table_name)
+
+	ex, msg = check_exists('schema', logging_schema)
+	if not ex then error(msg) end
+
+	ex, msg = check_exists('table', schema_name..'.'..table_name)
+	if not ex then error(msg) end
+
 
 	status_done				='done'
 	waiting_for_update 		= 'waiting for update'
@@ -128,11 +171,8 @@ end
 
 	bucket_name = get_string_between(url, '://', '.s3.')
 	-- create a regular name by removing special characters
-	-- logging_table = "LOG_".. string.gsub(bucket_name, "[^a-zA-Z0-9]", "")
 	logging_table = [["LOG_]].. string.gsub(schema_name, "[^a-zA-Z0-9]", "") .. [[_]] .. string.gsub(table_name, "[^a-zA-Z0-9]", "")..[["]]
 
-
-	-- query([[CREATE SCHEMA IF NOT EXISTS ::s]], {s=logging_schema})
 	
 	query([[CREATE TABLE IF NOT EXISTS ::s.::t (bucket_name varchar(2000), file_name varchar(2000), last_modified timestamp, status varchar(200))]],
 		{s=logging_schema, t=logging_table})

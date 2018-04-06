@@ -11,3 +11,12 @@ names and types.
 
 If you want to optimize existing scripts or create new scripts for additional systems, we would be very 
 glad if you share your work with the EXASOL user community.
+
+
+### Folder: Post load optimization
+- Optimize the column's datatypes to minimize storage space on disk
+- Import primary keys from other databases
+
+
+### Folder: Delta import
+- Import only data that hasn't been imported yet by performing a delta import
