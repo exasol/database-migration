@@ -1,5 +1,5 @@
---the delta_import script is designed to do a delta-load (updated or new rows) with the import statement.
---to merge updated news into the destination table primary keys are used and are expected in the exasolution (primary keys can be deactivated / only metadata)
+--the delta_import script is designed to do a delta-load with the import statement, in order to load only new columns.
+--to merge updated rows into the destination table primary keys are used and are expected for the destination table (primary keys can be deactivated / only metadata)
 --in case there is no update column or primary keys -> a full load of the table is done.
 
 --conn_type: connection type -> one of the connection types the import statement support -> e.g. JDBC (to use with a generic database), EXA, ORA
