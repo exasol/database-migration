@@ -49,7 +49,8 @@ execute script database_migration.delta_import(
 'DELTA_STAGING' -- staging_schema_name
 );
 ```
-Table __employees__ will be truncated, all 5 rows will be loaded once again.
 
-For table __employees_with_pk__ only the rows with id 4 and 5 will be loaded
+Result:
+- Table __employees__ will be truncated, all 5 rows will be loaded once again.
+- For table __employees_with_pk__ only the rows with id 4 and 5 will be loaded
 
