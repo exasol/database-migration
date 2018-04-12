@@ -174,7 +174,7 @@ end
 	logging_table = [["LOG_]].. string.gsub(schema_name, "[^a-zA-Z0-9]", "") .. [[_]] .. string.gsub(table_name, "[^a-zA-Z0-9]", "")..[["]]
 
 	
-	query([[CREATE TABLE IF NOT EXISTS ::s.::t (bucket_name varchar(2000), file_name varchar(2000), last_modified timestamp, status varchar(200))]],
+	query([[CREATE TABLE IF NOT EXISTS ::s.::t (bucket_name varchar(20000), file_name varchar(20000), last_modified timestamp, status varchar(20000))]],
 		{s=logging_schema, t=logging_table})
 
 	if(force_reload) then
@@ -262,7 +262,7 @@ end
 		
 	end
 
-	exit(log_tbl, "status varchar(200),executed_queries varchar(20000),files  varchar(2000000)")
+	exit(log_tbl, "status varchar(20000),executed_queries varchar(2000000),files  varchar(2000000)")
 /
 
 CREATE CONNECTION S3_MY_BUCKETNAME
