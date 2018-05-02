@@ -1,27 +1,171 @@
-# database-migration
+# Database migration
 
-###### Please note that this is an open source project which is *not officially supported* by EXASOL. We will try to help you as much as possible, but can't guarantee anything since this is not an official EXASOL product.
+###### Please note that this is an open source project which is *not officially supported* by Exasol. We will try to help you as much as possible, but can't guarantee anything since this is not an official Exasol product.
 
 ## Table of Contents
 1. [Overview](#overview)
-2. [Post load optimization](#post-load-optimization)
-3. [Delta import](#delta-import)
+2. [Migration source:](#migration-source)
+    * [CSV](#csv)
+    * [DB2](#db2)
+    * [Exasol](#exasol)
+    * [MySQL](#mysql)
+    * [Oracle](#oracle)
+    * [PostgreSQL](#postgres)
+    * [Redshift](#redshift)
+    * [S3](#s3)
+    * [SQL Server](#sqlserver)
+    * [Teradata](#teradata)
+    * [Vectorwise](#vectorwise)
+    * [Vertica](#vertica)
+3. [Post-load optimization](#post-load-optimization)
+4. [Delta import](#delta-import)
 
 
 ## Overview
 
-This project contains SQL scripts for automatically importing data from various data management systems into EXASOL.
+This project contains SQL scripts for automatically importing data from various data management systems into Exasol.
 
-You'll find a list of SQL scripts which you can execute on EXASOL to load data from certain databases or
-database management systems. The scripts try to extract the meta data from the sources and create the
-appropriate IMPORT statements automatically so that you don't have to care about table names and column
-names and types.
+You'll find SQL scripts which you can execute on Exasol to load data from certain databases or
+database management systems. The scripts try to extract the meta data from the source system and create the appropriate IMPORT statements automatically so that you don't have to care about table names, column names and types.
 
-If you want to optimize existing scripts or create new scripts for additional systems, we would be very
-glad if you share your work with the EXASOL user community.
+If you want to optimize existing scripts or create new scripts for additional systems, we would be very glad if you share your work with the Exasol user community.
 
+## Migration source
+### CSV
+The method of importing a CSV file depends on the location of the file.
+- Import a file stored on your **local machine** via EXAplus:
+```sql
+IMPORT INTO <table> FROM LOCAL CSV FILE '<filename>' <options>;
+```
+- Import from **HDFS**: See [SOL-322](https://www.exasol.com/support/browse/SOL-322)
 
-## Post load optimization
+- Import from **S3**: See [Exasol-1774](https://www.exasol.com/support/browse/Exasol-1774) for single file import, for importing multiple files scroll down to [S3](#s3)
+
+For more details on `IMPORT` see paragraph 2.2.2 of the User Manual
+
+### DB2
+See script [db2_to_exasol.sql](db2_to_exasol.sql)
+### Exasol
+See script [exasol_to_exasol.sql](exasol_to_exasol.sql)
+### MySQL
+
+Create a connection:
+```SQL
+CREATE CONNECTION <name_of_connection>
+TO 'jdbc:mysql://192.168.137.5:3306'
+USER '<user>'
+IDENTIFIED BY '<password>';
+```
+
+Test your connection:
+```SQL
+SELECT * FROM
+(
+IMPORT FROM JDBC AT <name_of_connection>
+STATEMENT 'SELECT 42 FROM DUAL'
+);
+```
+
+Then you're ready to use the migration script: [mysql_to_exasol.sql](mysql_to_exasol.sql)
+
+### Oracle
+When importing from Oracle, you have two options. You could import via JDBC or the  native Oracle interface (OCI).
+- OCI: Log in to EXAoperation. Go to *Configuration -> Software*. Download the instant client from Oracle and select it at `Software Update File`. Click `Submit` to upload.
+
+  Create a connection:
+  ```SQL
+  CREATE CONNECTION <name_of_connection>
+  	TO 'jdbc:oracle:thin:@//192.168.99.100:1521/xe'
+  	USER '<user>'
+    IDENTIFIED BY '<password>';
+  ```
+
+- JDBC: If you are using the community edition, you need to upload a JDBC driver in EXAoperation before being able to establish a connection, see [SOL-179](https://www.exasol.com/support/browse/SOL-179).
+
+  Create a connection:
+  ``` SQL
+  CREATE CONNECTION <name_of_connection>
+  	TO '192.168.99.100:1521/xe'
+    USER '<user>'
+    IDENTIFIED BY '<password>';
+  ```
+
+Test your connection:
+```SQL
+SELECT * FROM
+(
+IMPORT FROM <conn_type> AT <name_of_connection>
+STATEMENT 'SELECT 42 FROM DUAL'
+);
+```
+`<con_type>` is either`JDBC` or `ORA`, depending on your connection
+
+Then you're ready to use the migration script: [oracle_to_exasol.sql](oracle_to_exasol.sql)
+
+### PostgreSQL
+See script [postgres_to_exasol.sql](postgres_to_exasol.sql)
+
+### Redshift
+See script [redshift_to_exasol.sql](redshift_to_exasol.sql)
+
+### S3
+The script [s3_to_exasol.sql](s3_to_exasol.sql) looks different than the other import scripts. It's made to load data from S3 in parallel and needs some preparation before you can use it. See [SOL-594](https://www.exasol.com/support/browse/SOL-594) for detailed instructions.
+If you just want to import a single file, see 'Import from [CSV](#csv)' above.
+
+### SQL Server
+See script [sqlserver_to_exasol.sql](sqlserver_to_exasol.sql)
+
+### Teradata
+The first thing you need to do is add the Teradata JDBC driver to Exasol. The driver can be downloaded from
+[Teradata's Download site](http://downloads.teradata.com/download/connectivity/jdbc-driver). You need to register
+first, it's free. Make sure that you download the right version of the JDBC driver, matching the version of the
+Teradata database.
+
+The downloaded package contains two files:
+* `terajdbc4.jar` contains the actual Java classes of the driver
+* `tdgssconfig.jar` includes configuration information for Teradata's Generic Security Services (GSS)
+
+Both files will need to be uploaded when you add the Teradata JDBC driver for Exasol. To do this, log into
+EXAoperations, then select _Software_, then the _JDBC Drivers_ tab.
+
+Click ` Add ` then specify the following details:
+* Driver Name: `Teradata` (or something similar)
+* Main Class: `com.teradata.jdbc.TeraDriver`
+* Prefix: `jdbc:teradata:`
+* Comment: `Version 15.10` (or something similar)
+
+After clicking ` Apply `, you will see the newly added driver's details on the top section of the driver list.
+Select the Teradata driver (the radio button in the first column) and then locate the `terajdbc4.jar` and upload it;
+do the same with `tdgssconfig.jar`. When done, both .jar files should be listed in the _Files_ column for the Teradata driver.
+
+Next step is to test the connectivity. First, create a connection to the remote Teradata database:
+```SQL
+    CREATE OR REPLACE CONNECTION <name_of_connection>
+        TO 'jdbc:teradata://<host_name_or_ip_address>'
+        USER '<td_username>'
+        IDENTIFIED BY '<td_password>';
+```
+You need to have `CREATE CONNECTION` privilege granted to the user used to do this.
+Additional JDBC connection parameters (such as `CHARSET` might need to be specified in the connection string/URL); see information
+on these [here](http://developer.teradata.com/doc/connectivity/jdbc/reference/current/frameset.html).
+
+Now, test the connectivity with a simple query:
+```SQL
+    SELECT *
+    FROM   (
+               IMPORT FROM JDBC AT <name_of_connection>
+               STATEMENT 'SELECT 1'
+           );
+```
+For the actual data-migration, see script [teradata_to_exasol.sql](teradata_to_exasol.sql)
+
+### Vectorwise
+See script [vectorwise_to_exasol.sql](vectorwise_to_exasol.sql)
+
+### Vertica
+See script [vertica_to_exasol.sql](vertica_to_exasol.sql)
+
+## Post-load optimization
 This folder contains scripts that can be used after having imported data from another database via the scripts above.
 What they do:
 - Optimize the column's datatypes to minimize storage space on disk
