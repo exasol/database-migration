@@ -41,7 +41,7 @@ IMPORT INTO <table> FROM LOCAL CSV FILE '<filename>' <options>;
 
 - Import from **S3**: See [Exasol-1774](https://www.exasol.com/support/browse/Exasol-1774) for single file import, for importing multiple files scroll down to [S3](#s3)
 
-For more details on `IMPORT` see paragraph 2.2.2 of the User Manual
+For more details on `IMPORT` see paragraph 2.2.2 in the User Manual. For further help on typical CSV-formatting issues, see [SOL-578](https://www.exasol.com/support/browse/SOL-578).
 
 ### DB2
 See script [db2_to_exasol.sql](db2_to_exasol.sql)
