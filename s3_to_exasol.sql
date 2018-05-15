@@ -166,6 +166,10 @@ end
 	waiting_for_update 		= 'waiting for update'
 	waiting_for_insertion 	= 'waiting for insertion'
 
+	-- acquire write lock on the table to prevent transactioin conflicts
+	query([[DELETE FROM ::s.::t WHERE FALSE]], {s=schema_name, t=table_name})
+
+
 	res = query([[select ::ss.GET_CONNECTION_NAME(:c)]], {ss=script_schema, c=connection_name})
 	url = res[1][1]
 
