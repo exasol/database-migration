@@ -284,9 +284,6 @@ end
 	exit(overall_res, "schema_name char("..length_schema.."), table_name char("..length_table.."), column_name char("..length_column.."),success char("..length_success.."), actions char("..length_actions..")")
 /
 
-------------------------------------------------------------------------------------------------------
----------------------- EXAMPLE FOR USAGE OF SCRIPT ---------------------------------------------------
-------------------------------------------------------------------------------------------------------
 create schema if not exists DATATYPES;
 
 CREATE OR REPLACE TABLE DATATYPES.DATATYPE_TEST (
