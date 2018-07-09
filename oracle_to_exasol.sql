@@ -162,10 +162,10 @@ success, res = pquery([[with ora_cols as(
 	),
 	cr_schema as (
 		with EXA_SCHEMAS as (select distinct EXA_SCHEMA_NAME as EXA_SCHEMA from ora_base )
-			select 'create schema "' ||  EXA_SCHEMA ||'";' as cr_schema from EXA_SCHEMAS
+			select 'create schema if not exists "' ||  EXA_SCHEMA ||'";' as cr_schema from EXA_SCHEMAS
 	),
 	cr_tables as (
-		select 'create table "' || EXA_SCHEMA_NAME || '"."' || EXA_TABLE_NAME || '" ( 
+		select 'create or replace table "' || EXA_SCHEMA_NAME || '"."' || EXA_TABLE_NAME || '" ( 
 ' || cols || '
 )
 ;' as tbls from 
@@ -185,7 +185,8 @@ success, res = pquery([[with ora_cols as(
 			when data_type like 'TIMESTAMP(%)%' or data_type like 'TIMESTAMP' then '"' || EXA_COLUMN_NAME || '"' || ' ' ||  'timestamp'
 			when data_type like 'TIMESTAMP%WITH%TIME%ZONE%' then '"' || EXA_COLUMN_NAME || '"' || ' ' ||  'timestamp' 
 			when data_type = 'BOOLEAN' then '"' || EXA_COLUMN_NAME || '"' || ' ' ||  'boolean'
-			else '--UNSUPPORTED DATATYPE IN COLUMN ' || EXA_COLUMN_NAME || ' Oracle Datatype: ' || data_type  end
+			-- Fallback for unsupported data types
+			else '"' || EXA_COLUMN_NAME || '"' || ' ' ||  'varchar(2000000) /* UNSUPPORTED DATA TYPE : ' || data_type || ' */ '  end
 			
 		|| case when identity_column='YES' then ' IDENTITY' end
 		|| case when nullable='N' then ' NOT NULL' end
@@ -211,7 +212,7 @@ success, res = pquery([[with ora_cols as(
 			when data_type like 'TIMESTAMP(%)%' or data_type like 'TIMESTAMP' then '"' || EXA_COLUMN_NAME || '"' 
 			when data_type like 'TIMESTAMP%WITH%TIME%ZONE%' then '"' || EXA_COLUMN_NAME || '"' 
 			when data_type = 'BOOLEAN' then '"' || EXA_COLUMN_NAME || '"' 
-			else '--UNSUPPORTED DATATYPE IN COLUMN ' || COLUMN_NAME || ' Oracle Datatype: ' || data_type  
+			/* else '--UNSUPPORTED DATATYPE IN COLUMN ' || COLUMN_NAME || ' Oracle Datatype: ' || data_type  */
 		end
 				
 	order by column_id SEPARATOR ', 
@@ -237,7 +238,7 @@ success, res = pquery([[with ora_cols as(
 			when data_type like 'TIMESTAMP(%)' or data_type like 'TIMESTAMP' then '"' || column_name || '"' 
 			when data_type like 'TIMESTAMP%WITH%TIME%ZONE%' then 'cast("' || column_name || '" as TIMESTAMP)' 
 			when data_type = 'BOOLEAN' then '"' || column_name || '"' 
-			else '--UNSUPPORTED DATATYPE IN COLUMN ' || column_name || ' Oracle Datatype: ' || data_type  
+			/* else '--UNSUPPORTED DATATYPE IN COLUMN ' || column_name || ' Oracle Datatype: ' || data_type  */
 		end
 			
 	order by column_id SEPARATOR ', 
