@@ -226,7 +226,7 @@ from jdbc at ]]..CONNECTION_NAME..[[ statement
  					when 104 then '[' || column_name || ']' 
  					when 40  then '[' || column_name || ']' 
  					when 35  then '[' || column_name || ']' 
- 					when 43 then 'cast([' || column_name || '] as DateTime)' 
+ 					when 43 then 'CONVERT(datetime2, [' || column_name || '], 1)' --datetimeoffset 
  					when 58 then '[' || column_name || ']' 
  					when 59 then '[' || column_name || ']' 
  					when 60 then '[' || column_name || ']'
