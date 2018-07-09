@@ -6,6 +6,7 @@ create schema database_migration;
 	applied whenever needed. Feel free to adjust it. 
 */
 
+--/
 create or replace script database_migration.ORACLE_TO_EXASOL (
 CONNECTION_NAME				 -- name of the database connection inside exasol -> e.g. mysql_db
 ,IDENTIFIER_CASE_INSENSITIVE -- TRUE if identifiers should be put uppercase
@@ -247,21 +248,22 @@ success, res = pquery([[with ora_cols as(
 
 || ' from ' ||  '"' || owner || '"."' || table_name || '"' || ''';'  as imp from ora_base group by owner, table_name, EXA_SCHEMA_NAME, EXA_TABLE_NAME
 	)
-select '-- session parameter values are being taken from Oracle systemwide database_parameters and converted. However these should be confirmed before use.'
+select sql_text from (
+select 1 as ord_hlp,'-- session parameter values are being taken from Oracle systemwide database_parameters and converted. However these should be confirmed before use.' as sql_text
 union all
-select '-- Oracle DB''s NLS_CHARACTERSET is set to : ' || "VALUE" from nls_format where "PARAMETER"='NLS_CHARACTERSET'
+select 2, '-- Oracle DB''s NLS_CHARACTERSET is set to : ' || "VALUE" from nls_format where "PARAMETER"='NLS_CHARACTERSET'
 union all
-select '-- ALTER SESSION SET NLS_DATE_LANGUAGE=''' || "VALUE" || ''';' from nls_format where "PARAMETER"='NLS_DATE_LANGUAGE'
+select 3,'-- ALTER SESSION SET NLS_DATE_LANGUAGE=''' || "VALUE" || ''';' from nls_format where "PARAMETER"='NLS_DATE_LANGUAGE'
 union all
-select '-- ALTER SESSION SET NLS_DATE_FORMAT=''' || replace("VALUE",'R','Y') || ''';' from nls_format where "PARAMETER"='NLS_DATE_FORMAT'
+select 4,'-- ALTER SESSION SET NLS_DATE_FORMAT=''' || replace("VALUE",'R','Y') || ''';' from nls_format where "PARAMETER"='NLS_DATE_FORMAT'
 union all
-select '-- ALTER SESSION SET NLS_TIMESTAMP_FORMAT=''' || replace(regexp_replace("VALUE",'XF+','.FF6'),'R','Y') || ''';' from nls_format where "PARAMETER"='NLS_TIMESTAMP_FORMAT'
+select 5,'-- ALTER SESSION SET NLS_TIMESTAMP_FORMAT=''' || replace(regexp_replace("VALUE",'XF+','.FF6'),'R','Y') || ''';' from nls_format where "PARAMETER"='NLS_TIMESTAMP_FORMAT'
 union all
-select * from cr_schema
+select 6,a.* from cr_schema a
 union all
-select * from cr_tables
+select 7,b.* from cr_tables b
 union all
-select * from cr_import_stmts]],{c=CONNECTION_NAME, s=SCHEMA_FILTER, t=TABLE_FILTER})
+select 8,c.* from cr_import_stmts c) order by ord_hlp]],{c=CONNECTION_NAME, s=SCHEMA_FILTER, t=TABLE_FILTER})
 
 if not success then error(res.error_message) end
 
