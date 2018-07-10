@@ -37,7 +37,7 @@ with vv_mysql_columns as (
 )
 
 ,vv_create_schemas as(
-	SELECT 'create schema "' || "exa_table_schema" || '";' as sql_text from vv_mysql_columns  group by "exa_table_catalog","exa_table_schema" order by "exa_table_catalog","exa_table_schema"
+	SELECT 'create schema if not exists "' || "exa_table_schema" || '";' as sql_text from vv_mysql_columns  group by "exa_table_catalog","exa_table_schema" order by "exa_table_catalog","exa_table_schema"
 )
 
 ,vv_create_tables as (
@@ -52,7 +52,11 @@ with vv_mysql_columns as (
     when upper(data_type) = 'BIGINT' then 'DECIMAL (20,0)'
     when upper(data_type) = 'FLOAT' then 'FLOAT'
     when upper(data_type) = 'DOUBLE' then 'DOUBLE'   
+    -- in mysql scale <= 30 and scale <= precision
+	when upper(data_type) = 'DECIMAL' then case when numeric_precision is null then 'DOUBLE' else 'decimal(' || case when numeric_precision > 36 then 36 else numeric_precision end || ',' || case when (numeric_scale > numeric_precision) then numeric_precision else  case when numeric_scale < 0 then 0 else numeric_scale end end || ')' end 
+    /* alternative when you want to keep the value as a double and precision > 36
     when upper(data_type) = 'DECIMAL' then case when numeric_precision is null or numeric_precision > 36 then 'DOUBLE' else 'decimal(' || numeric_precision || ',' || case when (numeric_scale > numeric_precision) then numeric_precision else  case when numeric_scale < 0 then 0 else numeric_scale end end || ')' end 
+    */
     when upper(data_type) = 'BIT' then 'DECIMAL('||numeric_precision||',0)'
 
     -- ### date and time types ###
