@@ -116,18 +116,22 @@ with sqlserv_base as(
 			),
 	cr_schemas as ( -- if db=schema then select distinct db_name as schema_name else select distinct schema_name as schema_name
 		with all_schemas as (select distinct ]]..schema_column..[[ as schema_name from sqlserv_base )
-			select 'create schema "' || ]]..exa_upper_begin..[[ schema_name ]]..exa_upper_end..[[ ||'";' as cr_schema from all_schemas order by schema_name
+			select 'create schema if not exists "' || ]]..exa_upper_begin..[[ schema_name ]]..exa_upper_end..[[ ||'";' as cr_schema from all_schemas order by schema_name
 	),
 	cr_tables as ( -- if db=schema then db_name"."schema_name"_"table_name
-		select 'create table ]]..tbl_def..[[ ( ' 
+		select 'create or replace table ]]..tbl_def..[[ ( ' 
 				|| cols || '
 );' as tbls from (select ]]..tbl_group..[[, 
  			group_concat( 
  				case USER_TYPE_ID -- SQLSERVER datatype system type codes are in system table SYS.TYPES, 
  					--map with USER_TYPE_ID instead of SYSTEM_TYPE_ID ( not unique!!!)
- 					when 108 then '"' || column_name || '"' ||' ' || 'DECIMAL(' || PRECISION || ',' || SCALE || ')' --       numeric
- 					when 36 then  '"' || column_name || '"' ||' ' ||  'CHAR(36)'										-- uniqueidentifier 
- 					when 106 then '"' || column_name || '"' ||' ' ||  'DECIMAL(' || PRECISION || ',' || SCALE || ')'          --decimal
+ 					when 108 then '"' || column_name || '"' ||' ' || case when PRECISION > 36 then case when SCALE > 36 then 'DECIMAL(' || 36 || ',' || 36 || ')' else 'DECIMAL(' || 36 || ',' || SCALE || ')' end else 'DECIMAL(' || PRECISION || ',' || SCALE || ')' end   --numeric
+ 					-- Alternative when you have big values with a precision higher than 36 inside a column numeric(38) and want to store them
+ 					/* when 108 then '"' || column_name || '"' ||' ' || case when PRECISION > 36 then 'DOUBLE PRECISION' else 'DECIMAL(' || PRECISION || ',' || SCALE || ')' end --numeric */
+ 					when 36 then  '"' || column_name || '"' ||' ' ||  'CHAR(36)'	
+ 					when 106 then '"' || column_name || '"' ||' ' || case when PRECISION > 36 then case when SCALE > 36 then 'DECIMAL(' || 36 || ',' || 36 || ')' else 'DECIMAL(' || 36 || ',' || SCALE || ')' end else 'DECIMAL(' || PRECISION || ',' || SCALE || ')' end    --decimal									-- uniqueidentifier 
+ 					-- Alternative when you have big values with a precision higher than 36 inside a column decimal(38) and want to store them
+ 					/* when 106 then '"' || column_name || '"' ||' ' || case when PRECISION > 36 then 'DOUBLE PRECISION' else 'DECIMAL(' || PRECISION || ',' || SCALE || ')' end --decimal */
  					when 175  then '"' || column_name || '"' ||' ' ||'CHAR('||COL_MAX_LENGTH || ')'                     --char
  					when 62 then '"' || column_name || '"' ||' ' ||'DOUBLE'         				   --float
  					when 42 then '"' || column_name || '"' ||' ' ||'TIMESTAMP'     				  --datetime2
