@@ -1,4 +1,4 @@
--- connection_type:						Type of connection, e.g. 'JDBC' or 'OCI'
+-- connection_type:						Type of connection, e.g. 'JDBC' or 'ORA'
 -- connection_name:						Name of connection, e.g. 'MY_JDBC_MYSQL_CONNECTION'
 -- connection_database_type:			Type of database from which the keys should be migrated, currently 'ORACLE' and 'MYSQL' are supported
 -- schema_filter:						Filter for the schemas, e.g. '%' to take all schemas, 'my_schema' to load only primary_keys from this schema
@@ -216,6 +216,15 @@ exit(result_table, "schema_name char(200), table_name char(200), column_name cha
 -- TODO: Also generate not null constraints
 
 -- Examples of usage
-execute script database_migration.set_primary_and_foreign_keys('jdbc', 'JDBC_MYSQL','MYSQL', 'vw_mysql', 'my_%', 'DISABLE', false);
-execute script database_migration.set_primary_and_foreign_keys('jdbc', 'JDBC_MYSQL','MYSQL', 'vw_mysql', 'my_%', 'DISABLE', true);
-execute script database_migration.set_primary_and_foreign_keys('ora', 'OCI_ORACLE','ORACLE', 'SCOTT', 'MY_%', 'DISABLE', true);
+execute script database_migration.set_primary_and_foregin_keys(
+'JDBC',				-- connection_type:						Type of connection, e.g. 'JDBC' or 'ORA'
+'JDBC_MYSQL',		-- connection_name:						Name of connection
+'MYSQL',			-- connection_database_type:			Type of database from which the keys should be migrated, currently 'ORACLE' and 'MYSQL' are supported
+'MY_SCHEMA',		-- schema_filter:						Filter for the schemas, e.g. '%' to take all schemas, 'my_schema' to load only primary_keys from this schema
+'%',				-- table_filter:						Filter for the tables matching schema_filter, e.g. '%' to take all tables, 'my_table' to only load keys for this table
+'DISABLE',		-- constraint_status:					Could be 'ENABLE' or 'DISABLE' and specifies whether the generated keys should be enabled or disabled
+'false'		-- flag_identifier_case_insensitive: 	True if identifiers should be stored case-insensitiv (will be stored upper_case)
+);
+
+-- Second example
+execute script database_migration.set_primary_and_foreign_keys('ORA', 'MY_CONN','ORACLE', 'SCOTT', 'MY_%', 'DISABLE', true);

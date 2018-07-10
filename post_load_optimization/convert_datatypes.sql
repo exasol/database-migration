@@ -306,7 +306,12 @@ INSERT INTO DATATYPES.DATATYPE_TEST VALUES
 ;
 
 -- If executed with 'false' --> Script only displays what changes would be made 
-execute script DATABASE_MIGRATION.convert_datatypes('DATATYPES','DATATYPE%', false);
+execute script DATABASE_MIGRATION.convert_datatypes(
+'DATATYPES',		--	schema_name: 	  SCHEMA name or SCHEMA_FILTER (can be %)
+'DATATYPE%', 		-- 	table_name: 	  TABLE name or TABLE_FILTER  (can be %)	
+false				--	apply_conversion: If false, only output of what would be changed is generated, if true conversions are applied
+);
+
 
 -- If executed with 'true' --> Script applies changes
 execute script DATABASE_MIGRATION.convert_datatypes('DATATYPES','DATATYPE%', true);
