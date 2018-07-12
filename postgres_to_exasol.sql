@@ -34,55 +34,63 @@ with vv_pg_columns as (
 	SELECT 'create schema if not exists "' || "exa_table_schema" || '";' as sql_text from vv_pg_columns  group by "exa_table_catalog","exa_table_schema" order by "exa_table_catalog","exa_table_schema"
 )
 ,vv_create_tables as (
-	select 'create or replace table "' || "exa_table_schema" || '"."' || "exa_table_name" || '" (' || group_concat('"' || "exa_column_name" || '" ' ||
+	select 'create or replace table "' || "exa_table_schema" || '"."' || "exa_table_name" || '" (' || group_concat(
 	case 
-	when "data_type" = 'ARRAY' then 'varchar(2000000)'
-	when "data_type" = 'USER-DEFINED' then 'varchar(100000)' 
-	when "data_type" = 'bigint' then 'BIGINT' 
-	when "data_type" = 'bit' then case when "character_maximum_length"=1 then 'boolean' else 'varchar('||case when nvl("character_maximum_length",2000000) > 2000000 then 2000000 else nvl("character_maximum_length",2000000) end || ')' end
-	when "data_type" = 'bit varying' then case when "character_maximum_length"=1 then 'boolean' else 'varchar('||case when nvl("character_maximum_length",2000000) > 2000000 then 2000000 else nvl("character_maximum_length",2000000) end|| ')' end 
-	when "data_type" = 'boolean' then 'bool'
-	when "data_type" = 'box' then 'varchar(1000)'
-	when "data_type" = 'bytea' then 'varchar(2000000)'
-	when "data_type" = 'character' then 'char(' || case when nvl("character_maximum_length",2000) > 2000 then 2000 else nvl("character_maximum_length",2000) end || ')' 
-	when "data_type" = 'character varying' then 'varchar(' || case when nvl("character_maximum_length",2000000) > 2000000 then 2000000 else nvl("character_maximum_length",2000000) end || ')' 
-	when "data_type" = 'cidr' then 'varchar(100)' 
-	when "data_type" = 'circle' then 'varchar(1000)' 
-	when "data_type" = 'date' then 'date'
-	when "data_type" = 'double precision' then 'DOUBLE' 
-	when "data_type" = 'inet' then 'varchar(100)'
-	when "data_type" = 'integer' then 'INTEGER'
-	when "data_type" = 'interval' then 'varchar(1000)' 
-	when "data_type" = 'json' then 'varchar(2000000)'
-	when "data_type" = 'jsonb' then 'varchar(2000000)'
-	when "data_type" = 'line' then 'varchar(2000000)'
-	when "data_type" = 'lseg' then 'varchar(50000)'
-	when "data_type" = 'macaddr' then 'varchar(100)'
-	when "data_type" = 'money' then 'varchar(100)' --maybe decimal instead?
-	when "data_type" = 'name' then 'varchar(1000)'
-	when "data_type" = 'numeric' then case when "numeric_precision" is null then 'DOUBLE' else case when "numeric_precision" > 36 and "numeric_scale" > 36 then 'decimal (36,36)' when "numeric_precision" > 36 and "numeric_scale" <= 36 then 'decimal(36, ' || "numeric_scale" || ')' else 'decimal(' || "numeric_precision" || ',' || "numeric_scale" || ')' end end
+	when "data_type" = 'ARRAY' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
+	when "data_type" = 'USER-DEFINED' then '"' || "exa_column_name" || '" ' || 'varchar(100000)' 
+	when "data_type" = 'bigint' then '"' || "exa_column_name" || '" ' || 'BIGINT' 
+	when "data_type" = 'bit' then case when "character_maximum_length"=1 then '"' || "exa_column_name" || '" ' || 'boolean' else '"' || "exa_column_name" || '" ' || 'varchar('||case when nvl("character_maximum_length",2000000) > 2000000 then 2000000 else nvl("character_maximum_length",2000000) end || ')' end
+	when "data_type" = 'bit varying' then case when "character_maximum_length"=1 then '"' || "exa_column_name" || '" ' || 'boolean' else '"' || "exa_column_name" || '" ' || 'varchar('||case when nvl("character_maximum_length",2000000) > 2000000 then 2000000 else nvl("character_maximum_length",2000000) end|| ')' end 
+	when "data_type" = 'boolean' then '"' || "exa_column_name" || '" ' || 'bool'
+	when "data_type" = 'box' then '"' || "exa_column_name" || '" ' || 'varchar(1000)'
+	when "data_type" = 'bytea' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
+	when "data_type" = 'character' then '"' || "exa_column_name" || '" ' || 'char(' || case when nvl("character_maximum_length",2000) > 2000 then 2000 else nvl("character_maximum_length",2000) end || ')' 
+	when "data_type" = 'character varying' then '"' || "exa_column_name" || '" ' || 'varchar(' || case when nvl("character_maximum_length",2000000) > 2000000 then 2000000 else nvl("character_maximum_length",2000000) end || ')' 
+	when "data_type" = 'cidr' then '"' || "exa_column_name" || '" ' ||'varchar(100)' 
+	when "data_type" = 'circle' then '"' || "exa_column_name" || '" ' || 'varchar(1000)' 
+	when "data_type" = 'date' then '"' || "exa_column_name" || '" ' || 'date'
+	when "data_type" = 'double precision' then '"' || "exa_column_name" || '" ' || 'DOUBLE' 
+	when "data_type" = 'inet' then '"' || "exa_column_name" || '" ' || 'varchar(100)'
+	when "data_type" = 'integer' then '"' || "exa_column_name" || '" ' || 'INTEGER'
+	when "data_type" = 'interval' then '"' || "exa_column_name" || '" ' || 'varchar(1000)' 
+	when "data_type" = 'json' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
+	when "data_type" = 'jsonb' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
+	when "data_type" = 'line' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
+	when "data_type" = 'lseg' then '"' || "exa_column_name" || '" ' || 'varchar(50000)'
+	when "data_type" = 'macaddr' then '"' || "exa_column_name" || '" ' || 'varchar(100)'
+	when "data_type" = 'money' then '"' || "exa_column_name" || '" ' || 'varchar(100)' --maybe decimal instead?
+	when "data_type" = 'name' then '"' || "exa_column_name" || '" ' || 'varchar(1000)'
+	when "data_type" = 'numeric' then case when "numeric_precision" is null then '"' || "exa_column_name" || '" ' || 'DOUBLE' else case when "numeric_precision" > 36 and "numeric_scale" > 36 then '"' || "exa_column_name" || '" ' || 'decimal (36,36)' when "numeric_precision" > 36 and "numeric_scale" <= 36 then '"' || "exa_column_name" || '" ' || 'decimal(36, ' || "numeric_scale" || ')' else '"' || "exa_column_name" || '" ' || 'decimal(' || "numeric_precision" || ',' || "numeric_scale" || ')' end end
 	/* alternative to keep the values with a precision/scale > 36 as a double: 
 	when "data_type" = 'numeric' then case when "numeric_precision" is null or "numeric_precision" > 36 then 'DOUBLE' else 'decimal(' || "numeric_precision" || ',' || case when ("numeric_scale" > "numeric_precision") then "numeric_precision" else  case when "numeric_scale" < 0 then 0 else "numeric_scale" end end || ')' end
 	*/
-	when "data_type" = 'oid' then 'decimal(36)'
-	when "data_type" = 'path' then 'varchar(2000000)'
-	when "data_type" = 'pg_lsn' then 'varchar(2000000)'
-	when "data_type" = 'point' then 'varchar(2000)'
-	when "data_type" = 'polygon' then 'varchar(50000)'
-	when "data_type" = 'real' then 'DOUBLE'
-	when "data_type" = 'smallint' then 'SMALLINT' 
-	when "data_type" = 'text' then 'varchar(2000000)'
-	when "data_type" = 'time with time zone' then 'TIMESTAMP WITH LOCAL TIME ZONE' 
-	when "data_type" = 'time without time zone' then 'TIMESTAMP' 
-	when "data_type" = 'timestamp with time zone' then 'TIMESTAMP WITH LOCAL TIME ZONE' 
-	when "data_type" = 'timestamp without time zone' then 'TIMESTAMP' 
-	when "data_type" = 'tsquery' then 'varchar(2000000)'
-	when "data_type" = 'tsvector' then 'varchar(2000000)'
-	when "data_type" = 'txid_snapshot' then 'varchar(2000000)'
-	when "data_type" = 'uuid' then 'varchar(128)'
-	when "data_type" = 'xml' then 'varchar(2000000)'
-	else '/*UNKNOWN_DATATYPE:' || "data_type" || '*/ varchar(2000000)' end
-	order by "ordinal_position") || ');' as sql_text
+	when "data_type" = 'oid' then '"' || "exa_column_name" || '" ' || 'decimal(36)'
+	when "data_type" = 'path' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
+	when "data_type" = 'pg_lsn' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
+	when "data_type" = 'point' then '"' || "exa_column_name" || '" ' || 'varchar(2000)'
+	when "data_type" = 'polygon' then '"' || "exa_column_name" || '" ' || 'varchar(50000)'
+	when "data_type" = 'real' then '"' || "exa_column_name" || '" ' || 'DOUBLE'
+	when "data_type" = 'smallint' then '"' || "exa_column_name" || '" ' || 'SMALLINT' 
+	when "data_type" = 'text' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
+	when "data_type" = 'time with time zone' then '"' || "exa_column_name" || '" ' || 'TIMESTAMP WITH LOCAL TIME ZONE' 
+	when "data_type" = 'time without time zone' then '"' || "exa_column_name" || '" ' || 'TIMESTAMP' 
+	when "data_type" = 'timestamp with time zone' then '"' || "exa_column_name" || '" ' || 'TIMESTAMP WITH LOCAL TIME ZONE' 
+	when "data_type" = 'timestamp without time zone' then '"' || "exa_column_name" || '" ' || 'TIMESTAMP' 
+	when "data_type" = 'tsquery' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
+	when "data_type" = 'tsvector' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
+	when "data_type" = 'txid_snapshot' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
+	when "data_type" = 'uuid' then '"' || "exa_column_name" || '" ' || 'varchar(128)'
+	when "data_type" = 'xml' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
+	-- else '/*UNKNOWN_DATATYPE:' || "data_type" || '*/ varchar(2000000)' 
+	end
+	order by "ordinal_position") || ');'
+        -- ### unknown types ###
+	|| group_concat (
+	       case 
+	       when "data_type" not in ('ARRAY', 'USER-DEFINED', 'bigint', 'bit', 'bit varying', 'boolean', 'box', 'bytea', 'character', 'character varying', 'cidr', 'circle', 'date', 'double precision', 'inet', 'integer', 'interval', 'json', 'jsonb', 'line', 'lseg', 'macaddr', 'money', 'name', 'numeric', 'oid', 'path', 'pg_lsn', 'point', 'polygon', 'real', 'smallint', 'text', 'time with time zone', 'time without time zone','timestamp with time zone', 'timestamp without time zone', 'tsquery', 'tsvector', 'txid_snapshot', 'uuid', 'xml')
+	       then '--UNKNOWN_DATATYPE: ' || "data_type" || ''
+	       end
+	)|| ' 'as sql_text
 	from vv_pg_columns  group by "exa_table_catalog","exa_table_schema", "exa_table_name"
 	order by "exa_table_catalog","exa_table_schema","exa_table_name"
 )
@@ -117,8 +125,9 @@ with vv_pg_columns as (
 	when "data_type" = 'txid_snapshot' then "column_name" ||'::text'
 	when "data_type" = 'uuid' then "column_name" ||'::text'
 	when "data_type" = 'xml' then "column_name" ||'::text'
-	else "column_name"
-	 end
+	when "data_type" in ('bigint', 'boolean', 'character', 'character varying', 'date', 'double precision', 'integer', 'numeric', 'oid', 'real', 'smallint', 'text', 'time with time zone', 'time without time zone')
+	then "column_name"
+	end
 	order by "ordinal_position") || ' from ' || "table_schema"|| '.' || "table_name"|| ''';' as sql_text
 	from vv_pg_columns group by "exa_table_catalog","exa_table_schema","exa_table_name", "table_schema","table_name"
 	order by "exa_table_catalog", "exa_table_schema","exa_table_name", "table_schema","table_name"
