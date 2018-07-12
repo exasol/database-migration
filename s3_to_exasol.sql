@@ -168,6 +168,9 @@ end
 	waiting_for_update 		= 'waiting for update'
 	waiting_for_insertion 	= 'waiting for insertion'
 
+	local log_tbl = {}
+	local inserted_total = 0
+
 	-- acquire write lock on the table to prevent transactioin conflicts
 	query([[DELETE FROM ::s.::t WHERE FALSE]], {s=schema_name, t=table_name})
 
@@ -184,8 +187,10 @@ end
 		{s=logging_schema, t=logging_table})
 
 	if(force_reload and execute_statements) then
-		query([[TRUNCATE TABLE ::ls.::lt]],{ls= logging_schema, lt= logging_table})
-		query([[TRUNCATE TABLE ::s.::t]],{s= schema_name, t= table_name})
+		trun = query([[TRUNCATE TABLE ::ls.::lt]],{ls= logging_schema, lt= logging_table})
+		table.insert(log_tbl,{'Truncated logging table', trun.rows_affected ,trun.statement_text, ''})
+		trun = query([[TRUNCATE TABLE ::s.::t]],{s= schema_name, t= table_name})
+		table.insert(log_tbl,{'Truncated table',trun.rows_affected ,trun.statement_text, ''})
 	end
 
 
@@ -243,7 +248,7 @@ end
 	end
 
 
-	local log_tbl = {}
+
 	for i = 1, #queries do
 		-- execute query
 		curr_query = queries[i][1]
@@ -257,18 +262,20 @@ end
 				update ::ls.::lt set status = :se
 				where file_name in (]]..curr_files..[[) and bucket_name = :b
 			]],{ls=logging_schema, lt=logging_table, se=status_error, b=curr_bucket})
-			table.insert(log_tbl,{'Error while inserting: '.. res.error_message,curr_query, curr_files})
+			table.insert(log_tbl,{'Error while inserting: '.. res.error_message,0,curr_query, curr_files})
 		else	
 			query([[
 				update ::ls.::lt set status = :sd
 				where file_name in (]]..curr_files..[[) and bucket_name = :b
 			]],{ls=logging_schema, lt=logging_table, sd = status_done, b=curr_bucket})
-			table.insert(log_tbl,{'Inserted '..res.rows_inserted.. ' rows',curr_query, curr_files})
+			inserted_total = inserted_total + res.rows_inserted
+			table.insert(log_tbl,{'Inserted', res.rows_inserted,curr_query, curr_files})
 		end
 		
 	end
 
-	exit(log_tbl, "status varchar(20000),executed_queries varchar(2000000),files  varchar(2000000)")
+	table.insert(log_tbl, {'Summary, total inserts:', inserted_total, '', ''})
+	exit(log_tbl, "status varchar(20000), affected_rows decimal(18,0) ,executed_queries varchar(2000000),files  varchar(2000000)")
 /
 
 CREATE CONNECTION S3_MY_BUCKETNAME
