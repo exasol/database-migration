@@ -41,60 +41,67 @@ with vv_mysql_columns as (
 )
 
 ,vv_create_tables as (
-	select 'create or replace table "' || "exa_table_schema" || '"."' || "exa_table_name" || '" (' || group_concat('"' || "exa_column_name" || '" ' ||
+	select 'create or replace table "' || "exa_table_schema" || '"."' || "exa_table_name" || '" (' || group_concat(
 	case 
     -- ### numeric types ###
-    when upper(data_type) = 'INT' then 'DECIMAL(11,0)'
-    when upper(data_type) = 'INTEGER' then 'DECIMAL(11,0)'
-    when upper(data_type) = 'TINYINT' then 'DECIMAL(4,0)'
-    when upper(data_type) = 'SMALLINT' then 'DECIMAL(5,0)'
-    when upper(data_type) = 'MEDIUMINT' then 'DECIMAL(9,0)'
-    when upper(data_type) = 'BIGINT' then 'DECIMAL (20,0)'
-    when upper(data_type) = 'FLOAT' then 'FLOAT'
-    when upper(data_type) = 'DOUBLE' then 'DOUBLE'   
+    when upper(data_type) = 'INT' then '"' || "exa_column_name" || '" ' || 'DECIMAL(11,0)'
+    when upper(data_type) = 'INTEGER' then '"' || "exa_column_name" || '" ' || 'DECIMAL(11,0)'
+    when upper(data_type) = 'TINYINT' then '"' || "exa_column_name" || '" ' || 'DECIMAL(4,0)'
+    when upper(data_type) = 'SMALLINT' then '"' || "exa_column_name" || '" ' || 'DECIMAL(5,0)'
+    when upper(data_type) = 'MEDIUMINT' then '"' || "exa_column_name" || '" ' || 'DECIMAL(9,0)'
+    when upper(data_type) = 'BIGINT' then '"' || "exa_column_name" || '" ' || 'DECIMAL (20,0)'
+    when upper(data_type) = 'FLOAT' then '"' || "exa_column_name" || '" ' || 'FLOAT'
+    when upper(data_type) = 'DOUBLE' then '"' || "exa_column_name" || '" ' || 'DOUBLE'   
     -- in mysql scale <= 30 and scale <= precision
-	when upper(data_type) = 'DECIMAL' then case when numeric_precision is null then 'DOUBLE' else 'decimal(' || case when numeric_precision > 36 then 36 else numeric_precision end || ',' || case when (numeric_scale > numeric_precision) then numeric_precision else  case when numeric_scale < 0 then 0 else numeric_scale end end || ')' end 
+	when upper(data_type) = 'DECIMAL' then case when numeric_precision is null then '"' || "exa_column_name" || '" ' || 'DOUBLE' else '"' || "exa_column_name" || '" ' || 'decimal(' || case when numeric_precision > 36 then 36 else numeric_precision end || ',' || case when (numeric_scale > numeric_precision) then numeric_precision else  case when numeric_scale < 0 then 0 else numeric_scale end end || ')' end 
     /* alternative when you want to keep the value as a double and precision > 36
     when upper(data_type) = 'DECIMAL' then case when numeric_precision is null or numeric_precision > 36 then 'DOUBLE' else 'decimal(' || numeric_precision || ',' || case when (numeric_scale > numeric_precision) then numeric_precision else  case when numeric_scale < 0 then 0 else numeric_scale end end || ')' end 
     */
-    when upper(data_type) = 'BIT' then 'DECIMAL('||numeric_precision||',0)'
+    when upper(data_type) = 'BIT' then '"' || "exa_column_name" || '" ' || 'DECIMAL('||numeric_precision||',0)'
 
     -- ### date and time types ###
-    when upper(data_type) = 'DATE' then 'DATE'
-    when upper(data_type) = 'DATETIME' then 'TIMESTAMP'
-    when upper(data_type) = 'TIMESTAMP' then 'TIMESTAMP'
-    when upper(data_type) = 'TIME' then 'varchar(8)'
-    when upper(data_type) = 'YEAR' then 'varchar(4)'
+    when upper(data_type) = 'DATE' then '"' || "exa_column_name" || '" ' || 'DATE'
+    when upper(data_type) = 'DATETIME' then '"' || "exa_column_name" || '" ' || 'TIMESTAMP'
+    when upper(data_type) = 'TIMESTAMP' then '"' || "exa_column_name" || '" ' || 'TIMESTAMP'
+    when upper(data_type) = 'TIME' then '"' || "exa_column_name" || '" ' || 'varchar(8)'
+    when upper(data_type) = 'YEAR' then '"' || "exa_column_name" || '" ' || 'varchar(4)'
 
     -- ### string types ###
-    when upper(data_type) = 'CHAR' then upper(column_type)
-    when upper(data_type) = 'VARCHAR' then upper(column_type)
-    when upper(data_type) = 'BINARY' then 'char('||character_maximum_length||')'
-    when upper(data_type) = 'VARBINARY' then 'varchar('||character_maximum_length||')'
-    when upper(data_type) = 'TINYTEXT' then 'varchar(2000000)'
-	when upper(data_type) = 'TEXT' then 'varchar(2000000)'
-	when upper(data_type) = 'MEDIUMTEXT' then 'varchar(2000000)'
-	when upper(data_type) = 'LONGTEXT' then 'varchar(2000000)'
-    when upper(data_type) = 'TINYBLOB' then 'varchar(2000000)'
-	when upper(data_type) = 'BLOB' then 'varchar(2000000)'
-	when upper(data_type) = 'MEDIUMBLOB' then 'varchar(2000000)'
-	when upper(data_type) = 'LONGBLOB' then 'varchar(2000000)'
-    when upper(data_type) = 'ENUM' then 'varchar(2000000)'
-    when upper(data_type) = 'SET' then 'varchar(2000000)'
+    when upper(data_type) = 'CHAR' then '"' || "exa_column_name" || '" ' || upper(column_type)
+    when upper(data_type) = 'VARCHAR' then '"' || "exa_column_name" || '" ' || upper(column_type)
+    when upper(data_type) = 'BINARY' then '"' || "exa_column_name" || '" ' || 'char('||character_maximum_length||')'
+    when upper(data_type) = 'VARBINARY' then '"' || "exa_column_name" || '" ' || 'varchar('||character_maximum_length||')'
+    when upper(data_type) = 'TINYTEXT' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
+	when upper(data_type) = 'TEXT' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
+	when upper(data_type) = 'MEDIUMTEXT' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
+	when upper(data_type) = 'LONGTEXT' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
+    when upper(data_type) = 'TINYBLOB' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
+	when upper(data_type) = 'BLOB' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
+	when upper(data_type) = 'MEDIUMBLOB' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
+	when upper(data_type) = 'LONGBLOB' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
+    when upper(data_type) = 'ENUM' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
+    when upper(data_type) = 'SET' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
 
 	-- ### geospatial types ###	
-	when upper(data_type) = 'GEOMETRY' then upper(column_type)
-	when upper(data_type) = 'GEOMETRYCOLLECTION' then upper('geometry')
-	when upper(data_type) = 'POINT' then upper('geometry')
-	when upper(data_type) = 'MULTIPOINT' then upper('geometry')
-	when upper(data_type) = 'LINESTRING' then upper('geometry')
+	when upper(data_type) = 'GEOMETRY' then '"' || "exa_column_name" || '" ' || upper(column_type)
+	when upper(data_type) = 'GEOMETRYCOLLECTION' then '"' || "exa_column_name" || '" ' || upper('geometry')
+	when upper(data_type) = 'POINT' then '"' || "exa_column_name" || '" ' || upper('geometry')
+	when upper(data_type) = 'MULTIPOINT' then '"' || "exa_column_name" || '" ' || upper('geometry')
+	when upper(data_type) = 'LINESTRING' then '"' || "exa_column_name" || '" ' || upper('geometry')
 	when upper(data_type) = 'MULTILINESTRING' then upper('geometry')
-	when upper(data_type) = 'POLYGON' then upper('geometry')
-	when upper(data_type) = 'MULTIPOLYGON' then upper('geometry')
+	when upper(data_type) = 'POLYGON' then '"' || "exa_column_name" || '" ' || upper('geometry')
+	when upper(data_type) = 'MULTIPOLYGON' then '"' || "exa_column_name" || '" ' || upper('geometry')
 	
-    -- ### fallback for unknown types ###
-	else '/*UNKNOWN_DATATYPE:' || data_type || '*/ varchar(2000000)' end
-	order by ordinal_position) || ');' as sql_text
+    end
+	order by ordinal_position) || ');' 
+
+	-- ### unknown types ###
+	|| group_concat (
+	       case 
+	       when upper(data_type) not in ('INT', 'INTEGER', 'TINYINT', 'SMALLINT', 'MEDIUMINT', 'BIGINT', 'FLOAT', 'DOUBLE', 'DECIMAL', 'BIT', 'DATE', 'DATETIME', 'TIMESTAMP', 'TIME', 'YEAR', 'CHAR', 'VARCHAR', 'VARBINARY', 'BINARY', 'TINYTEXT', 'TEXT', 'MEDIUMTEXT', 'LONGTEXT', 'TINYBLOB', 'BLOB', 'MEDIUMBLOB', 'LONGBLOB', 'ENUM', 'SET', 'GEOMETRY', 'GEOMETRYCOLLECTION', 'POINT', 'MULTIPOINT', 'LINESTRING', 'MULTILINESTRING', 'POLYGON', 'MULTIPOLYGON')
+	       then '--UNKNOWN_DATATYPE: ' || data_type || ''
+	       end
+	)|| ' 'as sql_text
 	from vv_mysql_columns  group by "exa_table_catalog","exa_table_schema", "exa_table_name"
 	order by "exa_table_catalog","exa_table_schema","exa_table_name"
 )
@@ -102,25 +109,51 @@ with vv_mysql_columns as (
 , vv_imports as (
 	select 'import into "' || "exa_table_schema" || '"."' || "exa_table_name" || '" from jdbc at ]]..CONNECTION_NAME..[[ statement ''select ' 
            || group_concat(
-                           case
-	                       when upper(data_type) = 'BINARY' then 'cast(`'||column_name||'` as char('||character_maximum_length||'))'
-                           when upper(data_type) = 'VARBINARY' then 'cast(`'||column_name||'` as char('||character_maximum_length||'))'
-                           when upper(data_type) = 'TINYBLOB' then 'cast(`'||column_name||'` as char(2000000))'			  
-						   when upper(data_type) = 'MEDIUMBLOB' then 'cast(`'||column_name||'` as char(2000000))'
-						   when upper(data_type) = 'BLOB' then 'cast(`'||column_name||'` as char(2000000))'
-						   when upper(data_type) = 'LONGBLOB' then 'cast(`'||column_name||'` as char(2000000))'
-						   when upper(data_type) = 'TIME' then 'cast(`'||column_name||'` as char(8))'						   
-						   when upper(data_type) = 'YEAR' then 'cast(`'||column_name||'` as char(4))'
-						   when upper(data_type) = 'GEOMETRY' then 'AsText(`'||column_name||'`)'
-						   when upper(data_type) = 'GEOMETRYCOLLECTION' then 'AsText(`'||column_name||'`)'
-						   when upper(data_type) = 'POINT' then 'AsText(`'||column_name||'`)'
-						   when upper(data_type) = 'MULTIPOINT' then 'AsText(`'||column_name||'`)'
-						   when upper(data_type) = 'LINESTRING' then 'AsText(`'||column_name||'`)'
-						   when upper(data_type) = 'MULTILINESTRING' then 'AsText(`'||column_name||'`)'
-						   when upper(data_type) = 'POLYGON' then 'AsText(`'||column_name||'`)'
-						   when upper(data_type) = 'MULTIPOLYGON' then 'AsText(`'||column_name||'`)'
-						   when upper(data_type) = 'BIT' then 'cast(`'||column_name||'` as DECIMAL('||numeric_precision||',0))'
-                           else '`' || column_name || '`' end order by ordinal_position) 
+							case
+							-- ### numeric types ###
+							when upper(data_type) = 'INT' then '`' || column_name || '`' 
+							when upper(data_type) = 'INTEGER' then '`' || column_name || '`' 
+							when upper(data_type) = 'TINYINT' then '`' || column_name || '`' 
+							when upper(data_type) = 'SMALLINT' then '`' || column_name || '`' 
+							when upper(data_type) = 'MEDIUMINT' then '`' || column_name || '`' 
+							when upper(data_type) = 'BIGINT' then '`' || column_name || '`' 
+							when upper(data_type) = 'FLOAT' then '`' || column_name || '`' 
+							when upper(data_type) = 'DOUBLE' then '`' || column_name || '`' 
+							when upper(data_type) = 'DECIMAL' then '`' || column_name || '`'
+
+							-- ### date and time types ###
+							when upper(data_type) = 'DATE' then '`' || column_name || '`' 
+							when upper(data_type) = 'DATETIME' then '`' || column_name || '`' 
+							when upper(data_type) = 'TIMESTAMP' then '`' || column_name || '`' 
+
+							-- ### string types ###
+							when upper(data_type) = 'CHAR' then '`' || column_name || '`' 
+							when upper(data_type) = 'VARCHAR' then '`' || column_name || '`' 
+							when upper(data_type) = 'TINYTEXT' then '`' || column_name || '`' 
+							when upper(data_type) = 'TEXT' then '`' || column_name || '`' 
+							when upper(data_type) = 'MEDIUMTEXT' then '`' || column_name || '`' 
+							when upper(data_type) = 'LONGTEXT' then '`' || column_name || '`' 
+							when upper(data_type) = 'ENUM' then '`' || column_name || '`' 
+							when upper(data_type) = 'SET' then '`' || column_name || '`' 
+
+							when upper(data_type) = 'BINARY' then 'cast(`'||column_name||'` as char('||character_maximum_length||'))'
+							when upper(data_type) = 'VARBINARY' then 'cast(`'||column_name||'` as char('||character_maximum_length||'))'
+							when upper(data_type) = 'TINYBLOB' then 'cast(`'||column_name||'` as char(2000000))'			  
+							when upper(data_type) = 'MEDIUMBLOB' then 'cast(`'||column_name||'` as char(2000000))'
+							when upper(data_type) = 'BLOB' then 'cast(`'||column_name||'` as char(2000000))'
+							when upper(data_type) = 'LONGBLOB' then 'cast(`'||column_name||'` as char(2000000))'
+							when upper(data_type) = 'TIME' then 'cast(`'||column_name||'` as char(8))'						   
+							when upper(data_type) = 'YEAR' then 'cast(`'||column_name||'` as char(4))'
+							when upper(data_type) = 'GEOMETRY' then 'AsText(`'||column_name||'`)'
+							when upper(data_type) = 'GEOMETRYCOLLECTION' then 'AsText(`'||column_name||'`)'
+							when upper(data_type) = 'POINT' then 'AsText(`'||column_name||'`)'
+							when upper(data_type) = 'MULTIPOINT' then 'AsText(`'||column_name||'`)'
+							when upper(data_type) = 'LINESTRING' then 'AsText(`'||column_name||'`)'
+							when upper(data_type) = 'MULTILINESTRING' then 'AsText(`'||column_name||'`)'
+							when upper(data_type) = 'POLYGON' then 'AsText(`'||column_name||'`)'
+							when upper(data_type) = 'MULTIPOLYGON' then 'AsText(`'||column_name||'`)'
+							when upper(data_type) = 'BIT' then 'cast(`'||column_name||'` as DECIMAL('||numeric_precision||',0))'
+							end order by ordinal_position) 
            || ' from ' || table_schema|| '.' || table_name|| ''';' as sql_text
 	from vv_mysql_columns group by "exa_table_catalog","exa_table_schema","exa_table_name", table_schema,table_name
 	order by "exa_table_catalog", "exa_table_schema","exa_table_name", table_schema,table_name
@@ -133,10 +166,13 @@ UNION ALL
 select cast('-- ### TABLES ###' as varchar(2000000)) SQL_TEXT
 union all
 select * from vv_create_tables
+WHERE SQL_TEXT NOT LIKE '%();%'
 UNION ALL
 select cast('-- ### IMPORTS ###' as varchar(2000000)) SQL_TEXT
 union all
-select * from vv_imports]],{})
+select * from vv_imports
+WHERE SQL_TEXT NOT LIKE '%select  from%'
+]],{})
 
 if not suc then
   error('"'..res.error_message..'" Caught while executing: "'..res.statement_text..'"')
