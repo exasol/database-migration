@@ -88,7 +88,7 @@ with vv_pg_columns as (
 	|| group_concat (
 	       case 
 	       when "data_type" not in ('ARRAY', 'USER-DEFINED', 'bigint', 'bit', 'bit varying', 'boolean', 'box', 'bytea', 'character', 'character varying', 'cidr', 'circle', 'date', 'double precision', 'inet', 'integer', 'interval', 'json', 'jsonb', 'line', 'lseg', 'macaddr', 'money', 'name', 'numeric', 'oid', 'path', 'pg_lsn', 'point', 'polygon', 'real', 'smallint', 'text', 'time with time zone', 'time without time zone','timestamp with time zone', 'timestamp without time zone', 'tsquery', 'tsvector', 'txid_snapshot', 'uuid', 'xml')
-	       then '--UNKNOWN_DATATYPE: ' || "data_type" || ''
+	       then '--UNKNOWN_DATATYPE: "'|| "exa_column_name" || '" ' || "data_type" || ''
 	       end
 	)|| ' 'as sql_text
 	from vv_pg_columns  group by "exa_table_catalog","exa_table_schema", "exa_table_name"
@@ -132,11 +132,16 @@ with vv_pg_columns as (
 	from vv_pg_columns group by "exa_table_catalog","exa_table_schema","exa_table_name", "table_schema","table_name"
 	order by "exa_table_catalog", "exa_table_schema","exa_table_name", "table_schema","table_name"
 )
-select * from vv_create_schemas
+select SQL_TEXT from (
+select 1 as ord, a.* from vv_create_schemas a
 UNION ALL
-select * from vv_create_tables
+select 2, b.* from vv_create_tables b
+WHERE b.SQL_TEXT NOT LIKE '%();%'
 UNION ALL
-select * from vv_imports]],{})
+select 3, c.* from vv_imports c
+WHERE c.SQL_TEXT NOT LIKE '%select  from%' 
+) order by ord
+]],{})
 
 return(res)
 /

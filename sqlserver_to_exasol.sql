@@ -250,14 +250,21 @@ from jdbc at ]]..CONNECTION_NAME..[[ statement
 from ' ||  '[' || db_name || '].[' || schema_name || '].[' || table_name || ']' || '''
 ;'  as imp from sqlserv_base group by DB_NAME,SCHEMA_NAME,TABLE_NAME order by imp
 	)
-select '--This SQL Server is system-wide '|| status || '. There might be exceptions on table or column level.' from (select * from (import from jdbc at ]]..CONNECTION_NAME..[[ statement 'select case when ''A'' = ''a'' then ''NOT CASE SENSITIVE'' else ''CASE SENSITIVE'' end as STATUS'))
+select SQL_TEXT from (
+select 1 as ord, '--This SQL Server is system-wide '|| status || '. There might be exceptions on table or column level.' as SQL_TEXT from (select * from (import from jdbc at ]]..CONNECTION_NAME..[[ statement 'select case when ''A'' = ''a'' then ''NOT CASE SENSITIVE'' else ''CASE SENSITIVE'' end as STATUS'))
 union all
-select * from cr_schemas
+select 2, cast('-- ### SCHEMAS ###' as varchar(2000000)) SQL_TEXT
 union all
-select * from cr_tables
+select 3, a.* from cr_schemas a
 union all
-select * from cr_import_stmts
-
+select 4, cast('-- ### TABLES ###' as varchar(2000000)) SQL_TEXT
+union all
+select 5, b.* from cr_tables b
+union all
+select 6, cast('-- ### IMPORTS ###' as varchar(2000000)) SQL_TEXT
+union all
+select 7, c.* from cr_import_stmts c
+) order by ord
 ]],{})
 output(res.statement_text)
 if not success then error(res.error_message) end

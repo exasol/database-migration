@@ -99,7 +99,7 @@ with vv_mysql_columns as (
 	|| group_concat (
 	       case 
 	       when upper(data_type) not in ('INT', 'INTEGER', 'TINYINT', 'SMALLINT', 'MEDIUMINT', 'BIGINT', 'FLOAT', 'DOUBLE', 'DECIMAL', 'BIT', 'DATE', 'DATETIME', 'TIMESTAMP', 'TIME', 'YEAR', 'CHAR', 'VARCHAR', 'VARBINARY', 'BINARY', 'TINYTEXT', 'TEXT', 'MEDIUMTEXT', 'LONGTEXT', 'TINYBLOB', 'BLOB', 'MEDIUMBLOB', 'LONGBLOB', 'ENUM', 'SET', 'GEOMETRY', 'GEOMETRYCOLLECTION', 'POINT', 'MULTIPOINT', 'LINESTRING', 'MULTILINESTRING', 'POLYGON', 'MULTIPOLYGON')
-	       then '--UNKNOWN_DATATYPE: ' || data_type || ''
+	       then '--UNKNOWN_DATATYPE: "'|| "exa_column_name" || '" ' || upper(data_type) || ''
 	       end
 	)|| ' 'as sql_text
 	from vv_mysql_columns  group by "exa_table_catalog","exa_table_schema", "exa_table_name"
@@ -158,20 +158,21 @@ with vv_mysql_columns as (
 	from vv_mysql_columns group by "exa_table_catalog","exa_table_schema","exa_table_name", table_schema,table_name
 	order by "exa_table_catalog", "exa_table_schema","exa_table_name", table_schema,table_name
 )
-
-select cast('-- ### SCHEMAS ###' as varchar(2000000)) SQL_TEXT
+select SQL_TEXT from (
+select 1 as ord, cast('-- ### SCHEMAS ###' as varchar(2000000)) SQL_TEXT
 union all 
-select * from vv_create_schemas
-UNION ALL
-select cast('-- ### TABLES ###' as varchar(2000000)) SQL_TEXT
+select 2, a.* from vv_create_schemas a
+union all 
+select 3, cast('-- ### TABLES ###' as varchar(2000000)) SQL_TEXT
 union all
-select * from vv_create_tables
-WHERE SQL_TEXT NOT LIKE '%();%'
-UNION ALL
-select cast('-- ### IMPORTS ###' as varchar(2000000)) SQL_TEXT
+select 4, b.* from vv_create_tables b
+WHERE b.SQL_TEXT NOT LIKE '%();%'
 union all
-select * from vv_imports
-WHERE SQL_TEXT NOT LIKE '%select  from%'
+select 5, cast('-- ### IMPORTS ###' as varchar(2000000)) SQL_TEXT
+union all
+select 6, c.* from vv_imports c
+WHERE c.SQL_TEXT NOT LIKE '%select  from%' 
+) order by ord
 ]],{})
 
 if not suc then
