@@ -166,10 +166,8 @@ success, res = pquery([[with ora_cols as(
 			select 'create schema if not exists "' ||  EXA_SCHEMA ||'";' as cr_schema from EXA_SCHEMAS
 	),
 	cr_tables as (
-		select 'create or replace table "' || EXA_SCHEMA_NAME || '"."' || EXA_TABLE_NAME || '" ( 
-' || cols || '
-)
-;' as tbls from 
+		select 'create or replace table "' || EXA_SCHEMA_NAME || '"."' || EXA_TABLE_NAME || '" (' || cols || '); ' || cols2 || ''
+as tbls from 
 (select EXA_SCHEMA_NAME, EXA_TABLE_NAME, 
 		group_concat( 
 		case 
@@ -187,14 +185,22 @@ success, res = pquery([[with ora_cols as(
 			when data_type like 'TIMESTAMP%WITH%TIME%ZONE%' then '"' || EXA_COLUMN_NAME || '"' || ' ' ||  'timestamp' 
 			when data_type = 'BOOLEAN' then '"' || EXA_COLUMN_NAME || '"' || ' ' ||  'boolean'
 			-- Fallback for unsupported data types
-			else '"' || EXA_COLUMN_NAME || '"' || ' ' ||  'varchar(2000000) /* UNSUPPORTED DATA TYPE : ' || data_type || ' */ '  end
+			-- else '"' || EXA_COLUMN_NAME || '"' || ' ' ||  'varchar(2000000) /* UNSUPPORTED DATA TYPE : ' || data_type || ' */ '
+			end
 			
 		|| case when identity_column='YES' then ' IDENTITY' end
 		|| case when nullable='N' then ' NOT NULL' end
 		
-	order by column_id SEPARATOR ', 
-') as cols 
-		from ora_base group by EXA_SCHEMA_NAME, EXA_TABLE_NAME)
+	order by column_id SEPARATOR ', ')
+	as cols,
+                group_concat( 
+                        case 
+                        when data_type not in ('CHAR', 'NCHAR', 'VARCHAR', 'VARCHAR2', 'NVARCHAR2', 'CLOB', 'XMLTYPE', 'DECIMAL', 'NUMBER', 'DOUBLE PRECISION', 'FLOAT', 'BINARY_FLOAT', 'BINARY_DOUBLE', 'DATE', 'BOOLEAN', 'TIMESTAMP') and data_type not like 'TIMESTAMP(%)%' and data_type not like 'TIMESTAMP%WITH%TIME%ZONE%'
+                        then '--UNSUPPORTED DATA TYPE : "'|| EXA_COLUMN_NAME || '" ' || data_type || ''
+                        end
+                ) 
+	as cols2 
+        from ora_base group by EXA_SCHEMA_NAME, EXA_TABLE_NAME)
 	),
 	cr_import_stmts as (
 		select 'import into "' || EXA_SCHEMA_NAME ||'"."' || EXA_TABLE_NAME || '"( ' || 
@@ -262,8 +268,12 @@ union all
 select 6,a.* from cr_schema a
 union all
 select 7,b.* from cr_tables b
+where b.TBLS not like '%();%'
 union all
-select 8,c.* from cr_import_stmts c) order by ord_hlp]],{c=CONNECTION_NAME, s=SCHEMA_FILTER, t=TABLE_FILTER})
+select 8,c.* from cr_import_stmts c
+where c.IMP not like '%( ) from%'
+) order by ord_hlp
+]],{c=CONNECTION_NAME, s=SCHEMA_FILTER, t=TABLE_FILTER})
 
 if not success then error(res.error_message) end
 

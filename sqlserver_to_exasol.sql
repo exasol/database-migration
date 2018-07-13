@@ -119,9 +119,8 @@ with sqlserv_base as(
 			select 'create schema if not exists "' || ]]..exa_upper_begin..[[ schema_name ]]..exa_upper_end..[[ ||'";' as cr_schema from all_schemas order by schema_name
 	),
 	cr_tables as ( -- if db=schema then db_name"."schema_name"_"table_name
-		select 'create or replace table ]]..tbl_def..[[ ( ' 
-				|| cols || '
-);' as tbls from (select ]]..tbl_group..[[, 
+		select 'create or replace table ]]..tbl_def..[[  (' || cols || '); ' || cols2 || ''
+				 as tbls from (select ]]..tbl_group..[[, 
  			group_concat( 
  				case USER_TYPE_ID -- SQLSERVER datatype system type codes are in system table SYS.TYPES, 
  					--map with USER_TYPE_ID instead of SYSTEM_TYPE_ID ( not unique!!!)
@@ -161,17 +160,24 @@ with sqlserv_base as(
  					when 189 then '"' || column_name || '"' ||' ' ||'TIMESTAMP'  -- timestamp
  					when 241 then '"' || column_name || '"' ||' ' ||'VARCHAR(2000000)' --xml
  					when 256 then '"' || column_name || '"' ||' ' ||'CHAR(128)' --sysname
- 					else '-- UNSUPPORTED DATATYPE IN COLUMN ' || column_name || '  MSSQL TYPE INFO: USER_TYPE_ID ' || USER_TYPE_ID || ', SYSTEM_TYPE_ID ' ||  SYSTEM_TYPE_ID || ', NAME ' || TYPE_NAME || ', PRECISION ' || PRECISION || ', SCALE ' || SCALE
+ 					-- else '-- UNSUPPORTED DATATYPE IN COLUMN ' || column_name || '  MSSQL TYPE INFO: USER_TYPE_ID ' || USER_TYPE_ID || ', SYSTEM_TYPE_ID ' ||  SYSTEM_TYPE_ID || ', NAME ' || TYPE_NAME || ', PRECISION ' || PRECISION || ', SCALE ' || SCALE
  				end
  				|| case when IS_IDENTITY='1' then ' IDENTITY' end
  				|| case when IS_NULLABLE='0' then ' NOT NULL' end
  				
- 			order by COLUMN_ID SEPARATOR ', 
-' ) as cols 
+ 			order by COLUMN_ID SEPARATOR ',' )
+ 			as cols, 
+                    group_concat( 
+                            case 
+                            when USER_TYPE_ID not in (108, 36, 106, 175, 62, 42, 239, 231, 52, 41, 61, 56, 167, 48, 104, 40, 35, 43, 58, 59, 60, 99, 122, 127, 128, 129, 130, 189, 241, 256)
+                            then '-- UNSUPPORTED DATATYPE IN COLUMN ' || column_name || '  MSSQL TYPE INFO: USER_TYPE_ID ' || USER_TYPE_ID || ', SYSTEM_TYPE_ID ' ||  SYSTEM_TYPE_ID || ', NAME ' || TYPE_NAME || ', PRECISION ' || PRECISION || ', SCALE ' || SCALE
+                            end
+                    ) 
+            as cols2
  			from sqlserv_base group by ]]..tbl_group..[[ ) order by tbls
 	),
 	cr_import_stmts as (
-		select 'import into ]]..tbl_def..[[( ' || group_concat( case USER_TYPE_ID -- SQLSERVER datatype system type codes are in system table SYS.TYPES, 
+		select 'import into ]]..tbl_def..[[(' || group_concat( case USER_TYPE_ID -- SQLSERVER datatype system type codes are in system table SYS.TYPES, 
  					when 108 then '"' || column_name || '"' 
  					when 36 then  '"' || column_name || '"' 
  					when 106 then '"' || column_name || '"' 
@@ -204,11 +210,9 @@ with sqlserv_base as(
  					when 189 then '"' || column_name || '"'
  					when 241 then '"' || column_name || '"' 
  					when 256 then '"' || column_name || '"'
- 					else '-- UNSUPPORTED DATATYPE IN COLUMN ' || column_name || '  MSSQL TYPE INFO: USER_TYPE_ID ' || USER_TYPE_ID || ', SYSTEM_TYPE_ID ' ||  SYSTEM_TYPE_ID || ', NAME ' || TYPE_NAME || ', PRECISION ' || PRECISION || ', SCALE ' || SCALE
+ 					-- else '-- UNSUPPORTED DATATYPE IN COLUMN ' || column_name || '  MSSQL TYPE INFO: USER_TYPE_ID ' || USER_TYPE_ID || ', SYSTEM_TYPE_ID ' ||  SYSTEM_TYPE_ID || ', NAME ' || TYPE_NAME || ', PRECISION ' || PRECISION || ', SCALE ' || SCALE
  				end  order by column_id SEPARATOR ',
-' ) || '
-) 
-from jdbc at ]]..CONNECTION_NAME..[[ statement 
+' ) || ') from jdbc at ]]..CONNECTION_NAME..[[ statement 
 ''select 
 ' || group_concat(case USER_TYPE_ID -- SQLSERVER datatype system type codes are in system table SYS.TYPES, 
  					when 108 then '[' || column_name || ']' 
@@ -243,11 +247,11 @@ from jdbc at ]]..CONNECTION_NAME..[[ statement
  					when 189 then 'CAST([' || column_name || '] AS DATETIME)'
  					when 241 then '[' || column_name || ']' 
  					when 256 then '[' || column_name || ']'
- 					else '-- UNSUPPORTED DATATYPE IN COLUMN ' || column_name || '  MSSQL TYPE INFO: USER_TYPE_ID ' || USER_TYPE_ID || ', SYSTEM_TYPE_ID ' ||  SYSTEM_TYPE_ID || ', NAME ' || TYPE_NAME || ', PRECISION ' || PRECISION || ', SCALE ' || SCALE
+ 					-- else '-- UNSUPPORTED DATATYPE IN COLUMN ' || column_name || '  MSSQL TYPE INFO: USER_TYPE_ID ' || USER_TYPE_ID || ', SYSTEM_TYPE_ID ' ||  SYSTEM_TYPE_ID || ', NAME ' || TYPE_NAME || ', PRECISION ' || PRECISION || ', SCALE ' || SCALE
  				end  order by column_id SEPARATOR ',
 ') || '
 
-from ' ||  '[' || db_name || '].[' || schema_name || '].[' || table_name || ']' || '''
+from ' ||  '[' || db_name || '].[' || schema_name || '].[' || table_name || ']' || ''' 
 ;'  as imp from sqlserv_base group by DB_NAME,SCHEMA_NAME,TABLE_NAME order by imp
 	)
 select SQL_TEXT from (
@@ -259,11 +263,13 @@ select 3, a.* from cr_schemas a
 union all
 select 4, cast('-- ### TABLES ###' as varchar(2000000)) SQL_TEXT
 union all
-select 5, b.* from cr_tables b
+select 5, b.* from cr_tables b 
+where b.TBLS not like '%();%'
 union all
 select 6, cast('-- ### IMPORTS ###' as varchar(2000000)) SQL_TEXT
 union all
-select 7, c.* from cr_import_stmts c
+select 7, c.* from cr_import_stmts c 
+where c.IMP not like '%() from%'
 ) order by ord
 ]],{})
 output(res.statement_text)
