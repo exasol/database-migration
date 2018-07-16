@@ -17,7 +17,7 @@ create schema if not exists database_migration;
 --parameter	apply_conversion: Can be true or false, if true, columns are automatically converted to matching datatype. If false, only output of what would be changed is generated
 create or replace script database_migration.convert_datatypes(schema_name, table_name, apply_conversion) RETURNS TABLE
  as
-function convert_double_to_decimal(schema_name, table_name, apply_conversion)
+function convert_double_to_decimal(schema_name, table_name, apply_conversion, log_for_all_columns)
 
 	local result_table = {}
 	res = query([[
@@ -37,7 +37,7 @@ function convert_double_to_decimal(schema_name, table_name, apply_conversion)
 			local message_suc = ''
 			local message_action = ''
 			--select overall rowcount (not null cols and rowcount with scale information (e.g. .0000000001)
-			tsColumns = query([[select
+			tsSuc, tsColumns = pquery([[select
 					count(*),1
 				from
 					::curr_schema.::curr_table				
@@ -65,10 +65,16 @@ function convert_double_to_decimal(schema_name, table_name, apply_conversion)
 						)
 					) order by 2 asc]]
 				, {curr_schema=quote(res[i][1]), curr_table=quote(res[i][2]),col_name=quote(res[i][3])});
-			if tsColumns[1][1]==0 then
+
+			if not tsSuc then
+				-- Datatype doesn't fit into decimal --> do nothing
+				message_suc = 'Keep'
+				message_action = 'Keep DOUBLE (too big for DECIMAL)'
+
+			elseif tsColumns[1][1]==0 then
 				--no rows in table -> do nothing
 				message_suc = 'Keep'
-				message_action = 'Keep DECIMAL (IS EMPTY)'
+				message_action = 'Keep DOUBLE (IS EMPTY)'
 
 			elseif tsColumns[2][1]==0 then
 				--rows in table but content seems to be decimal only (without scale information)
@@ -93,12 +99,17 @@ function convert_double_to_decimal(schema_name, table_name, apply_conversion)
 				message_action = 'Keep DOUBLE'
 				
 			end
-		result_table[#result_table+1] = {res[i][1], res[i][2], res[i][3],message_suc, message_action}
+		
+
+		if message_suc ~= 'Keep' or log_for_all_columns then
+			result_table[#result_table+1] = {res[i][1], res[i][2], res[i][3],message_suc, message_action}
 		end
+
+	end
 	return result_table
 	end -- end of function convert_double_to_decimal
 ------------------------------------------------------------------------------------------------------
-function convert_decimal_to_smaller_decimal(schema_name, table_name, apply_conversion)
+function convert_decimal_to_smaller_decimal(schema_name, table_name, apply_conversion, log_for_all_columns)
 
 	local result_table = {}
 	res = query([[select
@@ -136,6 +147,7 @@ function convert_decimal_to_smaller_decimal(schema_name, table_name, apply_conve
 			
 	
 			if dColumns[1][1]==0 then
+
 				--no rows in table -> do nothing
 				message_suc = 'keep'
 				message_action = 'Keep DECIMAL (IS EMPTY)'
@@ -169,13 +181,15 @@ function convert_decimal_to_smaller_decimal(schema_name, table_name, apply_conve
 				message_action = 'Keep DECIMAL('..res[i][4]..'), max length: '..dColumns[2][1]
 			end
 
-		result_table[#result_table+1] = {res[i][1], res[i][2], res[i][3],message_suc, message_action}
+		if message_suc ~= 'Keep' or log_for_all_columns then
+			result_table[#result_table+1] = {res[i][1], res[i][2], res[i][3],message_suc, message_action}
+		end
 		end
 	return result_table
 	end -- end of function convert_decimal_to_smaller_decimal
 	
 ------------------------------------------------------------------------------------------------------
-function convert_timestamp_to_date(schema_name, table_name, apply_conversion)
+function convert_timestamp_to_date(schema_name, table_name, apply_conversion, log_for_all_columns)
 result_table = {};
 res = query([[
 		select
@@ -217,6 +231,7 @@ for i=1,#res do
 			--no rows in table -> do nothing
 			message_suc = 'Keep'
 			message_action = 'Keep TIMESTAMP (IS EMPTY)'
+
 		elseif tsColumns[2][1]==0 then
 			--rows in table but seems to be date only (without time information)
 			if (apply_conversion) then
@@ -238,7 +253,9 @@ for i=1,#res do
 			message_suc = 'Keep'
 			message_action = 'Keep TIMESTAMP (IS EMPTY)'
 		end
-	result_table[#result_table+1] = {res[i][1], res[i][2], res[i][3],message_suc, message_action}
+	if message_suc ~= 'Keep' or log_for_all_columns then
+		result_table[#result_table+1] = {res[i][1], res[i][2], res[i][3],message_suc, message_action}
+	end
 	end
 	return result_table
 end -- end of function convert_timestamp_to_date
@@ -253,7 +270,7 @@ end
 
 -- Helper function to get maximal string length for a column
 function getMaxLengthForColumn(input_table, column_number)
-	length = 0
+	length = 1
 	for i=1, #input_table do
 		if(#input_table[i][column_number] > length) then
 			length = #input_table[i][column_number]
@@ -263,10 +280,14 @@ function getMaxLengthForColumn(input_table, column_number)
 end
 -----------------------------END OF FUNCTIONS, BEGINNING OF ACTUAL SCRIPT-----------------------------
 	
+	-- parameter to regulate amount of output
+	-- if false, a log message is only generated for columns that will be changed, if true, a message will be displayed for every column
+	log_for_all_columns = false
+
 	local overall_res = {}
-	local res_double 	= convert_double_to_decimal(schema_name, table_name, apply_conversion)
-	local res_dec 		= convert_decimal_to_smaller_decimal(schema_name, table_name, apply_conversion)
-	local res_timestamp = convert_timestamp_to_date(schema_name, table_name, apply_conversion)
+	local res_double 	= convert_double_to_decimal(schema_name, table_name, apply_conversion, log_for_all_columns)
+	local res_dec 		= convert_decimal_to_smaller_decimal(schema_name, table_name, apply_conversion, log_for_all_columns)
+	local res_timestamp = convert_timestamp_to_date(schema_name, table_name, apply_conversion, log_for_all_columns)
 	
 	
 	overall_res = merge_tables(overall_res, res_double)
@@ -284,35 +305,12 @@ end
 	exit(overall_res, "schema_name char("..length_schema.."), table_name char("..length_table.."), column_name char("..length_column.."),success char("..length_success.."), actions char("..length_actions..")")
 /
 
-create schema if not exists DATATYPES;
 
-CREATE OR REPLACE TABLE DATATYPES.DATATYPE_TEST (
-    "DOUBLE" DOUBLE,
-    DOUBLE_TO_CONVERT DOUBLE,
-	DOUBLE_TO_CONVERT2 DOUBLE,
-	DOUBLE_NULL DOUBLE,
-    TIMESTAMP_REAL TIMESTAMP,
-	TIMESTAMP_TO_CONVERT TIMESTAMP,
-	TIMESTAMP_TO_KEEP_WITH_NULL TIMESTAMP,
-	"TIMESTAMP" TIMESTAMP,
-	"WEIRDCOL'NAME1" DOUBLE,
-	"WEIRDCOL'NAME2" DECIMAL(9),
-	"WEIRDCOL'NAME3" TIMESTAMP
-);
-
-INSERT INTO DATATYPES.DATATYPE_TEST VALUES 
-(1.2,1,1.000000000001,null,'1000-01-01 00:00:00.000', '1000-01-01 00:00:00.000', '1999-01-01 00:00:00.001', '1000-01-01 00:00:01.000',1,2, '1000-01-01 00:00:00.000')
-,(2.1,2,2.000000000001,null,'2012-01-01 01:23:31.000', '1999-01-01 00:00:00.000', null, '1999-01-01 23:59:59.999',1,2, '1000-01-01 00:00:00.000' )
-;
-
--- If executed with 'false' --> Script only displays what changes would be made 
-execute script DATABASE_MIGRATION.convert_datatypes(
-'DATATYPES',		--	schema_name: 	  SCHEMA name or SCHEMA_FILTER (can be %)
-'DATATYPE%', 		-- 	table_name: 	  TABLE name or TABLE_FILTER  (can be %)	
+-- If executed with 'false' --> Script only displays what changes would be made
+execute script DATABASE_MIGRATION.CONVERT_DATATYPES(
+'MY_SCHEMA',		--	schema_name: 	  SCHEMA name or SCHEMA_FILTER (can be %)
+'%', 				-- 	table_name: 	  TABLE name or TABLE_FILTER  (can be %)	
 false				--	apply_conversion: If false, only output of what would be changed is generated, if true conversions are applied
 );
 
-
--- If executed with 'true' --> Script applies changes
-execute script DATABASE_MIGRATION.convert_datatypes('DATATYPES','DATATYPE%', true);
 
