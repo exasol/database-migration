@@ -149,7 +149,7 @@ function convert_decimal_to_smaller_decimal(schema_name, table_name, apply_conve
 			if dColumns[1][1]==0 then
 
 				--no rows in table -> do nothing
-				message_suc = 'keep'
+				message_suc = 'Keep'
 				message_action = 'Keep DECIMAL (IS EMPTY)'
 
 			elseif (dColumns[2][1]<=9 and res[i][4] > 9) or (dColumns[2][1]<=18 and res[i][4] > 18) then
@@ -312,5 +312,4 @@ execute script DATABASE_MIGRATION.CONVERT_DATATYPES(
 '%', 				-- 	table_name: 	  TABLE name or TABLE_FILTER  (can be %)	
 false				--	apply_conversion: If false, only output of what would be changed is generated, if true conversions are applied
 );
-
 
