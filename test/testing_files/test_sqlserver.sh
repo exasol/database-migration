@@ -9,6 +9,7 @@ docker pull microsoft/mssql-server-linux:2017-latest
 docker run --name sqlserverdb -e 'ACCEPT_EULA=Y' -e 'SA_PASSWORD=my_strong_Password' -p 1433:1433 -d microsoft/mssql-server-linux:2017-latest
 #wait until the sqlserverdb container if fully initialized
 (docker logs -f --tail 0 sqlserverdb &) 2>&1 | grep -q -i 'SQL Server is now ready for client connections.'
+sleep 20
 
 #copy .sql file to be executed inside container
 docker cp test/testing_files/sqlserver_datatypes_test.sql sqlserverdb:/tmp/
