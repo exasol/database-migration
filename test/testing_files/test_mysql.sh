@@ -20,9 +20,9 @@ ip="$(docker inspect --format '{{ .NetworkSettings.IPAddress }}' mysqldb)"
 echo "create or replace connection mysql_conn to 'jdbc:mysql://$ip:3306' user 'root' identified by 'mysql';" > test/testing_files/create_conn.sql
 
 #copy .sql file to be executed inside container
-docker cp test/testing_files/create_conn.sql exasoldb:/usr/opt/EXASuite-6/EXASolution-6.0.10/bin/Console/test/
+docker cp test/testing_files/create_conn.sql exasoldb:/
 #execute the file inside the exasoldb container
-docker exec -ti exasoldb sh -c "/usr/opt/EXASuite-6/EXASolution-6.0.10/bin/Console/exaplus  -c "127.0.0.1:8888" -u sys -p exasol -f "usr/opt/EXASuite-6/EXASolution-6.0.10/bin/Console/test/create_conn.sql" -x"
+docker exec -ti exasoldb sh -c "/usr/opt/EXASuite-6/EXASolution-6.0.10/bin/Console/exaplus  -c "127.0.0.1:8888" -u sys -p exasol -f "create_conn.sql" -x"
 
 
 
@@ -41,3 +41,7 @@ docker cp $file exasoldb:/
 docker exec -ti exasoldb sh -c "/usr/opt/EXASuite-6/EXASolution-6.0.10/bin/Console/exaplus  -c "127.0.0.1:8888" -u sys -p exasol -f "output.sql" -x"
 #delete the file from current directory
 [ ! -e $file ] || rm $file
+
+#stop and remove mysqldb container
+docker stop mysqldb
+docker rm -v mysqldb

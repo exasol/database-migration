@@ -22,9 +22,9 @@ ip="$(docker inspect --format '{{ .NetworkSettings.IPAddress }}' postgresdb)"
 echo "create or replace connection postgres_db to 'jdbc:postgresql://$ip:5432/postgres' user 'postgres' identified by 'postgres';" > test/testing_files/create_conn.sql
 
 #copy .sql file to be executed inside container
-docker cp test/testing_files/create_conn.sql exasoldb:/usr/opt/EXASuite-6/EXASolution-6.0.10/bin/Console/test/
+docker cp test/testing_files/create_conn.sql exasoldb:/
 #execute the file inside the exasoldb container
-docker exec -ti exasoldb sh -c "/usr/opt/EXASuite-6/EXASolution-6.0.10/bin/Console/exaplus  -c "127.0.0.1:8888" -u sys -p exasol -f "usr/opt/EXASuite-6/EXASolution-6.0.10/bin/Console/test/create_conn.sql" -x"
+docker exec -ti exasoldb sh -c "/usr/opt/EXASuite-6/EXASolution-6.0.10/bin/Console/exaplus  -c "127.0.0.1:8888" -u sys -p exasol -f "create_conn.sql" -x"
 
 
 #create the script that we want to execute
@@ -42,3 +42,7 @@ docker cp $file exasoldb:/
 docker exec -ti exasoldb sh -c "/usr/opt/EXASuite-6/EXASolution-6.0.10/bin/Console/exaplus  -c "127.0.0.1:8888" -u sys -p exasol -f "output.sql" -x"
 #delete the file from current directory
 [ ! -e $file ] || rm $file
+
+#stop and remove postgresdb container
+docker stop postgresdb
+docker rm -v postgresdb
