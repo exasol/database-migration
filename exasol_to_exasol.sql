@@ -46,17 +46,20 @@ with vv_exa_columns as (
 	from vv_exa_columns group by "exa_table_schema","exa_table_name", table_schema,table_name
 	order by "exa_table_schema","exa_table_name", table_schema,table_name
 )
-select cast('-- ### SCHEMAS ###' as varchar(2000000)) SQL_TEXT
+select SQL_TEXT from (
+select 1 as ord, cast('-- ### SCHEMAS ###' as varchar(2000000)) SQL_TEXT
 union all 
-select * from vv_create_schemas
+select 2, a.* from vv_create_schemas a
 UNION ALL
-select cast('-- ### TABLES ###' as varchar(2000000)) SQL_TEXT
+select 3, cast('-- ### TABLES ###' as varchar(2000000)) SQL_TEXT
 union all
-select * from vv_create_tables
+select 4, b.* from vv_create_tables b
 UNION ALL
-select cast('-- ### IMPORTS ###' as varchar(2000000)) SQL_TEXT
+select 5, cast('-- ### IMPORTS ###' as varchar(2000000)) SQL_TEXT
 union all
-select * from vv_imports]],{})
+select 6, c.* from vv_imports c
+) order by ord
+]],{})
 
 if not suc then
   error('"'..res.error_message..'" Caught while executing: "'..res.statement_text..'"')
