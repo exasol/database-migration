@@ -15,7 +15,7 @@ sleep 60
 
 
 docker cp test/testing_files/retail_mini/ exasoldb2:/
-docker exec -ti exasoldb2 sh -c "/usr/opt/EXASuite-6/EXASolution-6.0.11/bin/Console/exaplus  -c "127.0.0.1:8888" -u sys -p exasol -f "retail_mini/retail_mini.sql" -x"
+docker exec -ti exasoldb2 sh -c "$exaplus  -c "127.0.0.1:8888" -u sys -p exasol -f "retail_mini/retail_mini.sql" -x"
 
 #find the ip address of the exasol container
 ip="$(docker inspect --format '{{ .NetworkSettings.IPAddress }}' exasoldb2)"
@@ -24,7 +24,7 @@ echo "create or replace connection SECOND_EXASOL_DB to '$ip:8888' user 'sys' ide
 #copy .sql file to be executed inside container
 docker cp test/testing_files/create_conn.sql exasoldb:/
 #execute the file inside the exasoldb container
-docker exec -ti exasoldb sh -c "/usr/opt/EXASuite-6/EXASolution-6.0.11/bin/Console/exaplus  -c "127.0.0.1:8888" -u sys -p exasol -f "create_conn.sql" -x"
+docker exec -ti exasoldb sh -c "$exaplus  -c "127.0.0.1:8888" -u sys -p exasol -f "create_conn.sql" -x"
 
 #create the script that we want to execute
 PYTHONPATH=$HOME/exa_py/lib/python2.7/site-packages python test/create_script.py "exasol_to_exasol.sql"
@@ -37,7 +37,7 @@ docker exec -ti exasoldb sh -c "[ ! -e $file ] || rm $file"
 #copy new output.sql file to be executed inside container
 docker cp $file exasoldb:/
 #execute the output.sql file created inside the exasoldb container
-docker exec -ti exasoldb sh -c "/usr/opt/EXASuite-6/EXASolution-6.0.11/bin/Console/exaplus  -c "127.0.0.1:8888" -u sys -p exasol -f "output.sql" -x"
+docker exec -ti exasoldb sh -c "$exaplus  -c "127.0.0.1:8888" -u sys -p exasol -f "output.sql" -x"
 #delete the file from current directory
 [ ! -e $file ] || rm $file
 

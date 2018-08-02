@@ -30,7 +30,7 @@ sleep 20
 #copy .sql file to be executed inside container
 docker cp test/testing_files/create_conn.sql exasoldb:/
 #execute the file inside the exasoldb container
-docker exec -ti exasoldb sh -c "/usr/opt/EXASuite-6/EXASolution-6.0.11/bin/Console/exaplus  -c "127.0.0.1:8888" -u sys -p exasol -f "create_conn.sql" -x"
+docker exec -ti exasoldb sh -c "$exaplus  -c "127.0.0.1:8888" -u sys -p exasol -f "create_conn.sql" -x"
 
 #create the script that we want to execute
 PYTHONPATH=$HOME/exa_py/lib/python2.7/site-packages python test/create_script.py "oracle_to_exasol.sql"
@@ -43,7 +43,7 @@ docker exec -ti exasoldb sh -c "[ ! -e $file ] || rm $file"
 #copy new output.sql file to be executed inside container
 docker cp $file exasoldb:/
 #execute the output.sql file created inside the exasoldb container
-docker exec -ti exasoldb sh -c "/usr/opt/EXASuite-6/EXASolution-6.0.11/bin/Console/exaplus  -c "127.0.0.1:8888" -u sys -p exasol -f "output.sql" -x"
+docker exec -ti exasoldb sh -c "$exaplus  -c "127.0.0.1:8888" -u sys -p exasol -f "output.sql" -x"
 #delete the file from current directory
 [ ! -e $file ] || rm $file
 
