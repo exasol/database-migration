@@ -7,16 +7,20 @@ create schema if not exists database_migration;
   - looks at all columns of type 'DOUBLE' and converts them to numbers
 	if only integer values are contained in the columns.
   - looks at all columns of type 'DECIMAL' and converts them to a smaller type
-	of decimal if only smaller datatype is also sufficient.
+	of decimal if a smaller datatype is also sufficient.
   - looks at all columns of type 'TIMESTAMP' and converts them to date
 	if only date values are contained in the columns.
+  - looks at all columns of type 'VARCHAR' and converts them to a smaller type
+    of varchar if a smaller VARCHAR can still hold the information in the column
 */
 
 --parameter	schema_name: 	  SCHEMA name or SCHEMA_FILTER (can be %)
 --parameter	table_name: 	  TABLE name or TABLE_FILTER  (can be %)	
 --parameter	apply_conversion: Can be true or false, if true, columns are automatically converted to matching datatype. If false, only output of what would be changed is generated
+--/
 create or replace script database_migration.convert_datatypes(schema_name, table_name, apply_conversion) RETURNS TABLE
  as
+
 function convert_double_to_decimal(schema_name, table_name, apply_conversion, log_for_all_columns)
 
 	local result_table = {}
@@ -38,14 +42,12 @@ function convert_double_to_decimal(schema_name, table_name, apply_conversion, lo
 			local message_action = ''
 			--select overall rowcount (not null cols and rowcount with scale information (e.g. .0000000001)
 			tsSuc, tsColumns = pquery([[select
-					count(*),1
+					count(::col_name) "count", 'values_in_column' "title", 1 "order_column"
 				from
 					::curr_schema.::curr_table				
-				where
-					::col_name is not null
 			union all
 				select
-					count(*),2
+					count(*) , 'cols_with_plain_decimals' , 2
 				from
 					::curr_schema.::curr_table
 				where --select only columns with plain decimal (no scale)
@@ -63,8 +65,11 @@ function convert_double_to_decimal(schema_name, table_name, apply_conversion, lo
 								and
 							abs(::col_name) < 1E14
 						)
-					) order by 2 asc]]
+					) order by 3 asc]]
 				, {curr_schema=quote(res[i][1]), curr_table=quote(res[i][2]),col_name=quote(res[i][3])});
+
+			-- tsColumns[1][1] is the number of not_null values in this double column
+			-- tsColumns[2][1] is the number of rows with plain decimals in this double column
 
 			if not tsSuc then
 				-- Datatype doesn't fit into decimal --> do nothing
@@ -135,17 +140,18 @@ function convert_decimal_to_smaller_decimal(schema_name, table_name, apply_conve
 			tbl = quote(res[i][2])
 			col = quote(res[i][3])
 			dColumns = query([[select
-					count(::col_name),1
+					count(::col_name) "count", 'values_in_column' "title", 1 "order_column"
 				from
 					::curr_schema.::curr_table				
 			union all
 				select
-					max(length(abs(::col_name))),2
+					max(length(abs(::col_name))) , 'max_length' , 2
 				from
 					::curr_schema.::curr_table
-			 order by 2 asc]], {curr_schema=scm, curr_table=tbl,col_name=col});
+			 order by 3 asc]], {curr_schema=scm, curr_table=tbl,col_name=col});
 			
-	
+			-- dColumns[1][1] is the number of not_null values in this decimal column
+			-- dColumns[2][1] is the max length in this decimal column
 			if dColumns[1][1]==0 then
 
 				--no rows in table -> do nothing
@@ -210,14 +216,14 @@ for i=1,#res do
 
 		--select overall rowcount (not null cols and rowcount with time information (e.g. one millisecond)
 		tsColumns = query([[select
-				count(*),1
+				count(::col_name) "count", 'values_in_column' "title", 1 "order_column"
 			from
 				::curr_schema.::curr_table				
 			where
 				::col_name is not null
 		union all
 			select
-				count(*),2
+				count(*) , 'cols_with_plain_dates' , 2
 			from
 				::curr_schema.::curr_table
 			where --select only columns with plain dates (no hours, minutes, seconds, fraction)
@@ -225,8 +231,13 @@ for i=1,#res do
 						::col_name - to_date(::col_name) != INTERVAL '00:00:00.000000' HOUR
 					TO
 						SECOND
-				) order by 2 asc]]
+				) order by 3 asc]]
 			, {curr_schema=quote(res[i][1]), curr_table=quote(res[i][2]),col_name=quote(res[i][3])});
+
+
+		-- tsColumns[1][1] is the number of not_null values in this timestamp column
+		-- tsColumns[2][1] is the number of rows with plain dataes
+
 		if tsColumns[1][1]==0 then
 			--no rows in table -> do nothing
 			message_suc = 'Keep'
@@ -259,7 +270,94 @@ for i=1,#res do
 	end
 	return result_table
 end -- end of function convert_timestamp_to_date
+
 ------------------------------------------------------------------------------------------------------
+function convert_varchar_to_smaller_varchar(schema_name, table_name, apply_conversion, log_for_all_columns)
+
+	local result_table = {}
+	res = query([[select
+				column_schema,
+				column_table,
+				column_name,
+				column_maxsize
+			from
+				exa_all_columns
+			where
+				column_type_id = 12 and --type_id of VARCHAR
+				column_schema like :schema_filter and -- e.g. '%' to convert all schema
+				COLUMN_TABLE like :table_filter	--e.g. '%' to convert all tables
+				and column_OBJECT_TYPE='TABLE'
+	]],{schema_filter=schema_name, table_filter=table_name})
+	for i=1,#res do
+			local message_suc = ''
+			local message_action = ''
+
+			scm 			= quote(res[i][1])
+			tbl				= quote(res[i][2])
+			col 			= quote(res[i][3])
+			current_maxsize = res[i][4]
+
+
+			dColumns = query([[select
+					count(::col_name) "count", 'values_in_column' "title", 1 "order_column"
+				from
+					::curr_schema.::curr_table				
+			union all
+				select
+					max(length(::col_name)), 'actual maxlength', 2
+				from
+					::curr_schema.::curr_table
+			 order by 3 asc]], {curr_schema=scm, curr_table=tbl,col_name=col});
+			
+	
+			if dColumns[1][1]==0 then
+
+				--no rows in table -> do nothing
+				message_suc = 'Keep'
+				message_action = 'Keep VARCHAR('..current_maxsize..') (IS EMPTY)'
+
+			elseif (dColumns[2][1]<= 2000000) and (estimate_optimal_varchar_length(dColumns[2][1]) < current_maxsize) then
+				-- can find smaller varchar and still smaller than 2 mio
+				change_from = current_maxsize
+				change_to = estimate_optimal_varchar_length(dColumns[2][1]) -- actual varchar size + a bit of buffer
+				if (apply_conversion) then
+					local suc, res_query = pquery([[alter table ::curr_schema.::curr_table MODIFY (::col_name VARCHAR(:new_type));]],
+									{curr_schema=quote(res[i][1]), curr_table=quote(res[i][2]), col_name=quote(res[i][3]), new_type=change_to})
+					if suc then
+						message_suc = 'true'
+						message_action = 'VARCHAR('..change_from..')  --> VARCHAR('..change_to..'), max length: '..dColumns[2][1]
+					else
+						message_suc = 'false'
+						message_action = 'VARCHAR('..change_from..')  --> VARCHAR('..change_to..') failed, ERROR: ' .. res_query.error_message .. ' Query was: ' .. res_query.statement_text
+					end
+				else -- conversion not applied
+					message_suc = 'Not yet applied'
+					message_action = 'VARCHAR('..change_from..')  --> VARCHAR('..change_to..'), max length: '..dColumns[2][1]
+				end
+			else
+				message_suc = 'Keep'
+				message_action = 'Keep VARCHAR('..res[i][4]..'), max length: '..dColumns[2][1]
+			end
+
+		if message_suc ~= 'Keep' or log_for_all_columns then
+			result_table[#result_table+1] = {res[i][1], res[i][2], res[i][3],message_suc, message_action}
+		end
+		end
+	return result_table
+	end -- end of function convert_varchar_to_smaller_varchar
+
+
+------------------------------------------------------------------------------------------------------
+
+-- Helper function for varchar conversion, takes number as input, adds 20% and rounds to next bigger round decimal
+function estimate_optimal_varchar_length(n)
+	n_p20 = math.ceil(n + n*(0.2)) -- add 20% to make sure everything fits in
+	number_digits = string.len(n_p20)
+	magnitude = math.floor(10^(number_digits-1))
+	estimated_length = math.floor(n_p20/magnitude)*magnitude+magnitude
+	return math.min(estimated_length, 2000000) -- maximal varchar size is 2 mio
+end
+
 -- Helper function to get all actions into one result set
 function merge_tables(t1, t2)
 	for i = 1, #t2 do 
@@ -288,11 +386,13 @@ end
 	local res_double 	= convert_double_to_decimal(schema_name, table_name, apply_conversion, log_for_all_columns)
 	local res_dec 		= convert_decimal_to_smaller_decimal(schema_name, table_name, apply_conversion, log_for_all_columns)
 	local res_timestamp = convert_timestamp_to_date(schema_name, table_name, apply_conversion, log_for_all_columns)
+	local res_varchar	= convert_varchar_to_smaller_varchar(schema_name, table_name, apply_conversion, log_for_all_columns)
 	
 	
 	overall_res = merge_tables(overall_res, res_double)
 	overall_res = merge_tables(overall_res, res_dec)
 	overall_res = merge_tables(overall_res, res_timestamp)
+	overall_res = merge_tables(overall_res, res_varchar)
 
 
 	-- build up output table: get length for each column to avoid exceptions when displaying output
