@@ -21,7 +21,7 @@ create schema if not exists database_migration;
 create or replace script database_migration.convert_datatypes(schema_name, table_name, apply_conversion) RETURNS TABLE
  as
 
-function convert_double_to_decimal(schema_name, table_name, apply_conversion, log_for_all_columns)
+function convert_double_to_decimal(schema_name, table_name, log_for_all_columns)
 
 	local result_table = {}
 	res = query([[
@@ -38,8 +38,9 @@ function convert_double_to_decimal(schema_name, table_name, apply_conversion, lo
 	]],{schema_filter=schema_name, table_filter=table_name})
 	
 	for i=1,#res do
-			local message_suc = ''
+			local modify_column = false
 			local message_action = ''
+			local query_to_execute = ''
 			--select overall rowcount (not null cols and rowcount with scale information (e.g. .0000000001)
 			tsSuc, tsColumns = pquery([[select
 					count(::col_name) "count", 'values_in_column' "title", 1 "order_column"
@@ -73,48 +74,33 @@ function convert_double_to_decimal(schema_name, table_name, apply_conversion, lo
 
 			if not tsSuc then
 				-- Datatype doesn't fit into decimal --> do nothing
-				message_suc = 'Keep'
 				message_action = 'Keep DOUBLE (too big for DECIMAL)'
 
 			elseif tsColumns[1][1]==0 then
 				--no rows in table -> do nothing
-				message_suc = 'Keep'
 				message_action = 'Keep DOUBLE (IS EMPTY)'
 
 			elseif tsColumns[2][1]==0 then
 				--rows in table but content seems to be decimal only (without scale information)
-				if (apply_conversion) then
-					local suc, res_query = pquery([[alter table ::curr_schema.::curr_table MODIFY (::col_name DECIMAL)]],
-									{curr_schema=quote(res[i][1]), curr_table=quote(res[i][2]), col_name=quote(res[i][3])})
-					if suc then
-						message_suc = 'true'
-						message_action = 'DOUBLE --> DECIMAL'
-					else
-						message_suc = 'false'
-						message_action = 'DOUBLE --> DECIMAL failed, ERROR: ' .. res_query.error_message .. ' Query was: ' .. res_query.statement_text
-					end
-					
-				else -- case conversion is not applied
-					message_suc = 'Not yet applied'
-					message_action = 'DOUBLE --> DECIMAL'
-				end
+				query_to_execute = "ALTER TABLE "..quote(res[i][1]).. "."..quote(res[i][2]).." MODIFY ("..quote(res[i][3]).." DECIMAL);"
+				modify_column = true
+				message_action = 'DOUBLE --> DECIMAL'
 
 			else --real double
-				message_suc = 'Keep'
 				message_action = 'Keep DOUBLE'
 				
 			end
 		
 
-		if message_suc ~= 'Keep' or log_for_all_columns then
-			result_table[#result_table+1] = {res[i][1], res[i][2], res[i][3],message_suc, message_action}
+		if modify_column == true or log_for_all_columns then
+			result_table[#result_table+1] = {res[i][1], res[i][2], res[i][3],message_action, query_to_execute}
 		end
 
 	end
 	return result_table
 	end -- end of function convert_double_to_decimal
 ------------------------------------------------------------------------------------------------------
-function convert_decimal_to_smaller_decimal(schema_name, table_name, apply_conversion, log_for_all_columns)
+function convert_decimal_to_smaller_decimal(schema_name, table_name, log_for_all_columns)
 
 	local result_table = {}
 	res = query([[select
@@ -133,8 +119,9 @@ function convert_decimal_to_smaller_decimal(schema_name, table_name, apply_conve
 				and COLUMN_NUM_PREC >9
 	]],{schema_filter=schema_name, table_filter=table_name})
 	for i=1,#res do
-			local message_suc = ''
+			local modify_column = false
 			local message_action = ''
+			local query_to_execute = ''
 
 			scm = quote(res[i][1])
 			tbl = quote(res[i][2])
@@ -155,7 +142,6 @@ function convert_decimal_to_smaller_decimal(schema_name, table_name, apply_conve
 			if dColumns[1][1]==0 then
 
 				--no rows in table -> do nothing
-				message_suc = 'Keep'
 				message_action = 'Keep DECIMAL (IS EMPTY)'
 
 			elseif (dColumns[2][1]<=9 and res[i][4] > 9) or (dColumns[2][1]<=18 and res[i][4] > 18) then
@@ -168,34 +154,24 @@ function convert_decimal_to_smaller_decimal(schema_name, table_name, apply_conve
 				--fits into 64Bit
 				change_to=18;
 				end
-				if (apply_conversion) then
-					local suc, res_query = pquery([[alter table ::curr_schema.::curr_table MODIFY (::col_name DECIMAL(:new_type))]],
-									{curr_schema=quote(res[i][1]), curr_table=quote(res[i][2]), col_name=quote(res[i][3]), new_type=change_to})
-					if suc then
-						message_suc = 'true'
-						message_action = 'DECIMAL('..change_from..')  --> DECIMAL('..change_to..'), max length: '..dColumns[2][1]
-					else
-						message_suc = 'false'
-						message_action = 'DECIMAL('..change_from..')  --> DECIMAL('..change_to..') failed, ERROR: ' .. res_query.error_message .. ' Query was: ' .. res_query.statement_text
-					end
-				else -- conversion not applied
-					message_suc = 'Not yet applied'
-					message_action = 'DECIMAL('..change_from..')  --> DECIMAL('..change_to..')'
-				end
+
+				query_to_execute = "ALTER TABLE "..quote(res[i][1]).. "."..quote(res[i][2]).." MODIFY ("..quote(res[i][3]).." DECIMAL("..change_to.."));"
+				modify_column = true
+				message_action = 'DECIMAL('..change_from..')  --> DECIMAL('..change_to..'), max length: '..dColumns[2][1]
+				
 			else
-				message_suc = 'Keep'
 				message_action = 'Keep DECIMAL('..res[i][4]..'), max length: '..dColumns[2][1]
 			end
 
-		if message_suc ~= 'Keep' or log_for_all_columns then
-			result_table[#result_table+1] = {res[i][1], res[i][2], res[i][3],message_suc, message_action}
+		if modify_column == true or log_for_all_columns then
+			result_table[#result_table+1] = {res[i][1], res[i][2], res[i][3],message_action, query_to_execute}
 		end
 		end
 	return result_table
 	end -- end of function convert_decimal_to_smaller_decimal
 	
 ------------------------------------------------------------------------------------------------------
-function convert_timestamp_to_date(schema_name, table_name, apply_conversion, log_for_all_columns)
+function convert_timestamp_to_date(schema_name, table_name, log_for_all_columns)
 result_table = {};
 res = query([[
 		select
@@ -211,8 +187,9 @@ res = query([[
 ]],{schema_filter=schema_name, table_filter=table_name})
 
 for i=1,#res do
-		local message_suc = ''
+		local modify_column = false
 		local message_action = ''
+		local query_to_execute = ''
 
 		--select overall rowcount (not null cols and rowcount with time information (e.g. one millisecond)
 		tsColumns = query([[select
@@ -240,39 +217,26 @@ for i=1,#res do
 
 		if tsColumns[1][1]==0 then
 			--no rows in table -> do nothing
-			message_suc = 'Keep'
 			message_action = 'Keep TIMESTAMP (IS EMPTY)'
 
 		elseif tsColumns[2][1]==0 then
 			--rows in table but seems to be date only (without time information)
-			if (apply_conversion) then
-				local suc, res_query = pquery([[alter table ::curr_schema.::curr_table MODIFY (::col_name DATE)]],
-									{curr_schema=quote(res[i][1]), curr_table=quote(res[i][2]), col_name=quote(res[i][3])})
-				if suc then
-						message_suc = 'true'
-						message_action = 'TIMESTAMP --> DATE'
-				else
-						message_suc = 'false'
-						message_action = 'TIMESTAMP --> DATE failed, ERROR: ' .. res_query.error_message .. ' Query was: ' .. res_query.statement_text
-				end
-			else -- no conversion applied
-				message_suc = 'Not yet applied'
-				message_action = 'TIMESTAMP --> DATE'
-			end
+			query_to_execute = "ALTER TABLE "..quote(res[i][1]).. "."..quote(res[i][2]).." MODIFY ("..quote(res[i][3]).." DATE);"
+			modify_column = true
+			message_action = 'TIMESTAMP --> DATE'
 		else
 			--real timestamp
-			message_suc = 'Keep'
 			message_action = 'Keep TIMESTAMP (IS EMPTY)'
 		end
-	if message_suc ~= 'Keep' or log_for_all_columns then
-		result_table[#result_table+1] = {res[i][1], res[i][2], res[i][3],message_suc, message_action}
+	if modify_column == true or log_for_all_columns then
+		result_table[#result_table+1] = {res[i][1], res[i][2], res[i][3],message_action, query_to_execute}
 	end
 	end
 	return result_table
 end -- end of function convert_timestamp_to_date
 
 ------------------------------------------------------------------------------------------------------
-function convert_varchar_to_smaller_varchar(schema_name, table_name, apply_conversion, log_for_all_columns)
+function convert_varchar_to_smaller_varchar(schema_name, table_name, log_for_all_columns)
 
 	local result_table = {}
 	res = query([[select
@@ -289,8 +253,9 @@ function convert_varchar_to_smaller_varchar(schema_name, table_name, apply_conve
 				and column_OBJECT_TYPE='TABLE'
 	]],{schema_filter=schema_name, table_filter=table_name})
 	for i=1,#res do
-			local message_suc = ''
+			local modify_column = false
 			local message_action = ''
+			local query_to_execute = ''
 
 			scm 			= quote(res[i][1])
 			tbl				= quote(res[i][2])
@@ -313,34 +278,22 @@ function convert_varchar_to_smaller_varchar(schema_name, table_name, apply_conve
 			if dColumns[1][1]==0 then
 
 				--no rows in table -> do nothing
-				message_suc = 'Keep'
 				message_action = 'Keep VARCHAR('..current_maxsize..') (IS EMPTY)'
 
 			elseif (dColumns[2][1]<= 2000000) and (estimate_optimal_varchar_length(dColumns[2][1]) < current_maxsize) then
 				-- can find smaller varchar and still smaller than 2 mio
 				change_from = current_maxsize
 				change_to = estimate_optimal_varchar_length(dColumns[2][1]) -- actual varchar size + a bit of buffer
-				if (apply_conversion) then
-					local suc, res_query = pquery([[alter table ::curr_schema.::curr_table MODIFY (::col_name VARCHAR(:new_type));]],
-									{curr_schema=quote(res[i][1]), curr_table=quote(res[i][2]), col_name=quote(res[i][3]), new_type=change_to})
-					if suc then
-						message_suc = 'true'
-						message_action = 'VARCHAR('..change_from..')  --> VARCHAR('..change_to..'), max length: '..dColumns[2][1]
-					else
-						message_suc = 'false'
-						message_action = 'VARCHAR('..change_from..')  --> VARCHAR('..change_to..') failed, ERROR: ' .. res_query.error_message .. ' Query was: ' .. res_query.statement_text
-					end
-				else -- conversion not applied
-					message_suc = 'Not yet applied'
-					message_action = 'VARCHAR('..change_from..')  --> VARCHAR('..change_to..'), max length: '..dColumns[2][1]
-				end
+				query_to_execute = "ALTER TABLE "..quote(res[i][1]).. "."..quote(res[i][2]).." MODIFY ("..quote(res[i][3]).." VARCHAR("..change_to.."));"
+				modify_column = true
+				message_action = 'VARCHAR('..change_from..')  --> VARCHAR('..change_to..'), max length: '..dColumns[2][1]
+				
 			else
-				message_suc = 'Keep'
 				message_action = 'Keep VARCHAR('..res[i][4]..'), max length: '..dColumns[2][1]
 			end
 
-		if message_suc ~= 'Keep' or log_for_all_columns then
-			result_table[#result_table+1] = {res[i][1], res[i][2], res[i][3],message_suc, message_action}
+		if modify_column == true or log_for_all_columns then
+			result_table[#result_table+1] = {res[i][1], res[i][2], res[i][3], message_action, query_to_execute}
 		end
 		end
 	return result_table
@@ -376,6 +329,22 @@ function getMaxLengthForColumn(input_table, column_number)
 	end
 	return length
 end
+
+-- Helper fuction to execute one column containing sql and log it in the result table
+function exectue_sql_column(input_table, sql_col_number, log_col_number)
+
+	for i= 1, #input_table do
+		sql_stmt = input_table[i][sql_col_number]
+		sql_suc, sql_res = pquery(sql_stmt)
+		if sql_suc then
+			input_table[i][log_col_number] = 'true'
+		else
+			input_table[i][log_col_number] = 'ERROR: ' .. res_query.error_message
+		end
+	end
+	return input_table
+end
+
 -----------------------------END OF FUNCTIONS, BEGINNING OF ACTUAL SCRIPT-----------------------------
 	
 	-- parameter to regulate amount of output
@@ -383,10 +352,10 @@ end
 	log_for_all_columns = false
 
 	local overall_res = {}
-	local res_double 	= convert_double_to_decimal(schema_name, table_name, apply_conversion, log_for_all_columns)
-	local res_dec 		= convert_decimal_to_smaller_decimal(schema_name, table_name, apply_conversion, log_for_all_columns)
-	local res_timestamp = convert_timestamp_to_date(schema_name, table_name, apply_conversion, log_for_all_columns)
-	local res_varchar	= convert_varchar_to_smaller_varchar(schema_name, table_name, apply_conversion, log_for_all_columns)
+	local res_double 	= convert_double_to_decimal(schema_name, table_name, log_for_all_columns)
+	local res_dec 		= convert_decimal_to_smaller_decimal(schema_name, table_name, log_for_all_columns)
+	local res_timestamp = convert_timestamp_to_date(schema_name, table_name, log_for_all_columns)
+	local res_varchar	= convert_varchar_to_smaller_varchar(schema_name, table_name, log_for_all_columns)
 	
 	
 	overall_res = merge_tables(overall_res, res_double)
@@ -394,15 +363,38 @@ end
 	overall_res = merge_tables(overall_res, res_timestamp)
 	overall_res = merge_tables(overall_res, res_varchar)
 
+	if (apply_conversion) then
+		overall_res = exectue_sql_column(overall_res,5,6)
+	end
+
+
+	-- check whether DOUBLES have been changed to DECIMALS
+	if(#res_dec > 0) then
+		if (apply_conversion) then
+			-- run convert decimal to smaller decimal once again, to make sure also columns that have just been changed from double to decimal are treated
+			local res_dec_second_run = convert_decimal_to_smaller_decimal(schema_name, table_name, log_for_all_columns)
+			res_dec_second_run = exectue_sql_column(res_dec_second_run,5,6)
+			overall_res = merge_tables(overall_res, res_dec_second_run)
+		else
+			info_row = {}
+			info_row[1] = {'', '', '', '', '-- Please execute the script again after having modified your tables to find also a matching size for the former DECIMAL columns.'}
+			overall_res = merge_tables(info_row,overall_res)
+		end
+	end
 
 	-- build up output table: get length for each column to avoid exceptions when displaying output
-	length_schema 	= getMaxLengthForColumn(overall_res,1)
-	length_table 	= getMaxLengthForColumn(overall_res,2)
-	length_column 	= getMaxLengthForColumn(overall_res,3)
-	length_success 	= getMaxLengthForColumn(overall_res,4)
-	length_actions 	= getMaxLengthForColumn(overall_res,5)
+	length_schema 		= getMaxLengthForColumn(overall_res,1)
+	length_table 		= getMaxLengthForColumn(overall_res,2)
+	length_column 		= getMaxLengthForColumn(overall_res,3)
+	length_conversions 	= getMaxLengthForColumn(overall_res,4)
+	length_query 		= getMaxLengthForColumn(overall_res,5)
 
-	exit(overall_res, "schema_name char("..length_schema.."), table_name char("..length_table.."), column_name char("..length_column.."),success char("..length_success.."), actions char("..length_actions..")")
+	if (apply_conversion) then
+		length_success		= getMaxLengthForColumn(overall_res,6)
+		exit(overall_res, "schema_name char("..length_schema.."), table_name char("..length_table.."), column_name char("..length_column.."),conversion char("..length_conversions.."), query_text char("..length_query.."), success char("..length_success..")")
+	else
+		exit(overall_res, "schema_name char("..length_schema.."), table_name char("..length_table.."), column_name char("..length_column.."),conversion char("..length_conversions.."), query_text char("..length_query..")")
+	end
 /
 
 
