@@ -76,6 +76,41 @@ function setPrimaryKey(schema_name, table_name, column_name, constraint_name, co
 end
 
 ------------------------------------------------------------------------------------------------------
+
+-- query without group by here
+function getNotNullColumnsFromExasol(connection_type, connection_name, schema_name, table_name)
+	res = query([[select SCHEMA_NAME, TABLE_NAME, COLUMN_NAME
+	from(import from ::ct at ::cn statement '
+		select constraint_schema as schema_name, constraint_table as table_name, column_name 
+		from EXA_ALL_CONSTRAINT_COLUMNS
+		where constraint_type = ''NOT NULL''
+		AND constraint_schema LIKE '']]..schema_name..[['' -- Schema Filter
+		AND constraint_table LIKE '']] .. table_name..[['' -- Table Filter
+	')
+	;]],{ct=connection_type, cn = connection_name, sn = schema_name})
+	return res
+end
+
+-- sets not null constraint for given column
+-- if primary key should consist of multiple columns, column_name must be 'col_a, col_b, col_c'
+-- constraint_status must be 'ENABLE' or 'DISABLE'
+function setNotNull(schema_name, table_name, column_name, constraint_status)
+
+	quoted_column_names = quoteCommaSeperatedString(column_name)
+	output(quoted_column_names)
+
+	succ, res = pquery([[
+	ALTER TABLE ::sn.::tn MODIFY COLUMN ]]..quoted_column_names..[[ NOT NULL ]]..constraint_status..[[;
+	]],{sn=quote(schema_name), tn=quote(table_name)})
+	if (not succ) then
+		output(res.statement_text)
+		return false, 'Error not null: '.. res.error_message
+	end
+	return true, 'SET as NOT NULL'
+end
+
+
+------------------------------------------------------------------------------------------------------
 -- get information about foreign keys from other db
 -- returns table consisting of: constraint_name, schema_name, table_name, column_name, ref_schema_name, ref_table_name
 function getForeignKeyInformationFromForeignDb(connection_type, connection_name, connection_database_type, schema_name, table_name)
@@ -206,6 +241,29 @@ for i=1,#prim_cols do
 
 	result_success, result_text = setPrimaryKey(pk_schema_name, pk_table_name, pk_column_name, pk_constraint_name, constraint_status)
 	result_table[#result_table+1] = {pk_schema_name, pk_table_name, pk_column_name, result_success, result_text}
+end
+
+-- get and set not null constraints
+if (connection_database_type == 'EXASOL') then
+
+	not_null_cols = getNotNullColumnsFromExasol(connection_type, connection_name, schema_filter, table_filter)
+
+	for i=1,#not_null_cols do
+	
+		if(flag_identifier_case_insensitive) then
+			nn_schema_name		= string.upper(not_null_cols[i][1])
+			nn_table_name		= string.upper(not_null_cols[i][2])
+			nn_column_name		= string.upper(not_null_cols[i][3])
+
+		else
+			nn_schema_name		= not_null_cols[i][1]
+			nn_table_name		= not_null_cols[i][2]
+			nn_column_name		= not_null_cols[i][3]
+		end
+	
+		result_success, result_text = setNotNull(nn_schema_name, nn_table_name, nn_column_name, constraint_status)
+		result_table[#result_table+1] = {nn_schema_name, nn_table_name, nn_column_name, result_success, result_text}
+	end
 end
 
 -- get and set foreign keys
