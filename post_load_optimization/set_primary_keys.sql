@@ -27,6 +27,19 @@ function getPrimaryKeyColumnsFromOracle(connection_type, connection_name, schema
 	return res
 end
 
+function getPrimaryKeyColumnsFromExasol(connection_type, connection_name, schema_name, table_name)
+	res = query([[select SCHEMA_NAME, TABLE_NAME, GROUP_CONCAT(COLUMN_NAME SEPARATOR ', '), CONSTRAINT_NAME
+	from(import from ::ct at ::cn statement '
+		select constraint_schema as schema_name, constraint_table as table_name, column_name, constraint_name 
+		from EXA_ALL_CONSTRAINT_COLUMNS
+		where constraint_type = ''PRIMARY KEY''
+		AND constraint_schema LIKE '']]..schema_name..[['' -- Schema Filter
+		AND constraint_table LIKE '']] .. table_name..[['' -- Table Filter
+	')
+	GROUP BY (CONSTRAINT_NAME, SCHEMA_NAME, TABLE_NAME);]],{ct=connection_type, cn = connection_name, sn = schema_name})
+	return res
+end
+
 function getPrimaryKeyColumnsFromMySql(connection_type, connection_name, schema_name, table_name)
 	-- get columns for primary keys from oracle
 	-- owner, table_name, column_name
@@ -63,27 +76,11 @@ function setPrimaryKey(schema_name, table_name, column_name, constraint_name, co
 end
 
 ------------------------------------------------------------------------------------------------------
--- get information about foreign keys from oracle
+-- get information about foreign keys from other db
 -- returns table consisting of: constraint_name, schema_name, table_name, column_name, ref_schema_name, ref_table_name
 function getForeignKeyInformationFromForeignDb(connection_type, connection_name, connection_database_type, schema_name, table_name)
 	foreignDbStatement = [[]]
-	if(connection_database_type == 'ORACLE') then
-		foreignDbStatement = [[
-		SELECT c.constraint_name, c.owner as schema_name, c.table_name as table_name, c2.owner as referenced_schema, c2.table_name as referenced_table, cols.column_name as column_name
-		FROM all_constraints c 
-		JOIN all_constraints c2 ON (c.r_constraint_name = c2.constraint_name) 
-		JOIN all_cons_columns cols ON (cols.constraint_name = c.constraint_name)
-		WHERE c.OWNER LIKE '']]..schema_name..[['' -- Schema Filter
-		AND c.table_name LIKE '']] .. table_name..[['' -- Table Filter
-		AND c.constraint_TYPE = ''R''
-		]]
-
-		succ, res = pquery([[select constraint_name, schema_name, table_name, GROUP_CONCAT(COLUMN_NAME SEPARATOR ', ') , max(referenced_schema), max(referenced_table)
-		from(import from ::ct at ::cn statement ']]..foreignDbStatement..[[')
-		GROUP BY (CONSTRAINT_NAME, SCHEMA_NAME, TABLE_NAME)
-		;]], {ct=connection_type, cn = connection_name, sn = schema_name})
-
-	elseif(connection_database_type == 'MYSQL') then
+	if(connection_database_type == 'MYSQL') then
 		foreignDbStatement = [[
 		SELECT cu.constraint_name, cu.TABLE_SCHEMA, cu.TABLE_NAME, GROUP_CONCAT(c.COLUMN_NAME SEPARATOR '', '') as column_name, cu.REFERENCED_TABLE_SCHEMA, cu.REFERENCED_TABLE_NAME
 		FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE cu
@@ -98,12 +95,41 @@ function getForeignKeyInformationFromForeignDb(connection_type, connection_name,
 		succ, res = pquery([[select *
 		from(import from ::ct at ::cn statement ']]..foreignDbStatement..[[')
 		;]], {ct=connection_type, cn = connection_name, sn = schema_name})
+
+		
 	else
-		error('Unknown connection database type: '..connection_database_type)
+		if (connection_database_type == 'ORACLE') then
+			foreignDbStatement = [[
+			SELECT c.constraint_name, c.owner as schema_name, c.table_name as table_name, c2.owner as referenced_schema, c2.table_name as referenced_table, cols.column_name as column_name
+			FROM all_constraints c 
+			JOIN all_constraints c2 ON (c.r_constraint_name = c2.constraint_name) 
+			JOIN all_cons_columns cols ON (cols.constraint_name = c.constraint_name)
+			WHERE c.OWNER LIKE '']]..schema_name..[['' -- Schema Filter
+			AND c.table_name LIKE '']] .. table_name..[['' -- Table Filter
+			AND c.constraint_TYPE = ''R''
+			]]
+	
+		elseif(connection_database_type == 'EXASOL') then
+			foreignDbStatement = [[
+			SELECT constraint_name, constraint_schema as schema_name, constraint_table as table_name, referenced_schema, referenced_table, column_name
+			FROM EXA_ALL_CONSTRAINT_COLUMNS
+			WHERE constraint_type = ''FOREIGN KEY''
+			AND constraint_schema LIKE '']]..schema_name..[['' -- Schema Filter
+			AND constraint_table LIKE '']] .. table_name..[['' -- Table Filter
+ 			]]
+		else
+			error('Unknown connection database type: '..connection_database_type)
+		end
+		
+		succ, res = pquery([[select constraint_name, schema_name, table_name, GROUP_CONCAT(COLUMN_NAME SEPARATOR ', ') , max(referenced_schema), max(referenced_table)
+			from(import from ::ct at ::cn statement ']]..foreignDbStatement..[[')
+			GROUP BY (CONSTRAINT_NAME, SCHEMA_NAME, TABLE_NAME)
+			;]], {ct=connection_type, cn = connection_name, sn = schema_name})
+
 	end
 
 	if not succ then
-		error('Error in getForeignKeyInformationFromForeignDb: ' .. res.error_message)
+		error('Error in getForeignKeyInformationFromForeignDb: \n' .. res.error_message .. '\nStatement was: '.. res.statement_text)
 	end
 	return(res)
 end
@@ -149,13 +175,15 @@ if(constraint_status ~= 'ENABLE' and constraint_status ~= 'DISABLE') then
 end
 
 connection_database_type = string.upper(connection_database_type)
-if(connection_database_type ~= 'ORACLE' and connection_database_type ~= 'MYSQL') then
-	error([[Please specify a proper connection_database_type. Could be 'ORACLE' or 'MYSQL']])
+if(connection_database_type ~= 'ORACLE' and connection_database_type ~= 'MYSQL' and connection_database_type ~= 'EXASOL') then
+	error([[Please specify a proper connection_database_type. Could be 'ORACLE', 'MYSQL' or 'EXASOL']])
 end
 
 -- get and set primary keys
 if(connection_database_type == 'ORACLE') then
 	prim_cols = getPrimaryKeyColumnsFromOracle(connection_type, connection_name, schema_filter, table_filter)
+elseif (connection_database_type == 'EXASOL') then
+	prim_cols = getPrimaryKeyColumnsFromExasol(connection_type, connection_name, schema_filter, table_filter)
 else
 	prim_cols = getPrimaryKeyColumnsFromMySql(connection_type, connection_name, schema_filter, table_filter)
 end
@@ -216,10 +244,10 @@ exit(result_table, "schema_name char(200), table_name char(200), column_name cha
 -- TODO: Also generate not null constraints
 
 -- Examples of usage
-execute script database_migration.set_primary_and_foregin_keys(
+execute script DATABASE_MIGRATION.SET_PRIMARY_AND_FOREIGN_KEYS(
 'JDBC',				-- connection_type:						Type of connection, e.g. 'JDBC' or 'ORA'
 'JDBC_MYSQL',		-- connection_name:						Name of connection
-'MYSQL',			-- connection_database_type:			Type of database from which the keys should be migrated, currently 'ORACLE' and 'MYSQL' are supported
+'MYSQL',			-- connection_database_type:			Type of database from which the keys should be migrated, currently 'ORACLE', 'MYSQL' and 'EXASOL' are supported
 'MY_SCHEMA',		-- schema_filter:						Filter for the schemas, e.g. '%' to take all schemas, 'my_schema' to load only primary_keys from this schema
 '%',				-- table_filter:						Filter for the tables matching schema_filter, e.g. '%' to take all tables, 'my_table' to only load keys for this table
 'DISABLE',		-- constraint_status:					Could be 'ENABLE' or 'DISABLE' and specifies whether the generated keys should be enabled or disabled
