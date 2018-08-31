@@ -3,7 +3,7 @@
 --in case there is no update column or primary keys -> a full load of the table is done.
 
 -- conn_type: connection type -> one of the connection types the import statement support -> e.g. JDBC (to use with a generic database), EXA, ORA
--- conn_db: 	which database is this script importing from --> 'MYSQL' or 'EXASOL'
+-- conn_db: 	which database is this script importing from --> 'MYSQL', 'SQLSERVER'or 'EXASOL'
 -- conn_name: name of the connection -> that connection has to be created upfront and is used for the import statements
 -- source_schema_name: name of the schema in the source system
 -- target_schema_name: name of the target schema (contains the table you want to import into) -> can also include wildcards for a like-clause
@@ -92,7 +92,12 @@ function getMaxValue(conn_db, delta_detection_column, target_schema, target_tabl
 	delta_col_type = delta_col_type[1][1]
 		
 	if (delta_col_type == 'TIMESTAMP' or delta_col_type == 'DATE') then
-		maxQuery = [[to_char(max(::col_name), 'YYYY-MM-DD HH24:MI:SS.FF6')]]
+		if(conn_db == 'SQLSERVER') then
+			-- reduce number of milliseconds for sqlserver
+			maxQuery = [[to_char(max(::col_name), 'YYYY-MM-DD HH24:MI:SS.FF3')]] 
+		else
+			maxQuery = [[to_char(max(::col_name), 'YYYY-MM-DD HH24:MI:SS.FF6')]]
+		end
 	else
 		maxQuery = 'max(::col_name)'
 	end
@@ -103,6 +108,8 @@ function getMaxValue(conn_db, delta_detection_column, target_schema, target_tabl
 		if (delta_col_type == 'TIMESTAMP' or delta_col_type == 'DATE') then
 			if(conn_db == 'MYSQL') then
 				maxDelta = [[STR_TO_DATE(']]..maxDeltaVal[1][1]..[[', '%Y-%m-%d %H:%i:%s.%f')]]
+			elseif (conn_db == 'SQLSERVER') then
+				maxDelta = [[CONVERT(datetime,']]..maxDeltaVal[1][1]..[[', 121)]]
 			else
 				maxDelta = [[to_timestamp(']]..maxDeltaVal[1][1]..[[', 'YYYY-MM-DD HH24:MI:SS.FF6')]]
 			end
@@ -292,7 +299,7 @@ return wrapper:finish()
 
 execute script database_migration.delta_import(
 'JDBC',  			-- conn_type (JDBC / ORA/ EXA/...) To load from another schema in the same DB: set conn_type to 'LOCAL', conn_db to '' and conn_name to ''
-'MYSQL',	 		-- conn_db (ORACLE, MYSQL, EXASOL...)
+'MYSQL',	 		-- conn_db (ORACLE, MYSQL, SQLSERVER, EXASOL)
 'MY_CONN', 			-- conn_name, case sensitive
 'SOURCE_SCHEMA',	-- source_schema_name (can NOT contain wildcards), case sensitive
 'TARGET_SCHEMA',  	-- target_schema_name (can contain wildcards), case sensitive
