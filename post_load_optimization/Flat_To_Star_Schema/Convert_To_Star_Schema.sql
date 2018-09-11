@@ -318,7 +318,7 @@ CREATE OR REPLACE LUA SCRIPT CONVERT_TO_STAR_SCHEMA(flat_table, given_fact_table
 		local dimCreateStatements = {}
 		
 		for a = 1, #dimensions do
-			local str = 'CREATE OR REPLACE TABLE ' .. dimensions[a][1] .. ' (' .. dimensions[a][3] .. ' DECIMAL(10,0) IDENTITY, ' .. dimensions[a][2] .. ', PRIMARY KEY(' .. dimensions[a][3] ..'))'
+			local str = 'CREATE OR REPLACE TABLE ' .. target_schema .. '.' .. dimensions[a][1] .. ' (' .. dimensions[a][3] .. ' DECIMAL(10,0) IDENTITY, ' .. dimensions[a][2] .. ', PRIMARY KEY(' .. dimensions[a][3] ..'));'
 			dimCreateStatements[#dimCreateStatements+1] = {str}
 		end
 		return dimCreateStatements
@@ -334,7 +334,7 @@ CREATE OR REPLACE LUA SCRIPT CONVERT_TO_STAR_SCHEMA(flat_table, given_fact_table
 			factTable[1][1] = dimensions[a][4] .. ' DECIMAL(10,0), ' .. factTable[1][1] .. ', FOREIGN KEY(' ..  dimensions[a][4] .. ') REFERENCES ' .. dimensions[a][1] ..'(' .. dimensions[a][3] .. ')'
 		end
 		
-		factCreateStatements = 'CREATE OR REPLACE TABLE ' .. given_fact_table_name .. ' (' .. factTable[1][1] .. ')'
+		factCreateStatements = 'CREATE OR REPLACE TABLE ' .. target_schema .. '.'  .. given_fact_table_name .. ' (' .. factTable[1][1] .. ');'
 		
 		return factCreateStatements
 	end
@@ -383,7 +383,7 @@ CREATE OR REPLACE LUA SCRIPT CONVERT_TO_STAR_SCHEMA(flat_table, given_fact_table
 		end
 
 		for b = 1, #columns do
-			insertStatement[#insertStatement+1] = {'INSERT INTO ' .. columns[b][1] .. '(' .. columns[b][2] .. ') (SELECT DISTINCT ' .. columns[b][2] .. ' FROM ' .. target_schema .. '.' .. target_table .. ' WHERE NOT EXISTS (SELECT 1 FROM ' .. columns[b][1] .. ' WHERE (' .. columns[b][3] .. ')))'}
+			insertStatement[#insertStatement+1] = {'INSERT INTO ' .. target_schema .. '.'  .. columns[b][1] .. '(' .. columns[b][2] .. ') (SELECT DISTINCT ' .. columns[b][2] .. ' FROM ' .. target_schema .. '.' .. target_table .. ' WHERE NOT EXISTS (SELECT 1 FROM ' .. columns[b][1] .. ' WHERE (' .. columns[b][3] .. ')));'}
 		end
 		
 		return insertStatement
@@ -420,7 +420,7 @@ CREATE OR REPLACE LUA SCRIPT CONVERT_TO_STAR_SCHEMA(flat_table, given_fact_table
 		end
 
 		insertStatement = 
-			'INSERT INTO ' .. string.upper(given_fact_table_name) .. ' (' .. insertSegment .. ', ' .. factTable[3][1] .. ') (SELECT ' .. selectSegment .. ', ' .. factTable[2][1] ..
+			'INSERT INTO ' .. target_schema .. '.' .. string.upper(given_fact_table_name) .. ' (' .. insertSegment .. ', ' .. factTable[3][1] .. ') (SELECT ' .. selectSegment .. ', ' .. factTable[2][1] ..
 			' FROM ' .. target_schema .. '.' .. target_table 
 	
 		local leftJoins = ''
@@ -440,7 +440,7 @@ CREATE OR REPLACE LUA SCRIPT CONVERT_TO_STAR_SCHEMA(flat_table, given_fact_table
 			target_table .. '.' .. factTableIndividualColumns[c][2] .. ' IS NULL))'
 		end
 		
-		insertStatement = insertStatement .. leftJoins .. ' WHERE NOT EXISTS (SELECT 1 FROM ' .. given_fact_table_name .. ' WHERE (' .. whereClauseKeyComparator .. ') AND (' .. whereNotExistsClause .. ')))'
+		insertStatement = insertStatement .. leftJoins .. ' WHERE NOT EXISTS (SELECT 1 FROM ' .. given_fact_table_name .. ' WHERE (' .. whereClauseKeyComparator .. ') AND (' .. whereNotExistsClause .. ')));'
 		
 		return insertStatement
 	end
