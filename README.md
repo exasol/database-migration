@@ -37,6 +37,17 @@ The method of importing a CSV file depends on the location of the file.
 ```sql
 IMPORT INTO <table> FROM LOCAL CSV FILE '<filename>' <options>;
 ```
+Example:
+``` sql
+IMPORT INTO MY_SCHEMA.MY_TABLE
+FROM LOCAL CSV FILE 'C:\Users\my_user\Downloads\data.csv'
+COLUMN SEPARATOR = ',' 
+COLUMN DELIMITER = '"' 
+ROW SEPARATOR = 'CRLF' -- CR when file was generated on a unix systems, CRLF when created on windows
+SKIP = 1 -- skip the header
+;
+```
+
 - Import from **HDFS**: See [SOL-322](https://www.exasol.com/support/browse/SOL-322)
 
 - Import from **S3**: See [Exasol-1774](https://www.exasol.com/support/browse/Exasol-1774) for single file import, for importing multiple files scroll down to [S3](#s3)
