@@ -115,7 +115,7 @@ function convert_decimal_to_smaller_decimal(schema_name, table_name, log_for_all
 				column_schema like :schema_filter and -- e.g. '%' to convert all schema
 				COLUMN_TABLE like :table_filter	--e.g. '%' to convert all tables
 				and column_OBJECT_TYPE='TABLE'
-				and COLUMN_NUM_SCALE = 0 -- for instance only handle values without scale
+				--and COLUMN_NUM_SCALE = 0 -- uncomment to only handle values without scale
 				and COLUMN_NUM_PREC >9
 	]],{schema_filter=schema_name, table_filter=table_name})
 	for i=1,#res do
@@ -155,9 +155,9 @@ function convert_decimal_to_smaller_decimal(schema_name, table_name, log_for_all
 				change_to=18;
 				end
 
-				query_to_execute = "ALTER TABLE "..quote(res[i][1]).. "."..quote(res[i][2]).." MODIFY ("..quote(res[i][3]).." DECIMAL("..change_to.."));"
+				query_to_execute = "ALTER TABLE "..quote(res[i][1]).. "."..quote(res[i][2]).." MODIFY ("..quote(res[i][3]).." DECIMAL("..change_to..","..res[i][5].."));"
 				modify_column = true
-				message_action = 'DECIMAL('..change_from..')  --> DECIMAL('..change_to..'), max length: '..dColumns[2][1]
+				message_action = 'DECIMAL('..change_from..', '..res[i][5]..')  --> DECIMAL('..change_to..', '..res[i][5]..'), max length: '..dColumns[2][1]
 				
 			else
 				message_action = 'Keep DECIMAL('..res[i][4]..'), max length: '..dColumns[2][1]
