@@ -5,7 +5,6 @@ create schema database_migration;
 	to load all needed data from an oracle database. Automatic datatype conversion is
 	applied whenever needed. Feel free to adjust it. 
 */
-
 --/
 create or replace script database_migration.ORACLE_TO_EXASOL (
 CONNECTION_NAME				 -- name of the database connection inside exasol -> e.g. mysql_db

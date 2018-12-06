@@ -5,7 +5,7 @@ create schema database_migration;
      to load all needed data from a SQL Server database. Automatic datatype conversion is 
      applied whenever needed. Feel free to adjust it. 
 */
-
+--/
 create or replace script database_migration.SQLSERVER_TO_EXASOL(
 CONNECTION_NAME 				-- name of the database connection inside exasol, e.g. sqlserver_db
 ,DB2SCHEMA 						-- if true then SQL Server: database.schema.table => EXASOL: database.schema_table; if false then SQLSERVER: schema.table => EXASOL: schema.table

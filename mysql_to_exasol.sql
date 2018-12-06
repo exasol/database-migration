@@ -4,8 +4,7 @@ create schema database_migration;
 	to load all needed data from a mysql database. Automatic datatype conversion is
 	applied whenever needed. Feel free to adjust it. 
 */
-
-
+--/
 create or replace script database_migration.MYSQL_TO_EXASOL(
 CONNECTION_NAME 				-- name of the database connection inside exasol -> e.g. mysql_db
 ,IDENTIFIER_CASE_INSENSITIVE 	-- true if identifiers should be stored case-insensitiv (will be stored upper_case)

@@ -5,6 +5,7 @@
 -- table_filter:						Filter for the tables matching schema_filter, e.g. '%' to take all tables, 'my_table' to only load keys for this table
 -- constraint_status:					Could be 'ENABLE' or 'DISABLE' and specifies whether the generated keys should be enabled or disabled
 -- flag_identifier_case_insensitive: 	True if identifiers should be stored case-insensitiv (will be stored upper_case)
+--/
 create or replace script database_migration.set_primary_and_foreign_keys(connection_type, connection_name,connection_database_type, schema_filter, table_filter, constraint_status, flag_identifier_case_insensitive) RETURNS TABLE
  as
 ------------------------------------------------------------------------------------------------------

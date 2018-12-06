@@ -10,7 +10,7 @@ Automatic datatype conversion is applied whenever needed. Feel free to adjust it
 -- "jdbc:ingres://${HOSTNAME}:${PORT}/${DB};UID=${USERNAME};PWD=${PASSWORD}"
 -- Port is the Data Access Server (DAS) Port (in my case 17031 - Actian Vector AP 3.5.1) or the replacement (AP7)
 -- see in Actian Director Server -> Management -> Data Access Servers -> (default) -> ... [right click, "Properties"]; then "Protocols"
-
+--/
 create or replace script database_migration.VECTORWISE_TO_EXASOL(
 CONNECTION_NAME --name of the database connection inside exasol -> e.g. vector_conn
 ,IDENTIFIER_CASE_INSENSITIVE -- if true then all is converted to uppercase in EXASOL, if false identifiers are double-qouted (")

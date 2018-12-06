@@ -1,6 +1,6 @@
 CREATE SCHEMA IF NOT EXISTS DATABASE_MIGRATION;
 
-
+--/
 CREATE OR REPLACE PYTHON SCALAR SCRIPT DATABASE_MIGRATION."S3_GET_FILENAMES"
 (
  "force_http" BOOLEAN,
@@ -85,7 +85,6 @@ def run(ctx):
 ------------------------------------------------------------------------------------------------------------------------
 
 --/
-
 CREATE OR REPLACE LUA SCALAR SCRIPT DATABASE_MIGRATION.GET_CONNECTION_NAME(connection_name VARCHAR(2000))
 	RETURNS VARCHAR(20000) AS
 	function run(ctx)
@@ -104,7 +103,6 @@ select DATABASE_MIGRATION.GET_CONNECTION_NAME(
 -- # parallel_connections: number of parallel files imported in one import statement
 -- # file_opts:			 search EXASolution_User_Manual for 'file_opts' to see all possible options
 --/
-
 CREATE OR REPLACE LUA SCRIPT DATABASE_MIGRATION.S3_PARALLEL_READ
 (
  execute_statements,
