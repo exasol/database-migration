@@ -184,7 +184,7 @@ Upload the following files into a bucket called "bqmigration" in the default Buc
 - JSON key file for your BigQuery service account
 - jar files of the BigQuery JDBC driver (tested with Simba v1.1.6)
 
-The migration script creates DDL and import statements together with a CREATE CONNECTION statements for imports. In order to perform these imports the JDBC driver has to be also installed in ExaOperation, see [SOL-194](https://www.exasol.com/support/browse/SOL-194) for details.  
+The migration script creates DDL and IMPORT statements together with a CREATE CONNECTION statement. In order to perform these imports the JDBC driver has also to be installed in ExaOperation, see [SOL-194](https://www.exasol.com/support/browse/SOL-194) for details.  
 
 
 ## Post-load optimization
