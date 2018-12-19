@@ -17,7 +17,7 @@
     * [Teradata](#teradata)
     * [Vectorwise](#vectorwise)
     * [Vertica](#vertica)
-    * [Google BigQuery](#googlebigquery)
+    * [Google BigQuery](#google-bigquery)
 3. [Post-load optimization](#post-load-optimization)
 4. [Delta import](#delta-import)
 
