@@ -17,6 +17,7 @@
     * [Teradata](#teradata)
     * [Vectorwise](#vectorwise)
     * [Vertica](#vertica)
+    * [Google BigQuery](#googlebigquery)
 3. [Post-load optimization](#post-load-optimization)
 4. [Delta import](#delta-import)
 
@@ -182,6 +183,7 @@ See script [bigquery_to_exasol.sql](bigquery_to_exasol.sql)
 Upload the following files into a bucket called "bqmigration" in the default BucketFS service:
 - JSON key file for your BigQuery service account
 - jar files of the BigQuery JDBC driver (tested with Simba v1.1.6)
+
 The migration script creates DDL and import statements together with a CREATE CONNECTION statements for imports. In order to perform these imports the JDBC driver has to be also installed in ExaOperation, see [SOL-194](https://www.exasol.com/support/browse/SOL-194) for details.  
 
 
