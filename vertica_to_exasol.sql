@@ -1,4 +1,4 @@
-create schema database_migration;
+create schema if not exists database_migration;
 
 /* 
     This script will generate create schema, create table and create import statements 
