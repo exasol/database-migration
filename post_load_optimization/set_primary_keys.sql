@@ -42,7 +42,7 @@ function getPrimaryKeyColumnsFromExasol(connection_type, connection_name, schema
 end
 
 function getPrimaryKeyColumnsFromMySql(connection_type, connection_name, schema_name, table_name)
-	-- get columns for primary keys from oracle
+	-- get columns for primary keys from mysql
 	-- owner, table_name, column_name
 	res = query([[select TABLE_SCHEMA, TABLE_NAME, GROUP_CONCAT(COLUMN_NAME SEPARATOR ', '), CONSTRAINT_NAME
 	from(import from ::ct at ::cn statement '
@@ -54,6 +54,26 @@ function getPrimaryKeyColumnsFromMySql(connection_type, connection_name, schema_
 		AND cu.table_name like '']] .. table_name..[[''
 	')
 	GROUP BY (CONSTRAINT_NAME, TABLE_SCHEMA, TABLE_NAME);]], {ct=connection_type, cn = connection_name})
+	return res
+end
+
+
+function getPrimaryKeyColumnsFromSqlserver(connection_type, connection_name, schema_name, table_name)
+	-- get columns for primary keys from sqlserver
+	-- owner, table_name, column_name
+	res = query([[select SCHEMA_NAME, TABLE_NAME, GROUP_CONCAT(COLUMN_NAME SEPARATOR ', '), CONSTRAINT_NAME
+	from(import from ::ct at ::cn statement  '
+                SELECT TC.table_schema as SCHEMA_NAME, KU.table_name as TABLE_NAME,column_name as COLUMN_NAME, TC.constraint_name as CONSTRAINT_NAME
+                FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS AS TC
+                INNER JOIN
+                    INFORMATION_SCHEMA.KEY_COLUMN_USAGE AS KU
+                          ON TC.CONSTRAINT_TYPE = ''PRIMARY KEY''
+                             AND TC.CONSTRAINT_NAME = KU.CONSTRAINT_NAME
+                             AND TC.table_schema like '']]..schema_name..[['' -- Schema Filter
+                             AND KU.table_name like '']] .. table_name..[['' -- Table Filter
+                ORDER BY KU.TABLE_NAME, KU.ORDINAL_POSITION'
+        )
+	GROUP BY (CONSTRAINT_NAME, SCHEMA_NAME, TABLE_NAME);]], {ct=connection_type, cn = connection_name, sn = schema_name})
 	return res
 end
 
@@ -144,7 +164,32 @@ function getForeignKeyInformationFromForeignDb(connection_type, connection_name,
 			AND c.table_name LIKE '']] .. table_name..[['' -- Table Filter
 			AND c.constraint_TYPE = ''R''
 			]]
-	
+	        elseif(connection_database_type == 'SQLSERVER') then
+	               foreignDbStatement = [[
+                        SELECT  
+                            obj.name AS [CONSTRAINT_NAME],
+                            sch.name AS [SCHEMA_NAME],
+                            tab1.name AS [TABLE_NAME],
+                            sch2.name AS [REFERENCED_SCHEMA],
+                            tab2.name AS [REFERENCED_TABLE],
+                            col1.name AS [COLUMN_NAME]
+                        FROM sys.foreign_key_columns fkc
+                        INNER JOIN sys.objects obj
+                            ON obj.object_id = fkc.constraint_object_id
+                        INNER JOIN sys.tables tab1
+                            ON tab1.object_id = fkc.parent_object_id
+                        INNER JOIN sys.schemas sch
+                            ON tab1.schema_id = sch.schema_id
+                        INNER JOIN sys.columns col1
+                            ON col1.column_id = parent_column_id AND col1.object_id = tab1.object_id
+                        INNER JOIN sys.tables tab2
+                            ON tab2.object_id = fkc.referenced_object_id
+                        INNER JOIN sys.schemas sch2
+                            ON tab2.schema_id = sch2.schema_id
+                        WHERE sch.name like '']]..schema_name..[['' -- Schema Filter
+                        AND tab1.name like '']] .. table_name..[['' -- Table Filter
+                        ORDER BY obj.name, fkc.referenced_column_id
+			]]
 		elseif(connection_database_type == 'EXASOL') then
 			foreignDbStatement = [[
 			SELECT constraint_name, constraint_schema as schema_name, constraint_table as table_name, referenced_schema, referenced_table, column_name
@@ -183,7 +228,7 @@ function setForeignKey(schema_name, table_name, column_name, schema_ref_name, ta
 	]],{sn=quote(schema_name), tn=quote(table_name), fkn=quote(foreign_key_name), srn=quote(schema_ref_name), trn=quote(table_ref_name)})
 
 	if(not succ) then
-			return false, 'Error foreign key: ' .. res.error_message
+			return false, 'Error foreign key: ' .. res.error_message .. '\n'.. res.statement_text
 	end
 	return true, 'SET as FOREIGN KEY to '.. schema_ref_name..'.'..table_ref_name
 end
@@ -211,8 +256,8 @@ if(constraint_status ~= 'ENABLE' and constraint_status ~= 'DISABLE') then
 end
 
 connection_database_type = string.upper(connection_database_type)
-if(connection_database_type ~= 'ORACLE' and connection_database_type ~= 'MYSQL' and connection_database_type ~= 'EXASOL') then
-	error([[Please specify a proper connection_database_type. Could be 'ORACLE', 'MYSQL' or 'EXASOL']])
+if(connection_database_type ~= 'ORACLE' and connection_database_type ~= 'MYSQL' and connection_database_type ~= 'EXASOL' and connection_database_type ~= 'SQLSERVER') then
+	error([[Please specify a proper connection_database_type. Could be 'ORACLE', 'MYSQL', 'SQLSERVER' or 'EXASOL']])
 end
 
 -- get and set primary keys
@@ -220,6 +265,8 @@ if(connection_database_type == 'ORACLE') then
 	prim_cols = getPrimaryKeyColumnsFromOracle(connection_type, connection_name, schema_filter, table_filter)
 elseif (connection_database_type == 'EXASOL') then
 	prim_cols = getPrimaryKeyColumnsFromExasol(connection_type, connection_name, schema_filter, table_filter)
+elseif (connection_database_type == 'SQLSERVER') then
+	prim_cols = getPrimaryKeyColumnsFromSqlserver(connection_type, connection_name, schema_filter, table_filter)
 else
 	prim_cols = getPrimaryKeyColumnsFromMySql(connection_type, connection_name, schema_filter, table_filter)
 end
@@ -296,7 +343,7 @@ for i=1,#fks do
 end
 
 
-exit(result_table, "schema_name char(200), table_name char(200), column_name char(200), success boolean, actions char(200)")
+exit(result_table, "schema_name varchar(200), table_name varchar(200), column_name varchar(200), success boolean, actions varchar(20000)")
 /
 
 
@@ -305,9 +352,9 @@ exit(result_table, "schema_name char(200), table_name char(200), column_name cha
 -- Examples of usage
 execute script DATABASE_MIGRATION.SET_PRIMARY_AND_FOREIGN_KEYS(
 'JDBC',				-- connection_type:						Type of connection, e.g. 'JDBC' or 'ORA'
-'JDBC_MYSQL',		-- connection_name:						Name of connection
-'MYSQL',			-- connection_database_type:			Type of database from which the keys should be migrated, currently 'ORACLE', 'MYSQL' and 'EXASOL' are supported
-'MY_SCHEMA',		-- schema_filter:						Filter for the schemas, e.g. '%' to take all schemas, 'my_schema' to load only primary_keys from this schema
+'JDBC_SQLSERVER',		-- connection_name:						Name of connection
+'SQLSERVER',			-- connection_database_type:			Type of database from which the keys should be migrated, currently 'ORACLE', 'MYSQL', 'SQLSERVER' and 'EXASOL' are supported
+'MY_SCHEMA',   		-- schema_filter:						Filter for the schemas, e.g. '%' to take all schemas, 'my_schema' to load only primary_keys from this schema
 '%',				-- table_filter:						Filter for the tables matching schema_filter, e.g. '%' to take all tables, 'my_table' to only load keys for this table
 'DISABLE',		-- constraint_status:					Could be 'ENABLE' or 'DISABLE' and specifies whether the generated keys should be enabled or disabled
 'false'		-- flag_identifier_case_insensitive: 	True if identifiers should be stored case-insensitiv (will be stored upper_case)
