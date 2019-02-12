@@ -54,7 +54,13 @@ SKIP = 1 -- skip the header
 
 - Import from **S3**: See [Exasol-1774](https://www.exasol.com/support/browse/Exasol-1774) for single file import, for importing multiple files scroll down to [S3](#s3)
 
-For more details on `IMPORT` see paragraph 2.2.2 in the User Manual. For further help on typical CSV-formatting issues, see [SOL-578](https://www.exasol.com/support/browse/SOL-578).
+For more details on `IMPORT` see paragraph 2.2.2 in the User Manual. For further help on typical CSV-formatting issues, see
+* [How to load bad CSV files](https://www.exasol.com/support/browse/SOL-578)
+* [Proper csv export from MySQL](https://www.exasol.com/support/browse/SOL-428)
+* [Proper csv export from IBM DB2](https://www.exasol.com/support/browse/SOL-430)
+* [Proper csv export from Oracle](https://www.exasol.com/support/browse/SOL-440)
+* [Proper csv export from PostgreSQL](https://www.exasol.com/support/browse/SOL-442)
+* [Proper csv export from Microsoft SQL Server](https://www.exasol.com/support/browse/SOL-448)
 
 ### DB2
 See script [db2_to_exasol.sql](db2_to_exasol.sql)
