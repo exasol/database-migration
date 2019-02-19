@@ -339,7 +339,7 @@ function exectue_sql_column(input_table, sql_col_number, log_col_number)
 		if sql_suc then
 			input_table[i][log_col_number] = 'true'
 		else
-			input_table[i][log_col_number] = 'ERROR: ' .. res_query.error_message
+			input_table[i][log_col_number] = 'ERROR: ' .. sql_res.error_message
 		end
 	end
 	return input_table
