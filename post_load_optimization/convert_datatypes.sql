@@ -100,7 +100,7 @@ function convert_double_to_decimal(schema_name, table_name, log_for_all_columns)
 	return result_table
 	end -- end of function convert_double_to_decimal
 ------------------------------------------------------------------------------------------------------
-function convert_decimal_to_smaller_decimal(schema_name, table_name, log_for_all_columns)
+function convert_integer_to_smaller_integer(schema_name, table_name, log_for_all_columns)
 
 	local result_table = {}
 	res = query([[select
@@ -115,7 +115,7 @@ function convert_decimal_to_smaller_decimal(schema_name, table_name, log_for_all
 				column_schema like :schema_filter and -- e.g. '%' to convert all schema
 				COLUMN_TABLE like :table_filter	--e.g. '%' to convert all tables
 				and column_OBJECT_TYPE='TABLE'
-				--and COLUMN_NUM_SCALE = 0 -- uncomment to only handle values without scale
+				and COLUMN_NUM_SCALE = 0 -- uncomment to only handle values without scale
 				and COLUMN_NUM_PREC >9
 	]],{schema_filter=schema_name, table_filter=table_name})
 	for i=1,#res do
@@ -168,8 +168,82 @@ function convert_decimal_to_smaller_decimal(schema_name, table_name, log_for_all
 		end
 		end
 	return result_table
-	end -- end of function convert_decimal_to_smaller_decimal
+	end -- end of function convert_integer_to_smaller_integer
 	
+------------------------------------------------------------------------------------------------------
+function convert_decimal_with_scale_to_smaller_decimal(schema_name, table_name, log_for_all_columns)
+
+	local result_table = {}
+	res = query([[select
+				column_schema,
+				column_table,
+				column_name,
+				COLUMN_NUM_PREC,
+				COLUMN_NUM_SCALE
+			from
+				exa_all_columns
+			where
+				column_type_id = 3 and --type_id of DECIMAL
+				column_schema like :schema_filter and -- e.g. '%' to convert all schema
+				COLUMN_TABLE like :table_filter	--e.g. '%' to convert all tables
+				and column_OBJECT_TYPE='TABLE'
+				and COLUMN_NUM_SCALE <> 0  -- take only columns into account that have a scale
+				and COLUMN_NUM_PREC >9
+	]],{schema_filter=schema_name, table_filter=table_name})
+
+	for i=1,#res do
+			local modify_column = false
+			local message_action = ''
+			local query_to_execute = ''
+
+			scm = quote(res[i].COLUMN_SCHEMA)
+			tbl = quote(res[i].COLUMN_TABLE)
+			col = quote(res[i].COLUMN_NAME)
+			col_scale = res[i].COLUMN_NUM_SCALE
+			dColumns = query([[select
+					count(::col_name) "count", 'values_in_column' "title", 1 "order_column"
+				from
+					::curr_schema.::curr_table				
+			union all
+				select
+					 coalesce(max(length(round(abs(::col_name)))),0) , 'max_length' , 2
+				from
+					::curr_schema.::curr_table
+			 order by 3 asc]], {curr_schema=scm, curr_table=tbl,col_name=col});
+			
+			-- dColumns[1][1] is the number of not_null values in this decimal column
+			-- dColumns[2][1] is the max length in this decimal column
+			max_length_incl_scale = dColumns[2][1] + col_scale
+			if dColumns[1][1]==0 then
+
+				--no rows in table -> do nothing
+				message_action = 'Keep DECIMAL (IS EMPTY)'
+
+			elseif (max_length_incl_scale<=9 and res[i][4] > 9) or (max_length_incl_scale<=18 and res[i][4] > 18) then
+				-- can find smaller datatype, either 32Bit or 64Bit
+				change_from = res[i][4];
+				if (max_length_incl_scale<=9 and res[i][4] > 9) then
+					--fits into 32Bit
+					change_to = 9;
+				else
+					--fits into 64Bit
+					change_to=18;
+				end
+
+				query_to_execute = "ALTER TABLE "..quote(res[i][1]).. "."..quote(res[i][2]).." MODIFY ("..quote(res[i][3]).." DECIMAL("..change_to..","..res[i][5].."));"
+				modify_column = true
+				message_action = 'DECIMAL('..change_from..', '..res[i][5]..')  --> DECIMAL('..change_to..', '..res[i][5]..'), max length: '..max_length_incl_scale
+				
+			else
+				message_action = 'Keep DECIMAL('..res[i][4]..'), max length: '..max_length_incl_scale
+			end
+
+		if modify_column == true or log_for_all_columns then
+			result_table[#result_table+1] = {res[i][1], res[i][2], res[i][3],message_action, query_to_execute}
+		end
+		end
+	return result_table
+	end -- end of function convert_decimal_with_scale_to_smaller_decimal
 ------------------------------------------------------------------------------------------------------
 function convert_timestamp_to_date(schema_name, table_name, log_for_all_columns)
 result_table = {};
@@ -251,6 +325,7 @@ function convert_varchar_to_smaller_varchar(schema_name, table_name, log_for_all
 				column_schema like :schema_filter and -- e.g. '%' to convert all schema
 				COLUMN_TABLE like :table_filter	--e.g. '%' to convert all tables
 				and column_OBJECT_TYPE='TABLE'
+				and column_maxsize > 3 -- do not modify columns that have a size <= 3 characters
 	]],{schema_filter=schema_name, table_filter=table_name})
 	for i=1,#res do
 			local modify_column = false
@@ -352,31 +427,44 @@ end
 	log_for_all_columns = false
 
 	local overall_res = {}
+
+-------------------------------------------------
+	-- double to decimal
 	local res_double 	= convert_double_to_decimal(schema_name, table_name, log_for_all_columns)
-	local res_dec 		= convert_decimal_to_smaller_decimal(schema_name, table_name, log_for_all_columns)
+	overall_res			= merge_tables(overall_res, res_double)
+	
+	-- integer to smaller integer
+	local res_int 		= convert_integer_to_smaller_integer(schema_name, table_name, log_for_all_columns)
+	overall_res 		= merge_tables(overall_res, res_int)
+
+	-- decimal with scale to smaller decimal
+	local res_dec		= convert_decimal_with_scale_to_smaller_decimal(schema_name, table_name, log_for_all_columns)
+	overall_res 		= merge_tables(overall_res, res_dec)
+
+	-- convert timestamp to date
 	local res_timestamp = convert_timestamp_to_date(schema_name, table_name, log_for_all_columns)
+	overall_res 		= merge_tables(overall_res, res_timestamp)
+
+	-- convert varchar to smaller varchar
 	local res_varchar	= convert_varchar_to_smaller_varchar(schema_name, table_name, log_for_all_columns)
+	overall_res 		= merge_tables(overall_res, res_varchar)	
 	
 	
-	overall_res = merge_tables(overall_res, res_double)
-	overall_res = merge_tables(overall_res, res_dec)
-	overall_res = merge_tables(overall_res, res_timestamp)
-	overall_res = merge_tables(overall_res, res_varchar)
-
+	-- execute statements if apply_conversion is true
 	if (apply_conversion) then
-		overall_res = exectue_sql_column(overall_res,5,6)
+		overall_res 	= exectue_sql_column(overall_res,5,6)
 	end
-
+-------------------------------------------------
 
 	-- check whether DOUBLES have been changed to DECIMALS
 	if(#res_dec > 0) then
 		if (apply_conversion) then
 			-- run convert decimal to smaller decimal once again, to make sure also columns that have just been changed from double to decimal are treated
-			local res_dec_second_run = convert_decimal_to_smaller_decimal(schema_name, table_name, log_for_all_columns)
-			res_dec_second_run = exectue_sql_column(res_dec_second_run,5,6)
-			overall_res = merge_tables(overall_res, res_dec_second_run)
+			local res_dec_second_run 	= convert_integer_to_smaller_integer(schema_name, table_name, log_for_all_columns)
+			res_dec_second_run 			= exectue_sql_column(res_dec_second_run,5,6)
+			overall_res 				= merge_tables(overall_res, res_dec_second_run)
 		else
-			info_row = {}
+			info_row 	= {}
 			info_row[1] = {'', '', '', '', '-- Please execute the script again after having modified your tables to find also a matching size for the former DECIMAL columns.'}
 			overall_res = merge_tables(info_row,overall_res)
 		end
