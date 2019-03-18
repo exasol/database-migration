@@ -231,10 +231,8 @@ CREATE OR REPLACE SCRIPT database_migration.convert_varchar(schema_pattern, tabl
         elseif res3["ENTRIES"] == res3["ITS_BOOLEAN"] then -- All sample values were Boolean
             new_type = "BOOLEAN"
         elseif res3["ENTRIES"] == res3["ITS_DSINTERVAL"] then -- All sample values were day-to-second intervals
-            -- TODO: day and fractional second precision
             new_type = "INTERVAL DAY(" .. math.min(math.max(res3["ITS_DSINTERVAL_P"], 1), 9) .. ") TO SECOND(" .. math.min(res3["ITS_DSINTERVAL_FP"], 9) .. ")"
         elseif res3["ENTRIES"] == res3["ITS_YMINTERVAL"] then -- All sample values were year-to-months intervals
-            -- TODO: year precision
             new_type = "INTERVAL YEAR(" .. math.min(math.max(res3["ITS_YMINTERVAL_P"], 1), 9) ..") TO MONTH"
         elseif res3["ENTRIES"] == res3["ITS_GEOMETRY"] then -- All sample values seem to contain geospatial data
             ret[#ret + 1] = {"      -- You might want to specify SRID (a reference coordinate system, query EXA_SPATIAL_REF_SYS for possible values)"}
