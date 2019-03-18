@@ -1,10 +1,10 @@
 CREATE SCHEMA IF NOT EXISTS database_migration;
 
 /*
-    This script attempt to identify the optimal data type (and its size or precision) of VARCHAR columns
-        based on the values in the column.
+    This script attempts to identify the optimal data type (and its size or precision) of VARCHAR columns
+        based on the values in the given column.
     It generates the appropriate ALTER TABLE ... MODIFY COLUMN statements or advises you what steps you can
-        to convert the data type.
+        take to convert the data type.
     No Animals Were Harmed in the Making of This Script.
 */
 
