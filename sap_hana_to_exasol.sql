@@ -54,11 +54,10 @@ suc, res = pquery([[
                 case when numeric_precision is null then '"' || "exa_column_name" || '" ' || 'DOUBLE PRECISION'
                 else '"' || "exa_column_name" || '" ' || 'DECIMAL(' || case when numeric_precision > 36 then 36
                                                                             else numeric_precision end || ',' ||
-                                                                       case when numeric_scale >= 36 then 36- (numeric_precision-numeric_scale)
+                                                                       case when numeric_scale >= 36 then (36- (numeric_precision-numeric_scale))
                                                                             else case
                                                                                 when numeric_scale is null then 0
                                                                                 when numeric_scale < 0 then 0
-                                                                                when numeric_scale > numeric_precision then numeric_precision
                                                                                 else numeric_scale end
                                                                                 end || ')' end
                 
