@@ -14,7 +14,8 @@
     * [PostgreSQL](#postgres)
     * [Redshift](#redshift)
     * [S3](#s3)
-    * [SQL Server](#sqlserver)
+    * [SAP Hana](#sap-hana)
+    * [SQL Server](#sql-server)
     * [Teradata](#teradata)
     * [Vectorwise](#vectorwise)
     * [Vertica](#vertica)
@@ -130,6 +131,60 @@ See script [redshift_to_exasol.sql](redshift_to_exasol.sql)
 ### S3
 The script [s3_to_exasol.sql](s3_to_exasol.sql) looks different than the other import scripts. It's made to load data from S3 in parallel and needs some preparation before you can use it. See [SOL-594](https://www.exasol.com/support/browse/SOL-594) for detailed instructions.
 If you just want to import a single file, see 'Import from [CSV](#csv)' above.
+
+### SAP Hana
+The first thing you need to do is add the SAP Hana JDBC driver to Exasol. The JDBC driver is located in your local SAP Hana Installation folder:
+
+* eg: (C:\Program Files\sap\ngdbc.jar) on Microsoft Windows platforms
+* eg: (/usr/sap/ngdbc.jar) on Linux and UNIX platforms
+
+In order to add the driver to Exasol log into your EXAOperations, select the 'Software', then 'JDBC Drivers'-Tab.
+
+Click Add then specify the following details:
+
+* Driver Name: `SAP`
+* Main Class: `com.sap.db.jdbc.Driver`
+* Prefix: `jdbc:sap:`
+* Disable Security Manager: `Check this box`
+
+After clicking Apply, you will see the newly added driver's details on the top section of the driver list. Select the SAP Hana driver by locationg the ngdbc.jar and upload it.
+When done the .jar file should be listed in the files column for the SAP Hana driver.
+
+
+You can find a detailed information about configuring the SAP Hana driver at the following link:
+https://help.sap.com/viewer/52715f71adba4aaeb480d946c742d1f6/2.0.00/en-US/ff15928cf5594d78b841fbbe649f04b4.html
+
+The standard port number format for different instances 3NN15, NN- represents the instance number of HANA system to be used in client tools. (eg. 31015 Instance No 10, 30015 Instance No 00)
+In order to find out the instance number of your Hana-System type the following into your console:
+/usr/sap/HXE and press Autocomplete by tab. The Instance-Number should be displayed by the number of the HDB(XX)-File (eg. HDB90)
+Insert the number into your port number (-> eg. 39015)
+
+The Connection-String should look like the following: "jdbc:sap://'host_ip':'port'/"
+(User-ID: SYSTEM, Password: Your password)
+
+
+To test the connectivity of Exasol to your SAP Instance create the following connection in your SQL-client:
+
+```SQL
+CREATE OR REPLACE CONNECTION <name_of_connection>
+        TO 'jdbc:sap://<host_name>:<port>'
+        USER '<sap_username>'
+        IDENTIFIED BY '<sap_password>';
+```
+
+You need to have CREATE CONNECTION privilege granted to the user used to do this.
+
+Now, test the connectivity with a simple query like:
+
+```SQL
+
+SELECT *
+    FROM   (
+               IMPORT FROM JDBC AT <name_of_connection>
+               STATEMENT 'SELECT 1 from dummy'
+           );
+```
+For the actual data-migration, see script [sap_hana_to_exasol.sql](sap_hana_to_exasol.sql)
 
 ### SQL Server
 See script [sqlserver_to_exasol.sql](sqlserver_to_exasol.sql)

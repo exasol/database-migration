@@ -130,11 +130,11 @@ select * from vv_imports]],{})
 return(res)
 /
 
--- !!! Important: Please upload the Redshift Type 4.1 JDBC-Driver via EXAOperation (Webinterface) !!!
--- !!! you can see a similar example for Oracle here: https://www.exasol.com/support/browse/SOL-179 !!!
+-- !!! Important: Please upload the Redshift Type 4.2 JDBC-Driver via EXAOperation (Webinterface) !!!
+-- !!! see documentation: https://docs.exasol.com/loading_data/connect_databases/amazon_redshift.htm
 
 
--- Create a connection to the Vertica database; Use the 4.1 JDBC driver
+-- Create a connection to the Redshift database; Use the 4.2 JDBC driver
 create connection redshift_db to 'jdbc:redshift://some_prefix.eu-west-1.redshift.amazonaws.com:5439/dev' user 'admin' identified by 'exasolRocks!';
 
 -- Finally start the import process
