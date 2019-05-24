@@ -10,7 +10,7 @@
     * [DB2](#db2)
     * [Exasol](#exasol)
     * [MySQL](#mysql)
-    * [Netezza] (#netezza)
+    * [Netezza](#netezza)
     * [Oracle](#oracle)
     * [PostgreSQL](#postgres)
     * [Redshift](#redshift)
