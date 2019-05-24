@@ -203,7 +203,7 @@ CREATE OR REPLACE CONNECTION hana_connection
 
 EXECUTE SCRIPT database_migration.HANA_TO_EXASOL(
  'hana_connection'      --Connection-Name
-, false                 -- Case Sensitivity handling for identifiers -> FALSE: handle them case sensitive / TRUE: handle them case insensitiv --> recommended: true
+, true                 -- Case Sensitivity handling for identifiers -> FALSE: handle them case sensitive / TRUE: handle them case insensitiv --> recommended: true
 ,'%'                    --Schema-Filter: '%' to load all schemas
 ,'%'                    --Table-Filter: '%' to load all tables
 
