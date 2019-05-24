@@ -88,9 +88,8 @@ STATEMENT 'SELECT 42 FROM DUAL'
 Then you're ready to use the migration script: [mysql_to_exasol.sql](mysql_to_exasol.sql)
 
 ### Netezza
-The first thing you need to do is add the IBM Netezza JDBC driver to Exasol. Since Netezza has run out of support in June 2019, 
-the JDBC-driver (nzjdbc3.jar) can no longer be found on the official JDBC Download-page of IBM. Anyhow, the driver can be found within your 
-Netezza distribution under following path: `nz/kit.version_number/sbin/nzjdbc3.jar (eg. nz/kit.7.2.1.0/sbin/nzjdbc3.jar)`
+The first thing you need to do is add the IBM Netezza JDBC driver to Exasol. Since Netezza has run out of support in June 2019, the JDBC-driver (nzjdbc3.jar) can no longer be found on the official JDBC Download-page of IBM. Anyhow, the driver can be found within your Netezza distribution under following path: 
+`nz/kit.version_number/sbin/nzjdbc3.jar   (eg. nz/kit.7.2.1.0/sbin/nzjdbc3.jar)`
 
 In order to add the driver to Exasol log into your EXAOperations, select the 'Software', then 'JDBC Drivers'-Tab.
 
@@ -104,9 +103,11 @@ Click Add, then specify the following details:
 After clicking Apply, you will see the newly added driver's details on the top section of the driver list. 
 Select the Netezza driver by locationg the nzjdbc3.jar and upload it. When done the .jar file should be listed in the files column for the IBM Netezza driver.
 
-The standard port for Netezza is 5480.
+The standard port for Netezza is `5480`.
 
-The Connection-String should look like the following: "jdbc:netezza://'host_ip':'port'/Database-Name" (User-ID, Password) (e.g. jdbc:netezza://127.0.0.1:5480/SYSTEM,  User-ID: ADMIN, Password: Password)
+The Connection-String should look like the following: 
+`"jdbc:netezza://'host_ip':'port'/Database-Name" (User-ID, Password)`
+`(e.g. jdbc:netezza://127.0.0.1:5480/SYSTEM,  User-ID: ADMIN, Password: Password)`
 
 To test the connectivity of Exasol to your Netezza Instance create the following connection in your SQL-client:
 
