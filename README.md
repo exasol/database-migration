@@ -96,10 +96,10 @@ In order to add the driver to Exasol log into your EXAOperations, select the 'So
 
 Click Add, then specify the following details:
 
-Driver Name: `Netezza`
-Main Class: `org.netezza.Driver`
-Prefix: `jdbc:netezza:`
-Disable Security Manager: `Check this box`
+* Driver Name: `Netezza`
+* Main Class: `org.netezza.Driver`
+* Prefix: `jdbc:netezza:`
+* Disable Security Manager: `Check this box`
 
 After clicking Apply, you will see the newly added driver's details on the top section of the driver list. 
 Select the Netezza driver by locationg the nzjdbc3.jar and upload it. When done the .jar file should be listed in the files column for the IBM Netezza driver.
