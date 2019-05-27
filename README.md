@@ -93,7 +93,7 @@ The first thing you need to do is add the IBM Netezza JDBC driver to Exasol. Sin
 
 `nz/kit.version_number/sbin/nzjdbc3.jar   (eg. nz/kit.7.2.1.0/sbin/nzjdbc3.jar)`
 
-In order to add the driver to Exasol log into your EXAOperations, select the 'Software', then 'JDBC Drivers'-Tab.
+In order to add the driver to Exasol log into your EXAOperations, select the 'Software'-, then 'JDBC Drivers'-Tab.
 
 Click Add, then specify the following details:
 
@@ -120,12 +120,11 @@ CREATE OR REPLACE CONNECTION <name_of_connection>
         IDENTIFIED BY '<netezza_password>';
 ```
 
-You need to have CREATE CONNECTION privilege granted to the user used to do this.
+You need to have CREATE CONNECTION privilege granted to the user in order to do this.
 
-Now, test the connectivity with a simple query like:
+Test the connectivity with a simple query like:
 
 ```SQL
-
 SELECT *
     FROM   (
                IMPORT FROM JDBC AT netezza_connection
