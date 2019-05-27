@@ -132,7 +132,7 @@ SELECT *
                STATEMENT 'SELECT 1 as "sucessfully_connected" from _v_dual '
            );
 ```
-For the actual data-migration, see script [netezza_to_exasol.sql]
+For the actual data-migration, see script [[netezza_to_exasol.sql]]
 
 ### Oracle
 When importing from Oracle, you have two options. You could import via JDBC or the  native Oracle interface (OCI).
