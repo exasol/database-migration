@@ -1,6 +1,6 @@
 -- connection_type:						Type of connection, e.g. 'JDBC' or 'ORA'
 -- connection_name:						Name of connection, e.g. 'MY_JDBC_MYSQL_CONNECTION'
--- connection_database_type:			Type of database from which the keys should be migrated, currently 'ORACLE' and 'MYSQL' are supported
+-- connection_database_type:			                Type of database from which the keys should be migrated, currently 'ORACLE', 'MYSQL', 'SQLSERVER', 'POSTGRES' and 'EXASOL' are supported
 -- schema_filter:						Filter for the schemas, e.g. '%' to take all schemas, 'my_schema' to load only primary_keys from this schema
 -- table_filter:						Filter for the tables matching schema_filter, e.g. '%' to take all tables, 'my_table' to only load keys for this table
 -- constraint_status:					Could be 'ENABLE' or 'DISABLE' and specifies whether the generated keys should be enabled or disabled
@@ -57,6 +57,29 @@ function getPrimaryKeyColumnsFromMySql(connection_type, connection_name, schema_
 	return res
 end
 
+function getPrimaryKeyColumnsFromPostgres(connection_type, connection_name, schema_name, table_name)
+	-- get columns for primary keys from postgres
+	-- owner, table_name, column_name
+	res = query([[select TABLE_SCHEMA, TABLE_NAME, GROUP_CONCAT(COLUMN_NAME SEPARATOR ', '), CONSTRAINT_NAME
+	from(import from ::ct at ::cn statement '
+		SELECT t.table_schema AS "TABLE_SCHEMA", t.table_name AS "TABLE_NAME", kcu.column_name AS "COLUMN_NAME", kcu.constraint_name AS "CONSTRAINT_NAME"
+		FROM INFORMATION_SCHEMA.TABLES t
+                LEFT JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+        	ON tc.table_catalog = t.table_catalog
+                AND tc.table_schema = t.table_schema
+                AND tc.table_name = t.table_name
+                AND tc.constraint_type = ''PRIMARY KEY''
+                LEFT JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+                ON kcu.table_catalog = tc.table_catalog
+                AND kcu.table_schema = tc.table_schema
+                AND kcu.table_name = tc.table_name
+                AND kcu.constraint_name = tc.constraint_name
+		WHERE   t.table_schema like '']]..schema_name..[[''
+		AND t.table_name like '']] .. table_name..[[''
+	')
+	GROUP BY (CONSTRAINT_NAME, TABLE_SCHEMA, TABLE_NAME);]], {ct=connection_type, cn = connection_name})
+	return res
+end
 
 function getPrimaryKeyColumnsFromSqlserver(connection_type, connection_name, schema_name, table_name)
 	-- get columns for primary keys from sqlserver
@@ -190,6 +213,28 @@ function getForeignKeyInformationFromForeignDb(connection_type, connection_name,
                         AND tab1.name like '']] .. table_name..[['' -- Table Filter
                         ORDER BY obj.name, fkc.referenced_column_id
 			]]
+		elseif(connection_database_type == 'POSTGRES') then
+	               foreignDbStatement = [[
+                	SELECT 
+    			 tc.constraint_name AS "CONSTRAINT_NAME", 
+    		 	 tc.table_schema AS "SCHEMA_NAME",
+    	   	 	 tc.table_name AS "TABLE_NAME", 
+    			 ccu.table_schema AS "REFERENCED_SCHEMA",
+    			 ccu.table_name AS "REFERENCED_TABLE",
+    		 	 kcu.column_name AS "COLUMN_NAME" 
+			 FROM 
+    			 information_schema.table_constraints AS tc 
+    			 JOIN information_schema.key_column_usage AS kcu
+      			 ON tc.constraint_name = kcu.constraint_name
+      			 AND tc.table_schema = kcu.table_schema
+    			 JOIN information_schema.constraint_column_usage AS ccu
+      			 ON ccu.constraint_name = tc.constraint_name
+      			 AND ccu.table_schema = tc.table_schema
+			 WHERE tc.constraint_type = ''FOREIGN KEY'' 
+			 AND tc.table_schema like '']]..schema_name..[['' -- Schema Filter
+		 	 AND tc.table_name like '']] .. table_name..[['' -- Table Filter      
+			 ORDER BY tc.constraint_name, ccu.column_name
+			]]
 		elseif(connection_database_type == 'EXASOL') then
 			foreignDbStatement = [[
 			SELECT constraint_name, constraint_schema as schema_name, constraint_table as table_name, referenced_schema, referenced_table, column_name
@@ -256,8 +301,8 @@ if(constraint_status ~= 'ENABLE' and constraint_status ~= 'DISABLE') then
 end
 
 connection_database_type = string.upper(connection_database_type)
-if(connection_database_type ~= 'ORACLE' and connection_database_type ~= 'MYSQL' and connection_database_type ~= 'EXASOL' and connection_database_type ~= 'SQLSERVER') then
-	error([[Please specify a proper connection_database_type. Could be 'ORACLE', 'MYSQL', 'SQLSERVER' or 'EXASOL']])
+if(connection_database_type ~= 'ORACLE' and connection_database_type ~= 'MYSQL' and connection_database_type ~= 'EXASOL' and connection_database_type ~= 'SQLSERVER' and connection_database_type ~= 'POSTGRES') then
+	error([[Please specify a proper connection_database_type. Could be 'ORACLE', 'MYSQL', 'SQLSERVER', 'POSTGRES' or 'EXASOL']])
 end
 
 -- get and set primary keys
@@ -267,6 +312,8 @@ elseif (connection_database_type == 'EXASOL') then
 	prim_cols = getPrimaryKeyColumnsFromExasol(connection_type, connection_name, schema_filter, table_filter)
 elseif (connection_database_type == 'SQLSERVER') then
 	prim_cols = getPrimaryKeyColumnsFromSqlserver(connection_type, connection_name, schema_filter, table_filter)
+elseif (connection_database_type == 'POSTGRES') then
+	prim_cols = getPrimaryKeyColumnsFromPostgres(connection_type, connection_name, schema_filter, table_filter)
 else
 	prim_cols = getPrimaryKeyColumnsFromMySql(connection_type, connection_name, schema_filter, table_filter)
 end
@@ -353,11 +400,11 @@ exit(result_table, "schema_name varchar(200), table_name varchar(200), column_na
 execute script DATABASE_MIGRATION.SET_PRIMARY_AND_FOREIGN_KEYS(
 'JDBC',				-- connection_type:						Type of connection, e.g. 'JDBC' or 'ORA'
 'JDBC_SQLSERVER',		-- connection_name:						Name of connection
-'SQLSERVER',			-- connection_database_type:			Type of database from which the keys should be migrated, currently 'ORACLE', 'MYSQL', 'SQLSERVER' and 'EXASOL' are supported
-'MY_SCHEMA',   		-- schema_filter:						Filter for the schemas, e.g. '%' to take all schemas, 'my_schema' to load only primary_keys from this schema
+'SQLSERVER',			-- connection_database_type:			                Type of database from which the keys should be migrated, currently 'ORACLE', 'MYSQL', 'SQLSERVER', 'POSTGRES' and 'EXASOL' are supported
+'MY_SCHEMA',   		        -- schema_filter:						Filter for the schemas, e.g. '%' to take all schemas, 'my_schema' to load only primary_keys from this schema
 '%',				-- table_filter:						Filter for the tables matching schema_filter, e.g. '%' to take all tables, 'my_table' to only load keys for this table
-'DISABLE',		-- constraint_status:					Could be 'ENABLE' or 'DISABLE' and specifies whether the generated keys should be enabled or disabled
-'false'		-- flag_identifier_case_insensitive: 	True if identifiers should be stored case-insensitiv (will be stored upper_case)
+'DISABLE',		        -- constraint_status:					        Could be 'ENABLE' or 'DISABLE' and specifies whether the generated keys should be enabled or disabled
+'false'		                -- flag_identifier_case_insensitive: 	                        True if identifiers should be stored case-insensitiv (will be stored upper_case)
 );
 
 -- Second example
