@@ -138,20 +138,20 @@ When importing from Oracle, you have two options. You could import via JDBC or t
 - OCI: Log in to EXAoperation. Go to *Configuration -> Software*. Download the instant client from Oracle and select it at `Software Update File`. Click `Submit` to upload.
 
   Create a connection:
-  ```SQL
+  ``` SQL
   CREATE CONNECTION <name_of_connection>
-  	TO 'jdbc:oracle:thin:@//192.168.99.100:1521/xe'
-  	USER '<user>'
+  	TO '192.168.99.100:1521/xe'
+    USER '<user>'
     IDENTIFIED BY '<password>';
   ```
 
 - JDBC: If you are using the community edition, you need to upload a JDBC driver in EXAoperation before being able to establish a connection, see [SOL-179](https://www.exasol.com/support/browse/SOL-179).
 
   Create a connection:
-  ``` SQL
+  ```SQL
   CREATE CONNECTION <name_of_connection>
-  	TO '192.168.99.100:1521/xe'
-    USER '<user>'
+  	TO 'jdbc:oracle:thin:@//192.168.99.100:1521/xe'
+  	USER '<user>'
     IDENTIFIED BY '<password>';
   ```
 
