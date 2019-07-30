@@ -103,7 +103,7 @@ Click Add, then specify the following details:
 * Disable Security Manager: `Check this box`
 
 After clicking Apply, you will see the newly added driver's details on the top section of the driver list. 
-Select the Netezza driver by locationg the nzjdbc3.jar and upload it. When done the .jar file should be listed in the files column for the IBM Netezza driver.
+Select the Netezza driver by locating the nzjdbc3.jar and upload it. When done the .jar file should be listed in the files column for the IBM Netezza driver.
 
 The standard port for Netezza is `5480`.
 
@@ -192,7 +192,7 @@ Click Add then specify the following details:
 * Prefix: `jdbc:sap:`
 * Disable Security Manager: `Check this box`
 
-After clicking Apply, you will see the newly added driver's details on the top section of the driver list. Select the SAP Hana driver by locationg the ngdbc.jar and upload it.
+After clicking Apply, you will see the newly added driver's details on the top section of the driver list. Select the SAP Hana driver by locating the ngdbc.jar and upload it.
 When done the .jar file should be listed in the files column for the SAP Hana driver.
 
 
