@@ -93,7 +93,7 @@ The first thing you need to do is add the IBM Netezza JDBC driver to Exasol. Sin
 
 `nz/kit.version_number/sbin/nzjdbc3.jar   (eg. nz/kit.7.2.1.0/sbin/nzjdbc3.jar)`
 
-In order to add the driver to Exasol log into your EXAOperations, select the 'Software', then 'JDBC Drivers'-Tab.
+In order to add the driver to Exasol log into your EXAOperations, select the 'Software'-, then 'JDBC Drivers'-Tab.
 
 Click Add, then specify the following details:
 
@@ -103,7 +103,7 @@ Click Add, then specify the following details:
 * Disable Security Manager: `Check this box`
 
 After clicking Apply, you will see the newly added driver's details on the top section of the driver list. 
-Select the Netezza driver by locationg the nzjdbc3.jar and upload it. When done the .jar file should be listed in the files column for the IBM Netezza driver.
+Select the Netezza driver by locating the nzjdbc3.jar and upload it. When done the .jar file should be listed in the files column for the IBM Netezza driver.
 
 The standard port for Netezza is `5480`.
 
@@ -120,39 +120,38 @@ CREATE OR REPLACE CONNECTION <name_of_connection>
         IDENTIFIED BY '<netezza_password>';
 ```
 
-You need to have CREATE CONNECTION privilege granted to the user used to do this.
+You need to have CREATE CONNECTION privilege granted to the user in order to do this.
 
-Now, test the connectivity with a simple query like:
+Test the connectivity with a simple query like:
 
 ```SQL
-
 SELECT *
     FROM   (
                IMPORT FROM JDBC AT netezza_connection
                STATEMENT 'SELECT 1 as "sucessfully_connected" from _v_dual '
            );
 ```
-For the actual data-migration, see script netezza_to_exasol.sql
+For the actual data-migration, see script [netezza_to_exasol.sql](netezza_to_exasol.sql)
 
 ### Oracle
 When importing from Oracle, you have two options. You could import via JDBC or the  native Oracle interface (OCI).
 - OCI: Log in to EXAoperation. Go to *Configuration -> Software*. Download the instant client from Oracle and select it at `Software Update File`. Click `Submit` to upload.
 
   Create a connection:
-  ```SQL
+  ``` SQL
   CREATE CONNECTION <name_of_connection>
-  	TO 'jdbc:oracle:thin:@//192.168.99.100:1521/xe'
-  	USER '<user>'
+  	TO '192.168.99.100:1521/xe'
+    USER '<user>'
     IDENTIFIED BY '<password>';
   ```
 
 - JDBC: If you are using the community edition, you need to upload a JDBC driver in EXAoperation before being able to establish a connection, see [SOL-179](https://www.exasol.com/support/browse/SOL-179).
 
   Create a connection:
-  ``` SQL
+  ```SQL
   CREATE CONNECTION <name_of_connection>
-  	TO '192.168.99.100:1521/xe'
-    USER '<user>'
+  	TO 'jdbc:oracle:thin:@//192.168.99.100:1521/xe'
+  	USER '<user>'
     IDENTIFIED BY '<password>';
   ```
 
@@ -193,7 +192,7 @@ Click Add then specify the following details:
 * Prefix: `jdbc:sap:`
 * Disable Security Manager: `Check this box`
 
-After clicking Apply, you will see the newly added driver's details on the top section of the driver list. Select the SAP Hana driver by locationg the ngdbc.jar and upload it.
+After clicking Apply, you will see the newly added driver's details on the top section of the driver list. Select the SAP Hana driver by locating the ngdbc.jar and upload it.
 When done the .jar file should be listed in the files column for the SAP Hana driver.
 
 

@@ -93,9 +93,9 @@ CREATE OR REPLACE LUA SCALAR SCRIPT DATABASE_MIGRATION.GET_CONNECTION_NAME(conne
 	end
 /
 
-select DATABASE_MIGRATION.GET_CONNECTION_NAME(
-'S3_IMPORT_BOTO' -- connection_name
-);
+--select DATABASE_MIGRATION.GET_CONNECTION_NAME(
+--'S3_IMPORT_BOTO' -- connection_name
+--);
 ------------------------------------------------------------------------------------------------------------------------
 
 ------------------------------------------------------------------------------------------------------------------------
