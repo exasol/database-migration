@@ -318,7 +318,7 @@ CREATE OR REPLACE LUA SCRIPT CONVERT_TO_STAR_SCHEMA(flat_table, given_fact_table
 		local dimCreateStatements = {}
 		
 		for a = 1, #dimensions do
-			local str = 'CREATE OR REPLACE TABLE ' .. target_schema .. '.' .. dimensions[a][1] .. ' (' .. dimensions[a][3] .. ' DECIMAL(10,0) IDENTITY, ' .. dimensions[a][2] .. ', PRIMARY KEY(' .. dimensions[a][3] ..'));'
+			local str = 'CREATE OR REPLACE TABLE ' .. target_schema .. '.' .. dimensions[a][1] .. ' (' .. dimensions[a][3] .. ' DECIMAL(9,0) IDENTITY, ' .. dimensions[a][2] .. ', PRIMARY KEY(' .. dimensions[a][3] ..'));'
 			dimCreateStatements[#dimCreateStatements+1] = {str}
 		end
 		return dimCreateStatements
@@ -331,7 +331,7 @@ CREATE OR REPLACE LUA SCRIPT CONVERT_TO_STAR_SCHEMA(flat_table, given_fact_table
 	function makeFactCreateStatements()
 		local factCreateStatements = ''
 		for a = #dimensions, 1, -1 do
-			factTable[1][1] = dimensions[a][4] .. ' DECIMAL(10,0), ' .. factTable[1][1] .. ', FOREIGN KEY(' ..  dimensions[a][4] .. ') REFERENCES ' .. dimensions[a][1] ..'(' .. dimensions[a][3] .. ')'
+			factTable[1][1] = dimensions[a][4] .. ' DECIMAL(9,0), ' .. factTable[1][1] .. ', FOREIGN KEY(' ..  dimensions[a][4] .. ') REFERENCES ' .. dimensions[a][1] ..'(' .. dimensions[a][3] .. ')'
 		end
 		
 		factCreateStatements = 'CREATE OR REPLACE TABLE ' .. target_schema .. '.'  .. given_fact_table_name .. ' (' .. factTable[1][1] .. ');'
