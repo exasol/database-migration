@@ -328,16 +328,16 @@ create schema S3_LOADER_LOGGING;
 
 -- USE CONNECTION S3_IMPORT_BOTO
 execute script DATABASE_MIGRATION.s3_parallel_read(
-  true						-- execute_statements: if true, statements are executed immediately, if false only statements are generated
-, false						-- force reload: if true, target table and logging table will be truncated, all files in the bucket will be loaded again
+  true				-- execute_statements: if true, statements are executed immediately, if false only statements are generated
+, false				-- force reload: if true, target table and logging table will be truncated, all files in the bucket will be loaded again
 , 'S3_LOADER_LOGGING'		-- schema you want to use for the logging tables
-, '<schema>'				-- name of the schema that holds the table you want to import into
-, '<table>' 				-- name of the table you want to import into
-, NULL						-- number_cols: NULL if you want to import all columns of the file, if set to a number n, the first n  columns will be imported
-, 'S3_IMPORT_BOTO'			-- connection name ( see statement above)
-, '<folder>/' 				-- folder name (no regex!), if you want to import everything, leave blank
-, '*abc*123*'        	 	-- filter for file-names, to include all files, put empty string, example for filter '*_2018.txt'
-, 2 						-- number of parallel connections you want to use
+, '<schema>'			-- name of the schema that holds the table you want to import into
+, '<table>' 			-- name of the table you want to import into
+, NULL				-- number_cols: NULL if you want to import all columns of the file, if set to a number n, the first n  columns will be imported
+, 'S3_IMPORT_BOTO'		-- connection name ( see statement above)
+, '<folder>/' 			-- folder name (no regex!), if you want to import everything, leave blank
+, '*.csv'        	 	-- filter for file-names, to include all files, put empty string, example for filter '*_2018.csv'
+, 4 				-- number of parallel connections you want to use
 , 'ENCODING=''UTF-8'' SKIP=0  ROW SEPARATOR = ''LF'' COLUMN SEPARATOR = '',''' -- file options, see manual, section 'import' for further details, set skip if you have a headers
 )
 ;
