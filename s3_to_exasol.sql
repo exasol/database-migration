@@ -224,7 +224,7 @@ end
 	query([[CREATE TABLE IF NOT EXISTS ::s.::t (bucket_name varchar(20000), file_name varchar(20000), FILE_LAST_MODIFIED timestamp, status varchar(20000), FILE_LAST_TRIED timestamp)]],
 		{s=logging_schema, t=logging_table})
 
-	if(force_reload and execute_statements) then
+	if(force_reload) then
 		trun = query([[TRUNCATE TABLE ::ls.::lt]],{ls= logging_schema, lt= logging_table})
 		table.insert(log_tbl,{'Truncated '..logging_schema..'.'..logging_table, trun.rows_affected ,trun.statement_text, ''})
 
