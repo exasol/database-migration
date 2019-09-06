@@ -137,7 +137,6 @@ with sqlserv_base as(
  					when 239 then '"' || column_name || '"' ||' ' ||'CHAR('|| COL_MAX_LENGTH || ')'                      --nchar
  					when 231  then '"' || column_name || '"' ||' ' ||'VARCHAR('||case when COL_MAX_LENGTH < 1 then 2000000 else COL_MAX_LENGTH end || ')'        --sysname
  					when 127 then '"' || column_name || '"' ||' ' ||'DECIMAL(' || PRECISION || ',' || SCALE || ')'          --bigint
- 					when 231 then '"' || column_name || '"' ||' ' ||'VARCHAR('||case when COL_MAX_LENGTH < 1 then 2000000 else COL_MAX_LENGTH end || ')'                     --nvarchar
  					when 52 then '"' || column_name || '"' ||' ' ||'DECIMAL(' || PRECISION || ',' || SCALE || ')'            --smallint
  					when 41 then '"' || column_name || '"' ||' ' ||'TIMESTAMP'       --time
  					when 61 then '"' || column_name || '"' ||' ' ||'TIMESTAMP'       --datetime
@@ -160,7 +159,14 @@ with sqlserv_base as(
  					when 189 then '"' || column_name || '"' ||' ' ||'TIMESTAMP'  -- timestamp
  					when 241 then '"' || column_name || '"' ||' ' ||'VARCHAR(2000000)' --xml
  					when 256 then '"' || column_name || '"' ||' ' ||'CHAR(128)' --sysname
- 					-- else '-- UNSUPPORTED DATATYPE IN COLUMN ' || column_name || '  MSSQL TYPE INFO: USER_TYPE_ID ' || USER_TYPE_ID || ', SYSTEM_TYPE_ID ' ||  SYSTEM_TYPE_ID || ', NAME ' || TYPE_NAME || ', PRECISION ' || PRECISION || ', SCALE ' || SCALE
+ 					when 256 then '"' || column_name || '"' ||' ' ||'CHAR(128)' --sysname
+ 					when 259 then '"' || column_name || '"' ||' ' ||'VARCHAR('||case when COL_MAX_LENGTH < 1 then 2000000 else COL_MAX_LENGTH end || ')'
+ 					when 260 then '"' || column_name || '"' ||' ' || 'DECIMAL(1,0)'										-- namestyle
+					when 262 then '"' || column_name || '"' ||' ' ||'VARCHAR('||case when COL_MAX_LENGTH < 1 then 2000000 else COL_MAX_LENGTH end || ')'        --phone (AdventureWorks)
+					when 257 then '"' || column_name || '"' ||' ' ||'VARCHAR('||case when COL_MAX_LENGTH < 1 then 2000000 else COL_MAX_LENGTH end || ')'        --accountnumber (AdventureWorks)
+					when 258 then '"' || column_name || '"' ||' ' ||'DECIMAL(1,0)'        --OnlineOrderFlag (AdventureWorks)
+					when 261 then '"' || column_name || '"' ||' ' ||'VARCHAR('||case when COL_MAX_LENGTH < 1 then 2000000 else COL_MAX_LENGTH end || ')'        --PurchaseOrderNumber (AdventureWorks)
+					-- else '-- UNSUPPORTED DATATYPE IN COLUMN ' || column_name || '  MSSQL TYPE INFO: USER_TYPE_ID ' || USER_TYPE_ID || ', SYSTEM_TYPE_ID ' ||  SYSTEM_TYPE_ID || ', NAME ' || TYPE_NAME || ', PRECISION ' || PRECISION || ', SCALE ' || SCALE
  				end
  				|| case when IS_IDENTITY='1' then ' IDENTITY' end
  				|| case when IS_NULLABLE='0' then ' NOT NULL' end
@@ -169,7 +175,8 @@ with sqlserv_base as(
  			as cols, 
                     group_concat( 
                             case 
-                            when USER_TYPE_ID not in (108, 36, 106, 175, 62, 42, 239, 231, 52, 41, 61, 56, 167, 48, 104, 40, 35, 43, 58, 59, 60, 99, 122, 127, 128, 129, 130, 189, 241, 256)
+                            when USER_TYPE_ID not in (108, 36, 106, 175, 62, 42, 239, 231, 52, 41, 61, 56, 167, 48, 104, 40, 35, 43, 58, 59, 60, 99, 122, 127, 128, 129, 130, 189, 241, 256
+                            							, 259, 260, 262, 257, 258, 261)
                             then '-- UNSUPPORTED DATATYPE IN COLUMN ' || column_name || '  MSSQL TYPE INFO: USER_TYPE_ID ' || USER_TYPE_ID || ', SYSTEM_TYPE_ID ' ||  SYSTEM_TYPE_ID || ', NAME ' || TYPE_NAME || ', PRECISION ' || PRECISION || ', SCALE ' || SCALE
                             end
                     ) 
@@ -210,6 +217,12 @@ with sqlserv_base as(
  					when 189 then '"' || column_name || '"'
  					when 241 then '"' || column_name || '"' 
  					when 256 then '"' || column_name || '"'
+ 					when 259 then '"' || column_name || '"'
+ 					when 260 then '"' || column_name || '"'
+ 					when 262 then '"' || column_name || '"'
+ 					when 257 then '"' || column_name || '"'
+ 					when 258 then '"' || column_name || '"'
+ 					when 261 then '"' || column_name || '"'
  					-- else '-- UNSUPPORTED DATATYPE IN COLUMN ' || column_name || '  MSSQL TYPE INFO: USER_TYPE_ID ' || USER_TYPE_ID || ', SYSTEM_TYPE_ID ' ||  SYSTEM_TYPE_ID || ', NAME ' || TYPE_NAME || ', PRECISION ' || PRECISION || ', SCALE ' || SCALE
  				end  order by column_id SEPARATOR ',
 ' ) || ') from jdbc at ]]..CONNECTION_NAME..[[ statement 
@@ -247,6 +260,12 @@ with sqlserv_base as(
  					when 189 then 'CAST([' || column_name || '] AS DATETIME)'
  					when 241 then '[' || column_name || ']' 
  					when 256 then '[' || column_name || ']'
+ 					when 259 then '[' || column_name || ']'
+ 					when 260 then '[' || column_name || ']'
+ 					when 262 then '[' || column_name || ']'
+ 					when 257 then '[' || column_name || ']'
+ 					when 258 then '[' || column_name || ']'
+ 					when 261 then '[' || column_name || ']'
  					-- else '-- UNSUPPORTED DATATYPE IN COLUMN ' || column_name || '  MSSQL TYPE INFO: USER_TYPE_ID ' || USER_TYPE_ID || ', SYSTEM_TYPE_ID ' ||  SYSTEM_TYPE_ID || ', NAME ' || TYPE_NAME || ', PRECISION ' || PRECISION || ', SCALE ' || SCALE
  				end  order by column_id SEPARATOR ',
 ') || '
