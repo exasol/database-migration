@@ -25,7 +25,8 @@ with vv_pg_columns as (
 		(import from jdbc at ]]..CONNECTION_NAME..[[ statement 
 			'select table_catalog, table_schema, table_name, column_name, ordinal_position, data_type, character_maximum_length, numeric_precision, numeric_scale, datetime_precision  
 				from information_schema.columns join information_schema.tables using (table_catalog, table_schema, table_name) 
-				where table_type = ''BASE TABLE'' 
+-- change ''BASE TABLE'' to ''VIEW'' if you want to copy a view from Postgres to an Exasol table
+		 		where table_type = ''BASE TABLE'' 
 				AND table_schema not in (''information_schema'',''pg_catalog'')
 				AND table_schema like '']]..SCHEMA_FILTER..[[''
 				AND table_name like '']]..TABLE_FILTER..[[''
