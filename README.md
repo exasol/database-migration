@@ -285,13 +285,18 @@ See script [vectorwise_to_exasol.sql](vectorwise_to_exasol.sql)
 See script [vertica_to_exasol.sql](vertica_to_exasol.sql)
 
 ### Google BigQuery
-See script [bigquery_to_exasol.sql](bigquery_to_exasol.sql)
 
-Upload the following files into a bucket called "bqmigration" in the default BucketFS service:
-- JSON key file for your BigQuery service account
-- jar files of the BigQuery JDBC driver (tested with Simba v1.1.6)
+The migration script creates DDL and IMPORT statements. In order to perform these imports you need to carry out the steps outlined in [Connecting Google BigQuery to Exasol](https://docs.exasol.com/loading_data/connect_databases/google_bigquery.htm). Now, test the connectivity with a simple query:
 
-The migration script creates DDL and IMPORT statements together with a CREATE CONNECTION statement. In order to perform these imports the JDBC driver has also to be installed in ExaOperation, see [SOL-194](https://www.exasol.com/support/browse/SOL-194) for details.  
+```sql
+SELECT *
+FROM   (
+               IMPORT FROM JDBC AT <name_of_connection>
+			   STATEMENT 'SELECT  1'
+	   );
+```
+
+For the actual data-migration, see script [bigquery_to_exasol.sql](bigquery_to_exasol.sql)
 
 
 ## Post-load optimization
