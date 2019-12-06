@@ -135,7 +135,7 @@ success, res = pquery([[with ora_cols as(
 
 	select * from(
 		import from ]]..CONNECTION_TYPE..[[ at ::c
-		statement 'select ]]..all_tab_cols..[[  from all_tab_columns where owner ]]..SCHEMA_STR..[[ and table_name ]]..TABLE_STR..[['
+		statement 'select ]]..all_tab_cols..[[  from all_tab_columns where table_name in (select table_name from all_tables where owner ]]..SCHEMA_STR..[[ and table_name ]]..TABLE_STR..[[) and owner ]]..SCHEMA_STR..[[ and table_name ]]..TABLE_STR..[['
 				)
 			),
 	ora_base as ( --cast to correct types
