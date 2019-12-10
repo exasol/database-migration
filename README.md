@@ -240,11 +240,10 @@ The first thing you need to do is add the Teradata JDBC driver to Exasol. The dr
 first, it's free. Make sure that you download the right version of the JDBC driver, matching the version of the
 Teradata database.
 
-The downloaded package contains two files:
+The downloaded package contains the file:
 * `terajdbc4.jar` contains the actual Java classes of the driver
-* `tdgssconfig.jar` includes configuration information for Teradata's Generic Security Services (GSS)
 
-Both files will need to be uploaded when you add the Teradata JDBC driver for Exasol. To do this, log into
+This file needs to be uploaded when you add the Teradata JDBC driver for Exasol. To do this, log into
 EXAoperations, then select _Software_, then the _JDBC Drivers_ tab.
 
 Click ` Add ` then specify the following details:
@@ -254,8 +253,7 @@ Click ` Add ` then specify the following details:
 * Comment: `Version 15.10` (or something similar)
 
 After clicking ` Apply `, you will see the newly added driver's details on the top section of the driver list.
-Select the Teradata driver (the radio button in the first column) and then locate the `terajdbc4.jar` and upload it;
-do the same with `tdgssconfig.jar`. When done, both .jar files should be listed in the _Files_ column for the Teradata driver.
+Select the Teradata driver (the radio button in the first column) and then locate the `terajdbc4.jar` and upload it.
 
 Next step is to test the connectivity. First, create a connection to the remote Teradata database:
 ```SQL
