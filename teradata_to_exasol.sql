@@ -30,7 +30,7 @@ with vv_columns as (
 	               ]]..exa_upper_begin..[["column_name"]]..exa_upper_end..[[ as "exa_column_name"
 	               , tableList.* 
         from            (import from jdbc at ]]..CONNECTION_NAME..[[ 
-        statement      'select  trim(c.DatabaseName) as  table_schema, 
+        statement      'select trim(c.DatabaseName) as  table_schema, 
                                 trim(c.TableName) as    table_name, 
                                 ColumnName as           column_name,
                                 ColumnId as             ordinal_position, 
@@ -40,6 +40,10 @@ with vv_columns as (
                                 DecimalFractionalDigits as numeric_scale,
                                 DecimalFractionalDigits as datetime_precision  
                         from    DBC.ColumnsV c
+                        join    DBC.TablesV t on 
+                                c.databaseName=t.DatabaseName AND 
+                                c.TableName=t.TableName AND 
+                                TableKind=''T''
                         where   table_schema not in (''DBC'') AND
                                 table_schema like '']]..SCHEMA_FILTER..[['' AND
                                 table_name like '']]..TABLE_FILTER..[[''
@@ -154,7 +158,7 @@ return(res)
 -- !!! you can see a similar example for Oracle here: https://www.exasol.com/support/browse/SOL-179 !!!
 
 -- Create a connection to the Teradata database
-create connection teradata_db to 'jdbc:teradata://some.teradata.host.internal/CHARSET=UTF8' user 'db_username' identified by 'exasolRocks!';
+create or replace connection teradata_db to 'jdbc:teradata://192.168.56.1/CHARSET=UTF8' user 'dbc' identified by 'dbc';
 -- Depending on your Teradata installation, CHARSET=UTF16 could be the better choice - otherwise you get errors like this one:
 -- [42636] ETL-3003: [Column=5 Row=0] [String data right truncation. String length exceeds limit of 2 characters] (Session: 1611884537138472475)
 -- In that case, configure your connection like this:
@@ -162,9 +166,9 @@ create connection teradata_db to 'jdbc:teradata://some.teradata.host.internal/CH
 
 -- Finally start the import process
 execute script database_migration.TERADATA_TO_EXASOL(
-    'teradata_db'     -- name of your database connection
+    'TERADATA_DB'     -- name of your database connection
     ,true             -- case sensitivity handling for identifiers -> false: handle them case sensitiv / true: handle them case insensitiv --> recommended: true
-    ,'MYPROJECT%'     -- schema filter --> '%' to load all schemas except 'DBC' / '%pub%' to load all schemas like '%pub%'
+    ,'MIGRATION'     -- schema filter --> '%' to load all schemas except 'DBC' / '%pub%' to load all schemas like '%pub%'
     ,'%'              -- table filter --> '%' to load all tables
 );
 
