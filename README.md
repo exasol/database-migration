@@ -68,6 +68,25 @@ For more details on `IMPORT` see paragraph 2.2.2 in the User Manual. For further
 See script [db2_to_exasol.sql](db2_to_exasol.sql)
 ### Exasol
 See script [exasol_to_exasol.sql](exasol_to_exasol.sql)
+
+### Google BigQuery
+
+In order to connect Exasol to Google BigQuery you need to carry out the steps outlined in [Connecting Google BigQuery to Exasol](https://docs.exasol.com/loading_data/connect_databases/google_bigquery.htm). 
+
+Now, test the connectivity with a simple query:
+
+```sql
+SELECT *
+FROM   (
+               IMPORT FROM JDBC AT <name_of_connection>
+			   STATEMENT 'SELECT  1'
+	   );
+```
+
+For the actual data-migration, see script [bigquery_to_exasol.sql](bigquery_to_exasol.sql)
+
+Note: Due to the lack of an alternative datatype, the following Google BigQuery datatypes; `DATE`,`DATETIME`,`TIMESTAMP` and `ARRAY` are stored as VARCHAR. 
+
 ### MySQL
 
 Create a connection:
@@ -283,20 +302,6 @@ See script [vectorwise_to_exasol.sql](vectorwise_to_exasol.sql)
 
 ### Vertica
 See script [vertica_to_exasol.sql](vertica_to_exasol.sql)
-
-### Google BigQuery
-
-The migration script creates DDL and IMPORT statements. In order to perform these imports you need to carry out the steps outlined in [Connecting Google BigQuery to Exasol](https://docs.exasol.com/loading_data/connect_databases/google_bigquery.htm). Now, test the connectivity with a simple query:
-
-```sql
-SELECT *
-FROM   (
-               IMPORT FROM JDBC AT <name_of_connection>
-			   STATEMENT 'SELECT  1'
-	   );
-```
-
-For the actual data-migration, see script [bigquery_to_exasol.sql](bigquery_to_exasol.sql)
 
 
 ## Post-load optimization
