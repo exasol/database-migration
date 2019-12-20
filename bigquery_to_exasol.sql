@@ -8,11 +8,11 @@ create schema if not exists database_migration;
 --/
 
 create or replace script database_migration.BIGQUERY_TO_EXASOL(
-	CONNECTION_NAME									-- name of the database connection inside exasol -> e.g. bigquery_db
-	,IDENTIFIER_CASE_INSENSITIVE					-- true if identifiers should be stored case-insensitiv (will be stored upper_case)
-	,PROJECT_ID										-- name of bigquery project 
-	,SCHEMA_FILTER									-- filter for the schemas to generate and load -> '%' to load all
-	,TABLE_FILTER									-- filter for the tables to generate and load -> '%' to load all
+    CONNECTION_NAME              -- name of the database connection inside exasol -> e.g. bigquery_db
+    ,IDENTIFIER_CASE_INSENSITIVE -- true if identifiers should be stored case-insensitiv (will be stored upper_case)
+    ,PROJECT_ID                  -- name of bigquery project 
+    ,SCHEMA_FILTER               -- filter for the schemas to generate and load -> '%' to load all
+    ,TABLE_FILTER                -- filter for the tables to generate and load -> '%' to load all
 ) RETURNS TABLE
 AS
 exa_upper_begin=''
@@ -166,9 +166,9 @@ CREATE CONNECTION BQ_MIGRATE TO 'jdbc:exaquery://https://www.googleapis.com/bigq
 
 -- Finally start the import process
 execute script database_migration.BIGQUERY_TO_EXASOL(
-	'BQ_MIGRATE'							-- name of the database connection inside exasol -> e.g. bigquery_db
-	,False									-- true if identifiers should be stored case-insensitiv (will be stored upper_case)
-	,'bigquerymigration'					-- name of bigquery project
-	,'%'									-- filter for the schemas to generate and load -> '%' to load all
-	,'%'									-- filter for the tables to generate and load -> '%' to load all
+    'BQ_MIGRATE'           -- name of the database connection inside exasol -> e.g. bigquery_db
+    ,False                 -- true if identifiers should be stored case-insensitiv (will be stored upper_case)
+    ,'bigquerymigration'   -- name of bigquery project
+    ,'%'                   -- filter for the schemas to generate and load -> '%' to load all
+    ,'%'                   -- filter for the tables to generate and load -> '%' to load all
 );
