@@ -143,14 +143,15 @@ with vv_mysql_columns as (
 							when upper(data_type) = 'LONGBLOB' then 'cast(`'||column_name||'` as char(2000000))'
 							when upper(data_type) = 'TIME' then 'cast(`'||column_name||'` as char(8))'						   
 							when upper(data_type) = 'YEAR' then 'cast(`'||column_name||'` as char(4))'
-							when upper(data_type) = 'GEOMETRY' then 'AsText(`'||column_name||'`)'
-							when upper(data_type) = 'GEOMETRYCOLLECTION' then 'AsText(`'||column_name||'`)'
-							when upper(data_type) = 'POINT' then 'AsText(`'||column_name||'`)'
-							when upper(data_type) = 'MULTIPOINT' then 'AsText(`'||column_name||'`)'
-							when upper(data_type) = 'LINESTRING' then 'AsText(`'||column_name||'`)'
-							when upper(data_type) = 'MULTILINESTRING' then 'AsText(`'||column_name||'`)'
-							when upper(data_type) = 'POLYGON' then 'AsText(`'||column_name||'`)'
-							when upper(data_type) = 'MULTIPOLYGON' then 'AsText(`'||column_name||'`)'
+							-- ### for MySQL versions below 5.6 ST_AsText() needs to be replaced with AsText() ###
+							when upper(data_type) = 'GEOMETRY' then 'ST_AsText(`'||column_name||'`)'
+							when upper(data_type) = 'GEOMETRYCOLLECTION' then 'ST_AsText(`'||column_name||'`)'
+							when upper(data_type) = 'POINT' then 'ST_AsText(`'||column_name||'`)'
+							when upper(data_type) = 'MULTIPOINT' then 'ST_AsText(`'||column_name||'`)'
+							when upper(data_type) = 'LINESTRING' then 'ST_AsText(`'||column_name||'`)'
+							when upper(data_type) = 'MULTILINESTRING' then 'ST_AsText(`'||column_name||'`)'
+							when upper(data_type) = 'POLYGON' then 'ST_AsText(`'||column_name||'`)'
+							when upper(data_type) = 'MULTIPOLYGON' then 'ST_AsText(`'||column_name||'`)'
 							when upper(data_type) = 'BIT' then 'cast(`'||column_name||'` as DECIMAL('||numeric_precision||',0))'
 							end order by ordinal_position) 
            || ' from ' || table_schema|| '.' || table_name|| ''';' as sql_text
