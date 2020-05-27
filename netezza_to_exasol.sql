@@ -47,9 +47,9 @@ with vv_netezza_columns as(
                 
                 -- ### Numeric Types ###
                 
-                when upper(data_type) = 'BYTEINT' then '"' || "exa_column_name" || '" ' || 'DECIMAL(3,0)'           -- 8-bit values in range –128 to 127,                   1 byte
-                when upper(data_type) = 'SMALLINT' then '"' || "exa_column_name" || '" ' || 'DECIMAL(5,0)'          -- 16-bit values in range –32,768 to 32,767             2 byte
-                when upper(data_type) = 'INTEGER' then '"' || "exa_column_name" || '" ' || 'DECIMAL(10,0)'           -- 32-bit values in range –2,147,483,648 to 2,147,483,647      4 byte
+                when upper(data_type) = 'BYTEINT' then '"' || "exa_column_name" || '" ' || 'DECIMAL(3,0)'           -- 8-bit values in range â€“128 to 127,                   1 byte
+                when upper(data_type) = 'SMALLINT' then '"' || "exa_column_name" || '" ' || 'DECIMAL(5,0)'          -- 16-bit values in range â€“32,768 to 32,767             2 byte
+                when upper(data_type) = 'INTEGER' then '"' || "exa_column_name" || '" ' || 'DECIMAL(10,0)'           -- 32-bit values in range â€“2,147,483,648 to 2,147,483,647      4 byte
                 when upper(data_type) = 'BIGINT' then '"' || "exa_column_name" || '" ' || 'DECIMAL(19,0)'            -- 64-bit values in range -9,223,372,036,854,775,808 to 9,223,372,036,854,775,807 8 byte
                 when upper(data_type) like ('NUMERIC%') then case
                         when numeric_precision is null then '"' || "exa_column_name" || '" ' || 'DOUBLE PRECISION'
@@ -96,7 +96,7 @@ with vv_netezza_columns as(
                 --when upper(data_type) like 'BINARY VARYING(%)' then '"' || "exa_column_name" || '" ' || 'VARCHAR('||(numeric_precision*2)||')'             -- 64000 bytes binary data
 
                 end
-                order by ordinal_position) ||  ');'
+                order by cast(ordinal_position as decimal(10,0))) ||  ');'
                 
                 -- ### Unknown Datatypes ###
                 || group_concat (
@@ -152,7 +152,7 @@ with vv_netezza_columns as(
                 -- 
                 end
                 
-                order by ordinal_position)
+                order by cast(ordinal_position as decimal(10,0)))
                 
                 || ' from "'|| database_name || '"."'|| schema_name || '"."' || table_name|| '"'';' as sql_text
                 
