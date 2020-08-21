@@ -6,9 +6,11 @@
 ## Table of Contents
 1. [Overview](#overview)
 2. [Migration source:](#migration-source)
-    * [CSV](#csv)
+    * [Azure Sql] (#azure-sql)
+	* [CSV](#csv)
     * [DB2](#db2)
     * [Exasol](#exasol)
+	* [Google BigQuery](#google-bigquery)
     * [MySQL](#mysql)
     * [Netezza](#netezza)
     * [Oracle](#oracle)
@@ -20,7 +22,7 @@
     * [Teradata](#teradata)
     * [Vectorwise](#vectorwise)
     * [Vertica](#vertica)
-    * [Google BigQuery](#google-bigquery)
+    
 3. [Post-load optimization](#post-load-optimization)
 4. [Delta import](#delta-import)
 
@@ -35,6 +37,12 @@ database management systems. The scripts try to extract the meta data from the s
 If you want to optimize existing scripts or create new scripts for additional systems, we would be very glad if you share your work with the Exasol user community.
 
 ## Migration source
+
+### Azure SQL
+Azure SQL is essentially Microsoft SQL Server. You need to specify a DB you are working on in your connection-string.
+See script [azure_sql_to_exasol.sql](azure_sql_to_exasol.sql)
+
+
 ### CSV
 The method of importing a CSV file depends on the location of the file.
 - Import a file stored on your **local machine** via EXAplus:
