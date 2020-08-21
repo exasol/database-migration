@@ -2,12 +2,12 @@ create schema if not exists database_migration;
 
 /* 
      This script will generate create schema, create table and create import statements 
-     to load all needed data from a SQL Server database. Automatic datatype conversion is 
+     to load all needed data from a Azure SQL Server database. Automatic datatype conversion is 
      applied whenever needed. Feel free to adjust it. 
 */
 --/
-create or replace script database_migration.SQLSERVER_TO_EXASOL(
-CONNECTION_NAME 				-- name of the database connection inside exasol, e.g. sqlserver_db
+create or replace script database_migration.AZURE_SQL_TO_EXASOL(
+CONNECTION_NAME 				-- name of the database connection inside exasol, e.g. azure_db
 ,SCHEMA_FILTER 					-- filter for the schemas to generate and load, e.g. 'my_schema', 'my%', 'schema1, schema2', '%'
 ,TABLE_FILTER 					-- filter for the tables to generate and load, e.g. 'my_table', 'my%', 'table1, table2', '%'
 ,IDENTIFIER_CASE_INSENSITIVE 	-- TRUE if identifiers should be put uppercase
@@ -76,7 +76,7 @@ with sqlserv_base as(
 		select 'create or replace table ]]..tbl_def..[[  (' || cols || '); ' || cols2 || ''
 				 as tbls from (select ]]..tbl_group..[[, 
  			group_concat( 
- 				case USER_TYPE_ID -- SQLSERVER datatype system type codes are in system table SYS.TYPES, 
+ 				case USER_TYPE_ID -- SQLSERVER/Azure SQL datatype system type codes are in system table SYS.TYPES, 
  					--map with USER_TYPE_ID instead of SYSTEM_TYPE_ID ( not unique!!!)
  					when 108 then '"' || column_name || '"' ||' ' || case when PRECISION > 36 then case when SCALE > 36 then 'DECIMAL(' || 36 || ',' || 36 || ')' else 'DECIMAL(' || 36 || ',' || SCALE || ')' end else 'DECIMAL(' || PRECISION || ',' || SCALE || ')' end   --numeric
  					-- Alternative when you have big values with a precision higher than 36 inside a column numeric(38) and want to store them
@@ -250,16 +250,16 @@ if not success then error(res.error_message) end
 return(res)
 /
 
--- Create a connection to the SQLServer database
-create or replace CONNECTION sqlserver_connection 
+-- Create a connection to the Azure SQLServer database
+create or replace CONNECTION azure_sql_connection 
         TO 'jdbc:jtds:sqlserver://<DB_HOST>:1433;databasename=<DATABASENAME>'
         USER '<USERNAME>'
         IDENTIFIED BY '<PASSWORD>';
 
 
 -- Finally start the import process
-execute script database_migration.SQLSERVER_TO_EXASOL (
-    'sqlserver_connection',          -- CONNECTION_NAME:             name of the database connection inside exasol -> e.g. sqlserver_db
+execute script database_migration.AZURE_SQL_TO_EXASOL(
+    'azure_sql_connection',          -- CONNECTION_NAME:             name of the database connection inside exasol -> e.g. azure_db
     '%dbo%',                             -- SCHEMA_FILTER:               filter for the schemas to generate and load e.g. 'my_schema', 'my%', 'schema1, schema2', '%'
     '%',                                -- TABLE_FILTER:                filter for the tables to generate and load e.g. 'my_table', 'my%', 'table1, table2', '%'
     false                              -- IDENTIFIER_CASE_INSENSITIVE: set to TRUE if identifiers should be put uppercase
