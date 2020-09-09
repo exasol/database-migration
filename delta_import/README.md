@@ -8,7 +8,7 @@ An update column has to be defined for the script. This column is used to determ
 
 #### Prerequesites
 To use this script you need:
-- A source system (The script was tested on 'Oracle' and 'MySQL')
+- A source system (The script was tested on 'Oracle', 'SQL Server' and 'MySQL')
 - A target table that:
     - has the same structure as the source table ( see [the import scripts](https://github.com/EXASOL/database-migration) for further instructions)
     - has a primary key
