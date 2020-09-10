@@ -201,7 +201,7 @@ See script [postgres_to_exasol.sql](postgres_to_exasol.sql)
 See script [redshift_to_exasol.sql](redshift_to_exasol.sql)
 
 ### S3
-The script [s3_to_exasol.sql](s3_to_exasol.sql) looks different than the other import scripts. It's made to load data from S3 in parallel and needs some preparation before you can use it. See [SOL-594](https://www.exasol.com/support/browse/SOL-594) for detailed instructions.
+The script [s3_to_exasol.sql](s3_to_exasol.sql) looks different than the other import scripts. It's made to load data from S3 in parallel and needs some preparation before you can use it. See [our documentation](https://docs.exasol.com/loading_data/loading_data_from_amazon_s3_in_parallel.htm) for detailed instructions.
 If you just want to import a single file, see 'Import from [CSV](#csv)' above.
 
 ### SAP Hana
