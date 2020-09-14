@@ -314,11 +314,11 @@ end
 
 info = get_delta_load_information(wrapper, conn_type, conn_db, conn_name, src_schema, src_table, delta_detection_column)
 
+-- for versions prior to 6.0.15 and 6.1.3:
 -- the rollback is needed to prevent a transaction rollback that might otherwise be caused by 
 -- a read-write conflict on the target table
--- no longer needed for versions > 6.0.15 and 6.1.3
-
-wrapper:rollback()
+-- therefore, uncomment the following line:
+-- wrapper:rollback()
 
 stmts_tbl = {}
 
