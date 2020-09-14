@@ -200,6 +200,8 @@ info_tbl = wrapper:query_values([[/*snapshot execution*/
 				no_key_cols.column_table = cols.column_table
 		group by 1,2)
 select
+	'"' || all_tables.table_schema || '"' table_schema,
+	'"' || all_tables.table_name || '"' table_name,
 	all_columns,
 	key_columns,
 	no_key_columns,
@@ -218,7 +220,7 @@ order by 1,2 asc;
 ]])
 
 return info_tbl
--- all_columns(unified), key_columns, key_columns, no_key_columns, delta_name, delta_type
+-- table_schema, table_name, all_columns(unified), key_columns, key_columns, no_key_columns, delta_name, delta_type
 
 end
 -----------------------------------------------------------------------------------------
@@ -323,7 +325,7 @@ info = get_delta_load_information(wrapper, conn_type, conn_db, conn_name, src_sc
 stmts_tbl = {}
 
 -- only one row as result but for loop because of the way the query wrapper works
-for all_columns, key_columns_stmt, no_key_columns_stmt, delta_name, delta_type in info do
+for tbl_schema, tbl_name, all_columns, key_columns_stmt, no_key_columns_stmt, delta_name, delta_type in info do
 
 src_schema 	= quote(src_schema)
 tgt_schema 	= quote(tgt_schema)
@@ -332,8 +334,8 @@ tgt_table 	= quote(tgt_table)
 
 
 	if(all_columns == NULL) then
-	-- no columns --> something is wrong
-	return finish_with_error('No columns found for table '.. tgt_schema .. '.'.. tgt_table)
+	       -- no columns --> something is wrong
+	       return finish_with_error('No columns found for table '.. tgt_schema .. '.'.. tgt_table)
 	end
 
 	-- create text for statements used later on
@@ -350,31 +352,42 @@ tgt_table 	= quote(tgt_table)
 		-- no key_column --> truncate & full load
 		table.insert(stmts_tbl, {src_schema, tgt_schema, tgt_table, 'Full load (No Primary Key)', truncate_stmt})
 		table.insert(stmts_tbl, {'', '', '', '', full_load_tgt_stmt})
-	elseif (delta_name == NULL) then
-		-- no delta detection column --> truncate & full load
-		table.insert(stmts_tbl, {src_schema, tgt_schema, tgt_table, 'Full load (No delta_detection column)', truncate_stmt})
-		table.insert(stmts_tbl, {'', '', '', '', full_load_tgt_stmt})
-	else
-		table.insert(stmts_tbl, {'', '', '', '', create_staging_stmt})
-		-- we have a delta column and a primary key
-		max_delta 	= get_max_delta(wrapper, tgt_schema, tgt_table, delta_name, delta_type)
-		merge_stmt 	= [[merge into ]]..tgt_schema..[[.]]..tgt_table..[[ a using ]]..staging_schema..[[.]]..tgt_table..[[ b on ]]..key_columns_stmt..
-					[[ when matched then update set ]]..no_key_columns_stmt..
-					[[ when not matched then insert (]]..all_columns..[[) values (]]..all_columns..[[);]]
-
-		if (max_delta == NULL) then
-			-- no values with max_delta --> full load into staging table & merge
-			table.insert(stmts_tbl, {src_schema, tgt_schema, tgt_table, 'Full load and merge (Only null values in delta_detection column)', full_load_staging_stmt})
+		
+        else
+                table.insert(stmts_tbl, {'', '', '', '', create_staging_stmt})
+                merge_stmt 	= [[merge into ]]..tgt_schema..[[.]]..tgt_table..[[ a using ]]..staging_schema..[[.]]..tgt_table..[[ b on ]]..key_columns_stmt..
+                                                [[ when matched then update set ]]..no_key_columns_stmt..
+                                                [[ when not matched then insert (]]..all_columns..[[) values (]]..all_columns..[[);]]
+                                                
+                
+                
+                if (delta_name == NULL) then
+                     -- we don't have a delta detection column
+                     --  --> full load into staging table & merge
+		     table.insert(stmts_tbl, {src_schema, tgt_schema, tgt_table, 'Full load and merge (No delta_detection column)', full_load_staging_stmt})
+		
 		else
-			-- key_column & max_delta --> load into staging table with where clause & merge
-			max_delta_src_format = get_max_stmt_for_src(max_delta, delta_type, conn_db)
-			select_delta_src_stmt 	= [[select ]].. changeQuotesForDb(conn_db, all_columns) ..[[ from ]]..quoteForDb(conn_db,src_schema)..[[.]]..quoteForDb(conn_db,src_table)..[[ where ]]..quoteForDb(conn_db,delta_name)..[[ >= ]]..max_delta_src_format
-			delta_load_stmt 		= [[import into ]]..staging_schema..[[.]]..tgt_table..[[ (]]..all_columns..[[) from ]]..conn_type..[[ at ]]..conn_name..[[ statement ']]..select_delta_src_stmt..[[';]]
-			table.insert(stmts_tbl, {src_schema, tgt_schema, tgt_table, 'Delta load starting at '.. max_delta, delta_load_stmt})
+                        -- we have a delta column
+                         max_delta 	= get_max_delta(wrapper, tgt_schema, tgt_table, delta_name, delta_type)
+                         if (max_delta == NULL) then
+                             -- we have a delta column and a primary key, but no values with max_delta
+                             -- --> full load into staging table & merge
+                             table.insert(stmts_tbl, {src_schema, tgt_schema, tgt_table, 'Full load and merge (Only null values in delta_detection column)', full_load_staging_stmt})
+                        else	
+                             -- we have a delta column and a primary key, and a max_delta
+                             -- --> load into staging table with where clause & merge
+                             max_delta_src_format = get_max_stmt_for_src(max_delta, delta_type, conn_db)
+                             select_delta_src_stmt 	= [[select ]].. changeQuotesForDb(conn_db, all_columns) ..[[ from ]]..quoteForDb(conn_db,src_schema)..[[.]]..quoteForDb(conn_db,src_table)..[[ where ]]..quoteForDb(conn_db,delta_name)..[[ >= '']]..max_delta_src_format .. [['']]
+                             delta_load_stmt 		= [[import into ]]..staging_schema..[[.]]..tgt_table..[[ (]]..all_columns..[[) from ]]..conn_type..[[ at ]]..conn_name..[[ statement ']]..select_delta_src_stmt..[[';]]
+                             table.insert(stmts_tbl, {src_schema, tgt_schema, tgt_table, 'Delta load starting at '.. max_delta, delta_load_stmt})		
+                        end		 
 		end
+		
+                -- whenever a primary key is present
 		table.insert(stmts_tbl, {'', '', '', '', merge_stmt})
 		table.insert(stmts_tbl, {'', '', '', '', drop_staging_stmt})
-	end
+        
+        end
 
 
 end -- end (for-loop)
