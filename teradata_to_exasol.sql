@@ -115,13 +115,13 @@ vv_create_schemas as(
                        end || ')' 
                end 
         when "data_type" = 'YR'  then  --INTERVAL YEAR 
-          'DECIMAL(4,0)'
+          'INTERVAL YEAR (' || "numeric_precision" ||  ') TO MONTH'
         when "data_type" = 'YM'  then  --INTERVAL YEAR TO MONTH
           'INTERVAL YEAR (' || "numeric_precision" ||  ') TO MONTH' 
         when "data_type" = 'MO'  then  --INTERVAL MONTH 
-          'DECIMAL(4,0)'  
+          'INTERVAL YEAR (4) TO MONTH'  
         when "data_type" = 'DY'  then  --INTERVAL DAY 
-          'DECIMAL(4,0)' 
+          'INTERVAL DAY (4) TO SECOND' 
         when "data_type" = 'DH'  then  --INTERVAL DAY TO HOUR
           'INTERVAL DAY (4) TO SECOND'    
         when "data_type" = 'DM'  then  --INTERVAL DAY TO MINUTE
@@ -129,13 +129,13 @@ vv_create_schemas as(
         when "data_type" = 'DS'  then  --INTERVAL DAY TO SECOND  
           'INTERVAL DAY (4) TO SECOND (' ||    "numeric_scale" || ')'
         when "data_type" = 'HR'  then  --INTERVAL HOUR 
-          'DECIMAL(4,0)' 
+          'INTERVAL DAY (4) TO SECOND' 
         when "data_type" = 'HM'  then  --INTERVAL HOUR TO MINUTE  
           'INTERVAL DAY (4) TO SECOND '  
         when "data_type" = 'HS'  then  --INTERVAL HOUR TO SECOND  
           'INTERVAL DAY (4) TO SECOND (' ||    "numeric_scale" || ')' 
         when "data_type" = 'MI'  then  --INTERVAL MINUTE
-           'DECIMAL(4,0)' 
+          'INTERVAL DAY (4) TO SECOND'  
         when "data_type" = 'MS'  then  --INTERVAL MINUTE TO SECOND  
           'INTERVAL DAY (4) TO SECOND (' ||    "numeric_scale" || ')'   
         when "data_type" = 'SC'  then  --INTERVAL SECOND
@@ -164,17 +164,17 @@ vv_create_schemas as(
 	when "data_type" = 'CV' then "column_name"
 	when "data_type" = 'I'  then "column_name"
 	when "data_type" = 'N'  then "column_name"
-	when "data_type" = 'YR'  then 'cast('|| "column_name" || ' AS INT )'  --Interval Year
+	when "data_type" = 'YR'  then 'cast(cast('|| "column_name" || ' AS INTERVAL YEAR  TO MONTH ) AS VARCHAR(50))'  --Interval Year
 	when "data_type" = 'YM'  then 'cast('|| "column_name" || ' AS VARCHAR(50) )'  --Interval Year to Month
-	when "data_type" = 'MO'  then 'cast('|| "column_name" || ' AS INT )'  --Interval Month
-	when "data_type" = 'DY'  then 'cast('|| "column_name" || ' AS INT )'  --Interval Day
+	when "data_type" = 'MO'  then 'cast(cast('|| "column_name" || ' AS INTERVAL YEAR  TO MONTH ) AS VARCHAR(50))'  --Interval Month
+	when "data_type" = 'DY'  then 'cast(cast('|| "column_name" || ' AS INTERVAL DAY (4)  TO SECOND) AS VARCHAR(50)) ' --Interval Day
 	when "data_type" = 'DH'  then 'cast(cast('|| "column_name" || ' AS INTERVAL DAY (4)  TO SECOND) AS VARCHAR(50)) '  --Interval Day to hour
 	when "data_type" = 'DM'  then 'cast(cast('|| "column_name" || ' AS INTERVAL DAY (4)  TO SECOND) AS VARCHAR(50)) '  --Interval Day to minute
 	when "data_type" = 'DS'  then 'cast(cast('|| "column_name" || ' AS INTERVAL DAY (4)  TO SECOND (' || "numeric_scale" || ')) AS VARCHAR(50)) '  --Interval day to second
-	when "data_type" = 'HR'  then 'cast('|| "column_name" || ' AS INT )'  --Interval Hour
+	when "data_type" = 'HR'  then 'cast(cast('|| "column_name" || ' AS INTERVAL DAY (4)  TO SECOND) AS VARCHAR(50)) '  --Interval Hour
 	when "data_type" = 'HM'  then 'cast(cast('|| "column_name" || ' AS INTERVAL DAY (4)  TO SECOND) AS VARCHAR(50)) '  --Interval Day to minute
 	when "data_type" = 'HS'  then 'cast(cast('|| "column_name" || ' AS INTERVAL DAY (4)  TO SECOND (' || "numeric_scale" || ')) AS VARCHAR(50)) '  --Interval day to second
-	when "data_type" = 'MI'  then 'cast('|| "column_name" || ' AS INT )'  --Interval Minute
+	when "data_type" = 'MI'  then 'cast(cast('|| "column_name" || ' AS INTERVAL DAY (4)  TO SECOND) AS VARCHAR(50)) ' --Interval Minute
 	when "data_type" = 'MS'  then 'cast(cast('|| "column_name" || ' AS INTERVAL DAY (4)  TO SECOND (' || "numeric_scale" || ')) AS VARCHAR(50)) '  --Interval minute to second
 	when "data_type" = 'SC'  then 'cast(cast('|| "column_name" || ' AS INTERVAL DAY (4)  TO SECOND (' || "numeric_scale" || ')) AS VARCHAR(50)) '  --Interval Second
 	else "column_name"
