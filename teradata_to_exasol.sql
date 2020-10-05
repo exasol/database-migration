@@ -83,6 +83,8 @@ vv_create_schemas as(
                         end || ')' 
                 end 
 	when "data_type" = 'TS' then 'TIMESTAMP' 
+	when "data_type" = 'TZ' then 'TIMESTAMP' 
+	when "data_type" = 'SZ' then 'TIMESTAMP' 
 	when "data_type" = 'CF' then 'char(' || 
 	       case 
 	       when nvl("character_maximum_length",2000) > 2000 then 
@@ -164,6 +166,8 @@ vv_create_schemas as(
 	when "data_type" = 'CV' then "column_name"
 	when "data_type" = 'I'  then "column_name"
 	when "data_type" = 'N'  then "column_name"
+	when "data_type" = 'TZ' then  'cast(' || "column_name" || 'as time)'  --time with time zone
+	when "data_type" = 'SZ' then  'cast(' || "column_name" || 'as timestamp)'  --timestamp with time zone
 	when "data_type" = 'YR'  then 'cast(cast('|| "column_name" || ' AS INTERVAL YEAR  TO MONTH ) AS VARCHAR(50))'  --Interval Year
 	when "data_type" = 'YM'  then 'cast('|| "column_name" || ' AS VARCHAR(50) )'  --Interval Year to Month
 	when "data_type" = 'MO'  then 'cast(cast('|| "column_name" || ' AS INTERVAL YEAR  TO MONTH ) AS VARCHAR(50))'  --Interval Month
