@@ -102,8 +102,8 @@ vv_create_schemas as(
 	               nvl("character_maximum_length",2000000) 
                end || ')' 
 	when "data_type" = 'I'  then 'DECIMAL(10)' --maybe 9 but can result in errors while importing
-	when "data_type" = 'N'  then 
-	       case when "numeric_precision" is null or "numeric_precision" > 36 then 
+	when "data_type" = 'N'  then  --Number type 
+	       case when "numeric_precision" is null or "numeric_precision" > 36 or "numeric_precision" = -128 then 
 	       'DOUBLE' 
 	       else 'decimal(' || "numeric_precision" || ',' || 
 	               case when ("numeric_scale" > "numeric_precision") 
