@@ -101,13 +101,15 @@ vv_create_schemas as(
 	when "data_type" = 'TS' then 'TIMESTAMP' 
 	when "data_type" = 'TZ' then 'TIMESTAMP' 
 	when "data_type" = 'SZ' then 'TIMESTAMP' 
-	when "data_type" = 'CF' then 'char(' || 
-	       case 
-	       when nvl("character_maximum_length",2000) > 2000 then 
-	       2000 
-	       else 
-	               nvl("character_maximum_length",2000) 
-               end || ')' 
+	when "data_type" = 'CF' then  
+                case 
+                when nvl("character_maximum_length",2000) > 2000 then 
+                'varchar(' ||
+                       nvl("character_maximum_length",2000) || ')' 
+                else 
+                'char(' ||
+                       nvl("character_maximum_length",2000) || ')' 
+                end 
 	when "data_type" = 'I1' then 'DECIMAL(9)'
 	when "data_type" = 'I2' then 'DECIMAL(9)'
 	when "data_type" = 'I8' then 'DECIMAL(19)' --maybe 18 but can result in errors while importing
