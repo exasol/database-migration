@@ -56,8 +56,24 @@ vv_create_schemas as(
 	order by "exa_table_schema"
 )
 ,vv_create_tables as (
-	select 'create or replace table "' || "exa_table_schema" || '"."' || "exa_table_name" || '" (' || group_concat('"' || "exa_column_name" || '" ' ||
+	select 'create or replace table "' || "exa_table_schema" || '"."' || "exa_table_name" || '" (' || 
+	group_concat(
 	case 
+	when "data_type" = 'PD' then -- a teradata PERIOD(DATE) is splitted into the beginning and end DATE  
+	       '"' ||  "exa_column_name" || '_BEGINNING " DATE,' ||
+	       '"' ||  "exa_column_name" || '_END" DATE' 
+	when "data_type" in ('PS', 'PM', 'PT', 'PZ')  then  -- a teradata PERIOD(TIMESTAMP) is splitted into the beginning and end TIMESTAMP  
+	       '"' ||  "exa_column_name" || '_BEGINNING " TIMESTAMP,' ||
+	       '"' ||  "exa_column_name" || '_END" TIMESTAMP'        	       
+	else
+	       '"' ||  "exa_column_name" || '" ' 
+	end
+	   
+	    ||
+	        
+	case 
+	when "data_type" = 'PD' then ''  --Period is already splitted into two dates before
+	when "data_type" in ('PS', 'PM', 'PT', 'PZ') then ''  --Period is already splitted into two timestamps before
 	when "data_type" = 'DA' then 'DATE' 
 	when "data_type" = 'BV' then 'varchar(' || 
 	       case 
@@ -165,9 +181,12 @@ vv_create_schemas as(
 	when "data_type" = 'F'  then "column_name"
 	when "data_type" = 'CV' then "column_name"
 	when "data_type" = 'I'  then "column_name"
-	when "data_type" = 'N'  then "column_name"
-	when "data_type" = 'TZ' then  'cast(' || "column_name" || 'as time)'  --time with time zone
-	when "data_type" = 'SZ' then  'cast(' || "column_name" || 'as timestamp)'  --timestamp with time zone
+	when "data_type" = 'N'  then "column_name"  
+	when "data_type" = 'PD'  then  'BEGIN('|| "column_name" || ') , END(' ||  "column_name" || ')'  --Period(Date) split into begin and end date
+	when "data_type" in ('PS', 'PM')  then  'CAST(  BEGIN('|| "column_name" || ') AS TIMESTAMP ) , CAST ( END(' ||  "column_name" || ') AS TIMESTAMP ) '  --Period(Timestamp) split into begin and end timestamp  
+	when "data_type" in ('PT', 'PZ')  then  'CAST(  BEGIN('|| "column_name" || ') AS TIME ) , CAST ( END(' ||  "column_name" || ') AS TIME ) '  --Period(Time) split into begin and end time	
+	when "data_type" = 'TZ' then  'cast(' || "column_name" || ' AS TIME)'  --time with time zone
+	when "data_type" = 'SZ' then  'cast(' || "column_name" || ' AS TIMESTAMP)'  --timestamp with time zone
 	when "data_type" = 'YR'  then 'cast(cast('|| "column_name" || ' AS INTERVAL YEAR  TO MONTH ) AS VARCHAR(50))'  --Interval Year
 	when "data_type" = 'YM'  then 'cast('|| "column_name" || ' AS VARCHAR(50) )'  --Interval Year to Month
 	when "data_type" = 'MO'  then 'cast(cast('|| "column_name" || ' AS INTERVAL YEAR  TO MONTH ) AS VARCHAR(50))'  --Interval Month
