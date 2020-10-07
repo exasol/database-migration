@@ -115,7 +115,7 @@ vv_create_schemas as(
 	when "data_type" = 'I8' then 'DECIMAL(19)' --maybe 18 but can result in errors while importing
 	when "data_type" = 'AT' then 'TIMESTAMP' 
 	when "data_type" = 'F'  then 'DOUBLE' 
-	when "data_type" = 'CV' then 
+	when "data_type" in( 'CV' , 'JN') then  --Varchar and JSON
 	       'varchar(' || case when nvl("character_maximum_length",2000000) > 2000000 then 
 	       2000000 
 	       else 
@@ -183,7 +183,8 @@ vv_create_schemas as(
 	when "data_type" = 'F'  then "column_name"
 	when "data_type" = 'CV' then "column_name"
 	when "data_type" = 'I'  then "column_name"
-	when "data_type" = 'N'  then "column_name"  
+	when "data_type" = 'N'  then "column_name" 
+	when "data_type" = 'JN'  then 'CAST(' || "column_name" ||  ' AS CLOB ) ' --json (max length in Exasol is 2000000 as it is stored as varchar)  
 	when "data_type" = 'PD'  then  'BEGIN('|| "column_name" || ') , END(' ||  "column_name" || ')'  --Period(Date) split into begin and end date
 	when "data_type" in ('PS', 'PM')  then  'CAST(  BEGIN('|| "column_name" || ') AS TIMESTAMP ) , CAST ( END(' ||  "column_name" || ') AS TIMESTAMP ) '  --Period(Timestamp) split into begin and end timestamp  
 	when "data_type" in ('PT', 'PZ')  then  'CAST(  BEGIN('|| "column_name" || ') AS TIME ) , CAST ( END(' ||  "column_name" || ') AS TIME ) '  --Period(Time) split into begin and end time	
