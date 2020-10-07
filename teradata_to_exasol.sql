@@ -75,13 +75,7 @@ vv_create_schemas as(
 	when "data_type" = 'PD' then ''  --Period is already splitted into two dates before
 	when "data_type" in ('PS', 'PM', 'PT', 'PZ') then ''  --Period is already splitted into two timestamps before
 	when "data_type" = 'DA' then 'DATE' 
-	when "data_type" = 'BV' then 'varchar(' || 
-	       case 
-	       when nvl("character_maximum_length",2000000) > 2000000 then 
-	               2000000 
-	               else 
-	                       nvl("character_maximum_length",2000000) 
-	               end || ')' 
+	when "data_type" in ('BF', 'BO', 'BV') then 'VARCHAR(100)' --binary data types like BYTE, VARBYTE, BLOB are not supported then
         when "data_type" = 'D'  then 
                 case 
                 when "numeric_precision" is null or "numeric_precision" > 36 then 
@@ -172,7 +166,6 @@ vv_create_schemas as(
 	select 'import into "' || "exa_table_schema" || '"."' || "exa_table_name" || '" from jdbc at ]]..CONNECTION_NAME..[[ statement ''select ' || group_concat( 
 	case 
 	when "data_type" = 'DA' then "column_name"
-	when "data_type" = 'BV' then "column_name"
 	when "data_type" = 'D'  then "column_name"
 	when "data_type" = 'TS' then "column_name"
 	when "data_type" = 'CF' then "column_name"
@@ -183,7 +176,8 @@ vv_create_schemas as(
 	when "data_type" = 'F'  then "column_name"
 	when "data_type" = 'CV' then "column_name"
 	when "data_type" = 'I'  then "column_name"
-	when "data_type" = 'N'  then "column_name" 
+	when "data_type" = 'N'  then "column_name"
+	when "data_type" in ('BF', 'BO', 'BV') then '''''NOT SUPPORTED''''' --binary data types (BYTE, VARBYTE, BLOB) are not supported
 	when "data_type" = 'JN'  then 'CAST(' || "column_name" ||  ' AS CLOB ) ' --json (max length in Exasol is 2000000 as it is stored as varchar)  
 	when "data_type" = 'PD'  then  'BEGIN('|| "column_name" || ') , END(' ||  "column_name" || ')'  --Period(Date) split into begin and end date
 	when "data_type" in ('PS', 'PM')  then  'CAST(  BEGIN('|| "column_name" || ') AS TIMESTAMP ) , CAST ( END(' ||  "column_name" || ') AS TIMESTAMP ) '  --Period(Timestamp) split into begin and end timestamp  
