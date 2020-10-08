@@ -153,7 +153,9 @@ vv_create_schemas as(
         when "data_type" = 'MS'  then  --INTERVAL MINUTE TO SECOND  
           'INTERVAL DAY (4) TO SECOND (' ||    "numeric_scale" || ')'   
         when "data_type" = 'SC'  then  --INTERVAL SECOND
-           'INTERVAL DAY (4) TO SECOND (' ||    "numeric_scale" || ')'      
+           'INTERVAL DAY (4) TO SECOND (' ||    "numeric_scale" || ')'     
+        when "data_type" in ('A1','AN')  then --ARRAY Datatype  
+           'VARCHAR(64000)'
 	else '/*UNKNOWN_DATATYPE:' || "data_type" || '*/ varchar(2000000)' 
 	end
 	
@@ -177,6 +179,7 @@ vv_create_schemas as(
 	when "data_type" = 'CV' then "column_name"
 	when "data_type" = 'I'  then "column_name"
 	when "data_type" = 'N'  then "column_name"
+	when "data_type" in ('A1','AN')  then 'cast(' || "column_name" || ' as varchar(64000)) '  --array datatypes are casted to a varchar in Teradata
 	when "data_type" in ('BF', 'BO', 'BV') then '''''NOT SUPPORTED''''' --binary data types (BYTE, VARBYTE, BLOB) are not supported
 	when "data_type" = 'JN'  then 'CAST(' || "column_name" ||  ' AS CLOB ) ' --json (max length in Exasol is 2000000 as it is stored as varchar)  
 	when "data_type" = 'PD'  then  'BEGIN('|| "column_name" || ') , END(' ||  "column_name" || ')'  --Period(Date) split into begin and end date
