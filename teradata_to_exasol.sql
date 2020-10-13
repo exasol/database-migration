@@ -28,6 +28,7 @@ with vv_columns as (
 	select         ]]..exa_upper_begin..[["table_schema"]]..exa_upper_end..[[ as "exa_table_schema", 
 	               ]]..exa_upper_begin..[["table_name"]]..exa_upper_end..[[ as "exa_table_name", 
 	               ]]..exa_upper_begin..[["column_name"]]..exa_upper_end..[[ as "exa_column_name"
+	               , '"' || "column_name" || '"' as "column_name_delimited"
 	               , tableList.* 
         from            (import from jdbc at ]]..CONNECTION_NAME..[[ 
         statement      'select trim(c.DatabaseName) as  table_schema, 
@@ -38,7 +39,8 @@ with vv_columns as (
                                 columnLength as         character_maximum_length,
                                 DecimalTotalDigits as   numeric_precision, 
                                 DecimalFractionalDigits as numeric_scale,
-                                DecimalFractionalDigits as datetime_precision  
+                                DecimalFractionalDigits as datetime_precision, 
+                                Nullable as nullable 
                         from    DBC.ColumnsV c
                         join    DBC.TablesV t on 
                                 c.databaseName=t.DatabaseName AND 
@@ -187,7 +189,7 @@ vv_create_schemas as(
         when "data_type" in ('A1','AN')  then --ARRAY Datatype  
            'VARCHAR(64000)'
 	else '/*UNKNOWN_DATATYPE:' || "data_type" || '*/ varchar(2000000)' 
-	end
+	end || case when "nullable" = 'N' then ' NOT NULL ' else '' end
 	
 	order by       "ordinal_position") || ');' as sql_text
 	from           vv_columns  
@@ -205,40 +207,40 @@ from           vv_primary_keys_raw
 ), vv_imports as (
 	select 'import into "' || "exa_table_schema" || '"."' || "exa_table_name" || '" from jdbc at ]]..CONNECTION_NAME..[[ statement ''select ' || group_concat( 
 	case 
-	when "data_type" = 'DA' then "column_name"
-	when "data_type" = 'D'  then "column_name"
-	when "data_type" = 'TS' then "column_name"
-	when "data_type" = 'CF' then "column_name"
-	when "data_type" = 'I1' then "column_name"
-	when "data_type" = 'I2' then "column_name"
-	when "data_type" = 'I8' then "column_name"
-	when "data_type" = 'AT' then "column_name"
-	when "data_type" = 'F'  then "column_name"
-	when "data_type" = 'CV' then "column_name"
-	when "data_type" = 'I'  then "column_name"
-	when "data_type" = 'N'  then "column_name"
-	when "data_type" in ('A1','AN')  then 'cast(' || "column_name" || ' as varchar(64000)) '  --array datatypes are casted to a varchar in Teradata
+	when "data_type" = 'DA' then "column_name_delimited"
+	when "data_type" = 'D'  then "column_name_delimited"
+	when "data_type" = 'TS' then "column_name_delimited"
+	when "data_type" = 'CF' then "column_name_delimited"
+	when "data_type" = 'I1' then "column_name_delimited"
+	when "data_type" = 'I2' then "column_name_delimited"
+	when "data_type" = 'I8' then "column_name_delimited"
+	when "data_type" = 'AT' then "column_name_delimited"
+	when "data_type" = 'F'  then "column_name_delimited"
+	when "data_type" = 'CV' then "column_name_delimited"
+	when "data_type" = 'I'  then "column_name_delimited"
+	when "data_type" = 'N'  then "column_name_delimited"
+	when "data_type" in ('A1','AN')  then 'cast(' || "column_name_delimited" || ' as varchar(64000)) '  --array datatypes are casted to a varchar in Teradata
 	when "data_type" in ('BF', 'BO', 'BV') then '''''NOT SUPPORTED''''' --binary data types (BYTE, VARBYTE, BLOB) are not supported
-	when "data_type" = 'JN'  then 'CAST(' || "column_name" ||  ' AS CLOB ) ' --json (max length in Exasol is 2000000 as it is stored as varchar)  
-	when "data_type" = 'PD'  then  'BEGIN('|| "column_name" || ') , END(' ||  "column_name" || ')'  --Period(Date) split into begin and end date
-	when "data_type" in ('PS', 'PM')  then  'CAST(  BEGIN('|| "column_name" || ') AS TIMESTAMP ) , CAST ( END(' ||  "column_name" || ') AS TIMESTAMP ) '  --Period(Timestamp) split into begin and end timestamp  
-	when "data_type" in ('PT', 'PZ')  then  'CAST(  BEGIN('|| "column_name" || ') AS TIME ) , CAST ( END(' ||  "column_name" || ') AS TIME ) '  --Period(Time) split into begin and end time	
-	when "data_type" = 'TZ' then  'cast(' || "column_name" || ' AS TIME)'  --time with time zone
-	when "data_type" = 'SZ' then  'cast(' || "column_name" || ' AS TIMESTAMP)'  --timestamp with time zone
-	when "data_type" = 'YR'  then 'cast(cast('|| "column_name" || ' AS INTERVAL YEAR  TO MONTH ) AS VARCHAR(50))'  --Interval Year
-	when "data_type" = 'YM'  then 'cast('|| "column_name" || ' AS VARCHAR(50) )'  --Interval Year to Month
-	when "data_type" = 'MO'  then 'cast(cast('|| "column_name" || ' AS INTERVAL YEAR  TO MONTH ) AS VARCHAR(50))'  --Interval Month
-	when "data_type" = 'DY'  then 'cast(cast('|| "column_name" || ' AS INTERVAL DAY (4)  TO SECOND) AS VARCHAR(50)) ' --Interval Day
-	when "data_type" = 'DH'  then 'cast(cast('|| "column_name" || ' AS INTERVAL DAY (4)  TO SECOND) AS VARCHAR(50)) '  --Interval Day to hour
-	when "data_type" = 'DM'  then 'cast(cast('|| "column_name" || ' AS INTERVAL DAY (4)  TO SECOND) AS VARCHAR(50)) '  --Interval Day to minute
-	when "data_type" = 'DS'  then 'cast(cast('|| "column_name" || ' AS INTERVAL DAY (4)  TO SECOND (' || "numeric_scale" || ')) AS VARCHAR(50)) '  --Interval day to second
-	when "data_type" = 'HR'  then 'cast(cast('|| "column_name" || ' AS INTERVAL DAY (4)  TO SECOND) AS VARCHAR(50)) '  --Interval Hour
-	when "data_type" = 'HM'  then 'cast(cast('|| "column_name" || ' AS INTERVAL DAY (4)  TO SECOND) AS VARCHAR(50)) '  --Interval Day to minute
-	when "data_type" = 'HS'  then 'cast(cast('|| "column_name" || ' AS INTERVAL DAY (4)  TO SECOND (' || "numeric_scale" || ')) AS VARCHAR(50)) '  --Interval day to second
-	when "data_type" = 'MI'  then 'cast(cast('|| "column_name" || ' AS INTERVAL DAY (4)  TO SECOND) AS VARCHAR(50)) ' --Interval Minute
-	when "data_type" = 'MS'  then 'cast(cast('|| "column_name" || ' AS INTERVAL DAY (4)  TO SECOND (' || "numeric_scale" || ')) AS VARCHAR(50)) '  --Interval minute to second
-	when "data_type" = 'SC'  then 'cast(cast('|| "column_name" || ' AS INTERVAL DAY (4)  TO SECOND (' || "numeric_scale" || ')) AS VARCHAR(50)) '  --Interval Second
-	else "column_name"
+	when "data_type" = 'JN'  then 'CAST(' || "column_name_delimited" ||  ' AS CLOB ) ' --json (max length in Exasol is 2000000 as it is stored as varchar)  
+	when "data_type" = 'PD'  then  'BEGIN('|| "column_name_delimited" || ') , END(' ||  "column_name_delimited" || ')'  --Period(Date) split into begin and end date
+	when "data_type" in ('PS', 'PM')  then  'CAST(  BEGIN('|| "column_name_delimited" || ') AS TIMESTAMP ) , CAST ( END(' ||  "column_name_delimited" || ') AS TIMESTAMP ) '  --Period(Timestamp) split into begin and end timestamp  
+	when "data_type" in ('PT', 'PZ')  then  'CAST(  BEGIN('|| "column_name_delimited" || ') AS TIME ) , CAST ( END(' ||  "column_name_delimited" || ') AS TIME ) '  --Period(Time) split into begin and end time	
+	when "data_type" = 'TZ' then  'cast(' || "column_name_delimited" || ' AS TIME)'  --time with time zone
+	when "data_type" = 'SZ' then  'cast(' || "column_name_delimited" || ' AS TIMESTAMP)'  --timestamp with time zone
+	when "data_type" = 'YR'  then 'cast(cast('|| "column_name_delimited" || ' AS INTERVAL YEAR  TO MONTH ) AS VARCHAR(50))'  --Interval Year
+	when "data_type" = 'YM'  then 'cast('|| "column_name_delimited" || ' AS VARCHAR(50) )'  --Interval Year to Month
+	when "data_type" = 'MO'  then 'cast(cast('|| "column_name_delimited" || ' AS INTERVAL YEAR  TO MONTH ) AS VARCHAR(50))'  --Interval Month
+	when "data_type" = 'DY'  then 'cast(cast('|| "column_name_delimited" || ' AS INTERVAL DAY (4)  TO SECOND) AS VARCHAR(50)) ' --Interval Day
+	when "data_type" = 'DH'  then 'cast(cast('|| "column_name_delimited" || ' AS INTERVAL DAY (4)  TO SECOND) AS VARCHAR(50)) '  --Interval Day to hour
+	when "data_type" = 'DM'  then 'cast(cast('|| "column_name_delimited" || ' AS INTERVAL DAY (4)  TO SECOND) AS VARCHAR(50)) '  --Interval Day to minute
+	when "data_type" = 'DS'  then 'cast(cast('|| "column_name_delimited" || ' AS INTERVAL DAY (4)  TO SECOND (' || "numeric_scale" || ')) AS VARCHAR(50)) '  --Interval day to second
+	when "data_type" = 'HR'  then 'cast(cast('|| "column_name_delimited" || ' AS INTERVAL DAY (4)  TO SECOND) AS VARCHAR(50)) '  --Interval Hour
+	when "data_type" = 'HM'  then 'cast(cast('|| "column_name_delimited" || ' AS INTERVAL DAY (4)  TO SECOND) AS VARCHAR(50)) '  --Interval Day to minute
+	when "data_type" = 'HS'  then 'cast(cast('|| "column_name_delimited" || ' AS INTERVAL DAY (4)  TO SECOND (' || "numeric_scale" || ')) AS VARCHAR(50)) '  --Interval day to second
+	when "data_type" = 'MI'  then 'cast(cast('|| "column_name_delimited" || ' AS INTERVAL DAY (4)  TO SECOND) AS VARCHAR(50)) ' --Interval Minute
+	when "data_type" = 'MS'  then 'cast(cast('|| "column_name_delimited" || ' AS INTERVAL DAY (4)  TO SECOND (' || "numeric_scale" || ')) AS VARCHAR(50)) '  --Interval minute to second
+	when "data_type" = 'SC'  then 'cast(cast('|| "column_name_delimited" || ' AS INTERVAL DAY (4)  TO SECOND (' || "numeric_scale" || ')) AS VARCHAR(50)) '  --Interval Second
+	else "column_name_delimited"
 	end
 	order by "ordinal_position") || ' from ' || "table_schema"|| '.' || "table_name"|| ''';' as sql_text
 	from vv_columns 
