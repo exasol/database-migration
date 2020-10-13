@@ -44,11 +44,41 @@ with vv_columns as (
                                 c.databaseName=t.DatabaseName AND 
                                 c.TableName=t.TableName AND 
                                 TableKind=''T''
-                        where   table_schema not in (''DBC'') AND
+                        where   table_schema not in (''All'', ''Crashdumps'', ''DBC'', ''dbcmngr'', 
+    ''Default'', ''External_AP'', ''EXTUSER'', ''LockLogShredder'', ''PUBLIC'',
+    ''Sys_Calendar'', ''SysAdmin'', ''SYSBAR'', ''SYSJDBC'', ''SYSLIB'',
+    ''SystemFe'', ''SYSUDTLIB'', ''SYSUIF'', ''TD_SERVER_DB'', ''TDStats'',
+    ''TD_SYSGPL'', ''TD_SYSXML'', ''TDMaps'', ''TDPUSER'', ''TDQCD'',
+    ''tdwm'', ''SQLJ'', ''TD_SYSFNLIB'', ''SYSSPATIAL'') AND
                                 table_schema like '']]..SCHEMA_FILTER..[['' AND
                                 table_name like '']]..TABLE_FILTER..[[''
 		      ') as tableList order by false),
+vv_primary_keys_raw as (
+select   ]]..exa_upper_begin..[["table_schema"]]..exa_upper_end..[[ as "exa_table_schema", 
+	               ]]..exa_upper_begin..[["table_name"]]..exa_upper_end..[[ as "exa_table_name", 
+	               ]]..exa_upper_begin..[["column_name"]]..exa_upper_end..[[ as "exa_column_name",
+	               "column_position" as "column_position"
+from (
 
+import from jdbc at ]]..CONNECTION_NAME..[[  
+        statement   '
+SELECT  DatabaseName as table_schema,
+        TableName as table_name,
+        ColumnName as column_name,
+        ColumnPosition as column_position
+FROM    DBC.IndicesV
+WHERE UniqueFlag = ''Y'' AND IndexType IN (''K'')
+and table_schema not in (''All'', ''Crashdumps'', ''DBC'', ''dbcmngr'', 
+    ''Default'', ''External_AP'', ''EXTUSER'', ''LockLogShredder'', ''PUBLIC'',
+    ''Sys_Calendar'', ''SysAdmin'', ''SYSBAR'', ''SYSJDBC'', ''SYSLIB'',
+    ''SystemFe'', ''SYSUDTLIB'', ''SYSUIF'', ''TD_SERVER_DB'', ''TDStats'',
+    ''TD_SYSGPL'', ''TD_SYSXML'', ''TDMaps'', ''TDPUSER'', ''TDQCD'',
+    ''tdwm'', ''SQLJ'', ''TD_SYSFNLIB'', ''SYSSPATIAL'') AND
+table_schema like '']]..SCHEMA_FILTER..[['' AND
+table_name like '']]..TABLE_FILTER..[['' 
+'
+) as primarykeylist
+),
 vv_create_schemas as(
 	SELECT 'create schema "' || "exa_table_schema" || '";' as sql_text 
 	from vv_columns  
@@ -164,7 +194,15 @@ vv_create_schemas as(
 	group by       "exa_table_schema", "exa_table_name"
 	order by       "exa_table_schema","exa_table_name"
 )
-, vv_imports as (
+, vv_primary_keys as (
+
+select 'ALTER TABLE "' || "exa_table_schema" || '"."' || "exa_table_name" || '" ADD CONSTRAINT PRIMARY KEY (' || 
+	group_concat('"'||  "exa_column_name" || '"'  order by "column_position")  || ') ;' as sql_text
+from           vv_primary_keys_raw   
+	group by       "exa_table_schema", "exa_table_name"
+	order by       "exa_table_schema","exa_table_name"
+
+), vv_imports as (
 	select 'import into "' || "exa_table_schema" || '"."' || "exa_table_name" || '" from jdbc at ]]..CONNECTION_NAME..[[ statement ''select ' || group_concat( 
 	case 
 	when "data_type" = 'DA' then "column_name"
@@ -211,7 +249,10 @@ select * from vv_create_schemas
 UNION ALL
 select * from vv_create_tables
 UNION ALL
-select * from vv_imports]],{})
+select * from vv_imports
+UNION ALL
+select * from vv_primary_keys
+]],{})
 
 return(res)
 /
@@ -225,6 +266,12 @@ create or replace connection teradata_db to 'jdbc:teradata://192.168.56.1/CHARSE
 -- [42636] ETL-3003: [Column=5 Row=0] [String data right truncation. String length exceeds limit of 2 characters] (Session: 1611884537138472475)
 -- In that case, configure your connection like this:
 -- create connection teradata_db to 'jdbc:teradata://some.teradata.host.internal/CHARSET=UTF16' user 'db_username' identified by 'exasolRocks!';
+
+
+
+IMPORT FROM JDBC AT teradata_db
+STATEMENT 'SELECT ''connection to teradata works''';
+
 
 -- Finally start the import process
 execute script database_migration.TERADATA_TO_EXASOL(
