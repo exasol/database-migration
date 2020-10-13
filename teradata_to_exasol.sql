@@ -81,6 +81,34 @@ table_name like '']]..TABLE_FILTER..[[''
 '
 ) as primarykeylist
 ),
+vv_foreign_keys_raw as (
+select   ]]..exa_upper_begin..[["ChildDB"]]..exa_upper_end..[[ as "exa_table_schema", 
+	 ]]..exa_upper_begin..[["ChildTable"]]..exa_upper_end..[[ as "exa_table_name", 
+	 ]]..exa_upper_begin..[["ChildKeyColumn"]]..exa_upper_end..[[ as "exa_foreign_key_column",
+	 ]]..exa_upper_begin..[["ParentDB"]]..exa_upper_end..[[ as "exa_referenced_table_schema", 
+	 ]]..exa_upper_begin..[["ParentTable"]]..exa_upper_end..[[ as "exa_referenced_table_name"
+from (
+
+import from jdbc at ]]..CONNECTION_NAME..[[  
+    statement   ' 
+    SELECT  ChildDB,
+		ChildTable,
+        ChildKeyColumn,
+        ParentDB ,
+        ParentTable 
+FROM    DBC.All_RI_ChildrenV
+WHERE   ChildDB NOT IN (''All'', ''Crashdumps'', ''DBC'', ''dbcmngr'', 
+    ''Default'', ''External_AP'', ''EXTUSER'', ''LockLogShredder'', ''PUBLIC'',
+    ''Sys_Calendar'', ''SysAdmin'', ''SYSBAR'', ''SYSJDBC'', ''SYSLIB'',
+    ''SystemFe'', ''SYSUDTLIB'', ''SYSUIF'', ''TD_SERVER_DB'', ''TDStats'',
+    ''TD_SYSGPL'', ''TD_SYSXML'', ''TDMaps'', ''TDPUSER'', ''TDQCD'',
+    ''tdwm'', ''SQLJ'', ''TD_SYSFNLIB'', ''SYSSPATIAL'') and
+ChildDB like '']]..SCHEMA_FILTER..[['' AND
+ChildTable like '']]..TABLE_FILTER..[['' 
+'
+)
+
+),
 vv_create_schemas as(
 	SELECT 'create schema "' || "exa_table_schema" || '";' as sql_text 
 	from vv_columns  
@@ -204,7 +232,15 @@ from           vv_primary_keys_raw
 	group by       "exa_table_schema", "exa_table_name"
 	order by       "exa_table_schema","exa_table_name"
 
-), vv_imports as (
+), vv_foreign_keys as (
+
+select 'ALTER TABLE "' || "exa_table_schema" || '"."' || "exa_table_name" ||
+ '" ADD FOREIGN KEY (' || '"'||  "exa_foreign_key_column" || '") REFERENCES "' || "exa_referenced_table_schema" || '"."' || "exa_referenced_table_name" || '" DISABLE ;' as sql_text
+from vv_foreign_keys_raw   
+order by "exa_table_schema","exa_table_name"
+
+)
+, vv_imports as (
 	select 'import into "' || "exa_table_schema" || '"."' || "exa_table_name" || '" from jdbc at ]]..CONNECTION_NAME..[[ statement ''select ' || group_concat( 
 	case 
 	when "data_type" = 'DA' then "column_name_delimited"
@@ -254,6 +290,8 @@ UNION ALL
 select * from vv_imports
 UNION ALL
 select * from vv_primary_keys
+UNION ALL
+select * from vv_foreign_keys
 ]],{})
 
 return(res)
