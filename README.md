@@ -263,7 +263,7 @@ See script [sqlserver_to_exasol.sql](sqlserver_to_exasol.sql)
 
 ### Teradata
 The first thing you need to do is add the Teradata JDBC driver to Exasol. The driver can be downloaded from
-[Teradata's Download site](http://downloads.teradata.com/download/connectivity/jdbc-driver). You need to register
+[Teradata's Download site](https://downloads.teradata.com/download/connectivity/jdbc-driver). You need to register
 first, it's free. Make sure that you download the right version of the JDBC driver, matching the version of the
 Teradata database.
 
