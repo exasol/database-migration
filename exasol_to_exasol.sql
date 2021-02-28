@@ -10,7 +10,9 @@ create or replace script database_migration.EXASOL_TO_EXASOL(
   CONNECTION_NAME              -- name of the database connection inside exasol -> e.g. my_exa
   ,IDENTIFIER_CASE_INSENSITIVE -- true if identifiers should be stored case-insensitiv (will be stored upper_case)
   ,SCHEMA_FILTER               -- filter for the schemas to generate and load (except EXA_SATISTICS and SYS) -> '%' to load all
-  ,TABLE_FILTER                --filter for the tables to generate and load -> '%' to load all
+  ,TABLE_FILTER                -- filter for the tables to generate and load -> '%' to load all
+  ,GENERATE_VIEWS              -- flag to control inclusion of views
+  ,VIEW_FILTER                 -- filter for the views to generate -> '%' to generate all
 ) RETURNS TABLE
 AS
 exa_upper_begin=''
@@ -30,7 +32,7 @@ with vv_exa_columns as (
 				AND table_name like '']]..TABLE_FILTER..[[''
 		') as exasql 
 
-  
+
 )
 ,vv_create_schemas as(
   SELECT 'create schema "' || "exa_table_schema" || '";' as sql_text from vv_exa_columns  group by "exa_table_schema" order by "exa_table_schema"
@@ -46,6 +48,16 @@ with vv_exa_columns as (
 	from vv_exa_columns group by "exa_table_schema","exa_table_name", table_schema,table_name
 	order by "exa_table_schema","exa_table_name", table_schema,table_name
 )
+,vv_create_views as(
+  select view_text || ';' as sql_text from  
+		(import from exa at ]]..CONNECTION_NAME..[[ statement 
+			'select view_text from EXA_ALL_VIEWS
+				where view_schema like '']]..SCHEMA_FILTER..[[''
+				and ]]..GENERATE_VIEWS..[[
+				and view_name like '']]..VIEW_FILTER..[[''
+				order by view_schema, view_name
+		') as exasql 
+)
 select SQL_TEXT from (
 select 1 as ord, cast('-- ### SCHEMAS ###' as varchar(2000000)) SQL_TEXT
 union all 
@@ -58,6 +70,11 @@ UNION ALL
 select 5, cast('-- ### IMPORTS ###' as varchar(2000000)) SQL_TEXT
 union all
 select 6, c.* from vv_imports c
+union all
+select 7, cast('-- ### VIEWS - Add FORCE as needed to avoid ordering dependencies ###' as varchar(2000000)) SQL_TEXT
+from dual where ]]..GENERATE_VIEWS..[[ 
+union all
+select 8, d.* from vv_create_views d
 ) order by ord
 ]],{})
 
@@ -75,8 +92,10 @@ create connection SECOND_EXASOL_DB to '192.168.6.11..14:8563' user 'username' id
 execute script database_migration.EXASOL_TO_EXASOL(
    'SECOND_EXASOL_DB' -- name of your database connection
    ,TRUE              -- case sensitivity handling for identifiers -> false: handle them case sensitiv / true: handle them case insensitiv --> recommended: true
-   ,'MY_SCHEMA'       -- schema filter --> '%' to load all schemas except 'information_schema' and 'mysql' and 'performance_schema' / '%publ%' to load all schemas like '%pub%'
-   ,'%'               -- table filter --> '%' to load all tables (
+   ,'MY_SCHEMA'       -- schema filter --> '%' to load all schemas except 'SYS' and 'EXA_STATISTICS'/ '%pub%' to load all schemas like '%pub%'
+   ,'%'               -- table filter --> '%' to load all tables
+   ,'FALSE'           -- view inclusion flag --> 'TRUE' to include views
+   ,'%'               -- view filter --> '%' to generate all views
 );
 
 commit;
