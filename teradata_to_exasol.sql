@@ -483,6 +483,32 @@ order by "exa_table_schema","exa_table_name"
         group by "exa_table_schema", "metric_table"
         order by "exa_table_schema", "metric_table"
 )
+, vv_check_summary as (       
+        select  'create or replace table database_migration.migration_check (schema_name varchar(128), table_name varchar(128), column_name varchar(128), exasol_metric varchar(50), teradata_metric varchar(50), check_timestamp timestamp default current_timestamp);' as sql_text
+        union all
+        select  'insert into "DATABASE_MIGRATION"."MIGRATION_CHECK" (schema_name, table_name, column_name, exasol_metric, teradata_metric) ' /*|| chr(10)*/
+                || listagg(sql_text, '') within group(order by case when db_name = 'Exasol' then 1 else 2 end) || ' ' /*|| chr(10)*/ 
+                || 'select e.schema_name, e.table_name, e.column_name, e.exasol_metric, t.teradata_metric from exasol e join teradata t on e.schema_name = t.schema_name and e.table_name = t.table_name and e.column_name = t.column_name; ' as sql_text
+        from (
+        
+                select  db_name, column_schema, column_table,
+                        case when db_name = 'Exasol' then 'with ' else ', ' end || db_name || ' as ( ' /*|| chr(10)*/
+                        || listagg(case when column_name != 'DB_SYSTEM' then 'select ''' || column_schema || ''' as schema_name, ''' || column_table || ''' as table_name, ''' || column_name || ''' as column_name, to_char("' || column_name || '") as ' || db_name || '_metric from "' || column_schema || '"."' || column_table || '" where DB_SYSTEM = ''' || db_name || '''' end, ' union all ' /* || chr(10)*/)
+                        /*|| chr(10)*/
+                        || ' )'  as sql_text
+                from exa_all_columns, (select 'Exasol' db_name union all select 'Teradata' db_name), (select distinct "exa_table_schema", "exa_table_name" from vv_columns)
+                where column_schema = "exa_table_schema"
+                and column_table = "exa_table_name" || '_MIG_CHK'
+                group by db_name, column_schema, column_table
+                order by case when db_name = 'Exasol' then 1 else 2 end
+        
+        )
+        group by column_schema, column_table
+        union all
+        select 'select * from database_migration.migration_check where exasol_metric != teradata_metric;' as sql_text
+        from dual
+)
+
 
 
 
