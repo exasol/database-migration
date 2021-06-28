@@ -555,8 +555,6 @@ select * from vv_primary_keys
 UNION ALL
 select * from vv_foreign_keys
 ]],{})
-
---output(res.statement_text)
 return(res)
 /
 ;
@@ -583,6 +581,5 @@ execute script database_migration.TERADATA_TO_EXASOL(
     ,'RETAIL_2020'	-- schema filter --> '%' to load all schemas except 'DBC' / '%pub%' to load all schemas like '%pub%'
     ,'%'			--'DimCustomer' -- table filter --> '%' to load all tables
     ,true			-- boolean flag to create checking tables
-) 
---with output
+)
 ;
