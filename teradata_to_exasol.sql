@@ -533,7 +533,7 @@ return(res)
 
 -- Create a connection to the Teradata database
 create or replace connection teradata_db to 'jdbc:teradata://192.168.56.103/CHARSET=UTF16' user 'dbc' identified by 'dbc';
--- Depending on your Teradata installation, CHARSET=UTF16 could be the better choice - otherwise you get errors like this one:
+-- Depending on your Teradata installation, CHARSET=UTF16 instead of CHARSET=UTF8 could be the better choice - otherwise you get errors like this one:
 -- [42636] ETL-3003: [Column=5 Row=0] [String data right truncation. String length exceeds limit of 2 characters] (Session: 1611884537138472475)
 -- In that case, configure your connection like this:
 -- create connection teradata_db to 'jdbc:teradata://some.teradata.host.internal/CHARSET=UTF16' user 'db_username' identified by 'exasolRocks!';
