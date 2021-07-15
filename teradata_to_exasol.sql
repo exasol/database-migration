@@ -511,6 +511,7 @@ with vv_columns as (
         select 'select * from database_migration.migration_check where exasol_metric != teradata_metric;' as sql_text
         from dual
 )
+
 select * from vv_create_schemas
 UNION ALL
 select * from vv_create_tables
