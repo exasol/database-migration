@@ -49,7 +49,7 @@ with vv_columns as (
         		DecimalTotalDigits as   numeric_precision, 
        			DecimalFractionalDigits as numeric_scale,
         		DecimalFractionalDigits as datetime_precision, 
-        		Nullable as nullable 
+        		case when nullable = ''Y'' then 1 when nullable = ''N'' then 0 end as nullable 
         from    DBC.ColumnsV c
         join    DBC.TablesV t
 		on 		c.databaseName=t.DatabaseName 
@@ -226,7 +226,7 @@ vv_create_schemas as(
         when "data_type" in ('A1','AN')  then --ARRAY Datatype  
            'VARCHAR(64000)'
 	else '/*UNKNOWN_DATATYPE:' || "data_type" || '*/ varchar(2000000)' 
-	end || case when "nullable" = 'N' then ' NOT NULL ' else '' end
+	end || case when "nullable" = 0 then ' NOT NULL ' else '' end
 	
 	order by       "ordinal_position") || ');' as sql_text
 	from           vv_columns  
@@ -302,7 +302,7 @@ order by "exa_table_schema","exa_table_name"
 	        'DATABASE_MIGRATION' as "metric_schema",
 	        c."exa_table_name" || '_MIG_CHK' as "metric_table",
 	        case    when c."ordinal_position" = 1 and "metric_id" = 0 then 'cast(count(*) as decimal(36,0))'
-	        		when "nullable" = 'Y' and "metric_id" = 1 then 'cast(count(case when ' || case when "db_system" = 'Exasol' then '"' || c."exa_column_name" || '"' else c."column_name_delimited" end || ' is null then 1 end) as decimal(36,0))'
+	        		when "nullable" = 1 and "metric_id" = 1 then 'cast(count(case when ' || case when "db_system" = 'Exasol' then '"' || c."exa_column_name" || '"' else c."column_name_delimited" end || ' is null then 1 end) as decimal(36,0))'
 	        		when c."data_type" in ( 'DA',   --DATE 
 	                                        'AT',   --TIME
 	                                        'TZ',   --TIME WITH TIME ZONE
@@ -391,7 +391,7 @@ order by "exa_table_schema","exa_table_name"
 	        end     "metric_column_expression",
 	        
 	        case 	when c."ordinal_position" = 1 and "metric_id" = 0 then '"CNT"'
-	        		when "nullable" = 'Y' and "metric_id" = 1 then '"' || c."exa_column_name" || '_CNT_NUL"'
+	        		when "nullable" = 1 and "metric_id" = 1 then '"' || c."exa_column_name" || '_CNT_NUL"'
 	        		when c."data_type" in ( 'DA',   --DATE 
 	                                        'AT',   --TIME
 	                                        'TZ',   --TIME WITH TIME ZONE
@@ -464,69 +464,68 @@ order by "exa_table_schema","exa_table_name"
 )
 
 , vv_checks as (
-        select  'create or replace table "' || "exa_table_schema" || '"."' || "metric_table" || '" as ' ||  
-                listagg("check_sql",  ' union all ' ) within group(order by case when "db_system" = 'Exasol' then 1 else 2 end) || ';' as sql_text
-        from (
-                select  "db_system", "exa_table_schema", "exa_table_name", "metric_table",
-                        case when "db_system" = 'Teradata' then 'select * from (import from jdbc at ]] .. CONNECTION_NAME .. [[ statement '''  end ||
-                        'select cast(''' || case when "db_system" = 'Teradata' then '''' end || "db_system" || case when "db_system" = 'Teradata' then '''' end  || ''' as varchar(20)) as "DB_SYSTEM", ' || 
-                        listagg("metric_column_expression" || ' as ' || "metric_column_name", ', ') within group(order by "ordinal_position", "metric_id") || 
-                        ' from ' || 
-                        case when "db_system" = 'Exasol' then '"' || "exa_table_schema" || '"."' || "exa_table_name" || '"' else '"' || "table_schema" || '"."' || "table_name" || '"' end ||
-                        case when "db_system" = 'Teradata' then ''') ' end 
-                        as "check_sql"
-                
-                from vv_checks_expr
-                group by "db_system", "exa_table_schema", "exa_table_name", "table_schema", "table_name", "metric_table"
-        )
-        group by "exa_table_schema", "metric_table"
-        order by "exa_table_schema", "metric_table"
+    select  'create or replace table "' || "exa_table_schema" || '"."' || "metric_table" || '" as ' ||  
+            listagg("check_sql",  ' union all ' ) within group(order by case when "db_system" = 'Exasol' then 1 else 2 end) || ';' as sql_text
+    from (
+            select  "db_system", "exa_table_schema", "exa_table_name", "metric_table",
+                    case when "db_system" = 'Teradata' then 'select * from (import from jdbc at ]] .. CONNECTION_NAME .. [[ statement '''  end ||
+                    'select cast(''' || case when "db_system" = 'Teradata' then '''' end || "db_system" || case when "db_system" = 'Teradata' then '''' end  || ''' as varchar(20)) as "DB_SYSTEM", ' || 
+                    listagg("metric_column_expression" || ' as ' || "metric_column_name", ', ') within group(order by "ordinal_position", "metric_id") || 
+                    ' from ' || 
+                    case when "db_system" = 'Exasol' then '"' || "exa_table_schema" || '"."' || "exa_table_name" || '"' else '"' || "table_schema" || '"."' || "table_name" || '"' end ||
+                    case when "db_system" = 'Teradata' then ''') ' end 
+                    as "check_sql"
+            
+            from vv_checks_expr
+            group by "db_system", "exa_table_schema", "exa_table_name", "table_schema", "table_name", "metric_table"
+    )
+    group by "exa_table_schema", "metric_table"
+    order by "exa_table_schema", "metric_table"
 )
-
-
-
 
 , vv_check_summary as (       
-        select  'create or replace table "' || "metric_schema" || '"."' || "exa_table_schema" || '_MIG_CHK" (schema_name varchar(128), table_name varchar(128), column_name varchar(128), metric_schema varchar(128), metric_table varchar(128),  metric_name varchar(128), exasol_metric varchar(50), teradata_metric varchar(50), check_timestamp timestamp default current_timestamp);' as sql_text
-        from vv_checks_expr
-        group by "metric_schema", "exa_table_schema"
-        union all
-        select  'insert into "' || "metric_schema" || '"."' || "exa_table_schema" || '_MIG_CHK" (schema_name, table_name, column_name, metric_schema, metric_table, metric_name, exasol_metric, teradata_metric) ' 
-                || listagg(sql_text, '') within group(order by case when "db_system" = 'Exasol' then 1 else 2 end) || ' '
-                || 'select e.schema_name, e.table_name, e.column_name, e.metric_schema, e.metric_table, e.metric_name, e.exasol_metric, t.teradata_metric from exasol e join teradata t on e.schema_name = t.schema_name and e.table_name = t.table_name and e.column_name = t.column_name; ' as sql_text
-        from (
-        
-                select  "db_system", "exa_table_schema", "exa_table_name", "metric_schema",
-                        case when "db_system" = 'Exasol' then 'with ' else ', ' end || "db_system" || ' as ( '
-                        || listagg(
-                        	'select ''' || "exa_table_schema" || ''' as schema_name, ''' || "exa_table_name" || ''' as table_name,  ''' || "exa_column_name" || ''' column_name, ''' || "metric_schema" || ''' metric_schema, ''' || "metric_table" || ''' metric_table, ''' || "metric_column_name" || ''' as metric_name, to_char(' || "metric_column_name" || ') as ' || "db_system" || '_metric from "' || "exa_table_schema" || '"."' || "metric_table" || '" where DB_SYSTEM = ''' || "db_system" || '''', ' union all ')
-                        || ' )'  as sql_text
-                from vv_checks_expr
-                group by "db_system", "exa_table_schema", "exa_table_name", "metric_schema", "metric_table"
-                order by case when "db_system" = 'Exasol' then 1 else 2 end
-        
-        )
-        group by "exa_table_schema", "exa_table_name", "metric_schema"
-        union all
-        select  '--select * from "' || "metric_schema" || '"."' || "exa_table_schema" || '_MIG_CHK" where exasol_metric != teradata_metric;' as sql_text
-        from vv_checks_expr
-        group by "metric_schema", "exa_table_schema"
+    select 1 ord2, 'create or replace table "' || "metric_schema" || '"."' || "exa_table_schema" || '_MIG_CHK" (schema_name varchar(128), table_name varchar(128), column_name varchar(128), metric_schema varchar(128), metric_table varchar(128),  metric_name varchar(128), exasol_metric varchar(50), teradata_metric varchar(50), check_timestamp timestamp default current_timestamp);' as sql_text
+    from vv_checks_expr
+    group by "metric_schema", "exa_table_schema"
+    union all
+    select 2 ord2, 'insert into "' || "metric_schema" || '"."' || "exa_table_schema" || '_MIG_CHK" (schema_name, table_name, column_name, metric_schema, metric_table, metric_name, exasol_metric, teradata_metric) ' 
+            || listagg(sql_text, '') within group(order by case when "db_system" = 'Exasol' then 1 else 2 end) || ' '
+            || 'select e.schema_name, e.table_name, e.column_name, e.metric_schema, e.metric_table, e.metric_name, e.exasol_metric, t.teradata_metric from exasol e join teradata t on e.schema_name = t.schema_name and e.table_name = t.table_name and e.column_name = t.column_name; ' as sql_text
+    from (
+    
+            select  "db_system", "exa_table_schema", "exa_table_name", "metric_schema",
+                    case when "db_system" = 'Exasol' then 'with ' else ', ' end || "db_system" || ' as ( '
+                    || listagg(
+                    	'select ''' || "exa_table_schema" || ''' as schema_name, ''' || "exa_table_name" || ''' as table_name,  ''' || "exa_column_name" || ''' column_name, ''' || "metric_schema" || ''' metric_schema, ''' || "metric_table" || ''' metric_table, ''' || "metric_column_name" || ''' as metric_name, to_char(' || "metric_column_name" || ') as ' || "db_system" || '_metric from "' || "exa_table_schema" || '"."' || "metric_table" || '" where DB_SYSTEM = ''' || "db_system" || '''', ' union all ')
+                    || ' )'  as sql_text
+            from vv_checks_expr
+            group by "db_system", "exa_table_schema", "exa_table_name", "metric_schema", "metric_table"
+            order by case when "db_system" = 'Exasol' then 1 else 2 end
+    
+    )
+    group by "exa_table_schema", "exa_table_name", "metric_schema"
+    union all
+    select 3 ord2, '--select * from "' || "metric_schema" || '"."' || "exa_table_schema" || '_MIG_CHK" where exasol_metric != teradata_metric;' as sql_text
+    from vv_checks_expr
+    group by "metric_schema", "exa_table_schema"
 )
 
-
-select * from vv_create_schemas
-UNION ALL
-select * from vv_create_tables
-UNION ALL
-select * from vv_imports
-UNION ALL
-select * from vv_checks
-UNION ALL
-select * from vv_check_summary
-UNION ALL
-select * from vv_primary_keys
-UNION ALL
-select * from vv_foreign_keys
+select sql_text from (
+	select 1 ord, 1 ord2, sql_text from vv_create_schemas 
+	UNION ALL
+	select 2 ord, 1 ord2, sql_text from vv_create_tables
+	UNION ALL
+	select 3 ord, 1 ord2, sql_text from vv_imports
+	UNION ALL
+	select 4 ord, 1 ord2, sql_text from vv_checks
+	UNION ALL
+	select 5 ord, ord2, sql_text from vv_check_summary
+	UNION ALL
+	select 6 ord, 1 ord2, sql_text from vv_primary_keys
+	UNION ALL
+	select 7 ord, 1 ord2, sql_text from vv_foreign_keys
+)
+order by ord, ord2
 ]],{})
 
 --output(res.statement_text)
@@ -537,8 +536,8 @@ return(res)
 -- !!! you can see a similar example for Oracle here: https://www.exasol.com/support/browse/SOL-179 !!!
 
 -- Create a connection to the Teradata database
-create or replace connection teradata_db to 'jdbc:teradata://192.168.56.103/CHARSET=UTF16' user 'dbc' identified by 'dbc';
--- Depending on your Teradata installation, CHARSET=UTF16  instead of CHARSET=UTF8 could be the better choice - otherwise you get errors like this one:
+create or replace connection teradata_db to 'jdbc:teradata://192.168.56.103/CHARSET=UTF8' user 'dbc' identified by 'dbc';
+-- Depending on your Teradata installation, CHARSET=UTF16 instead of CHARSET=UTF8 could be the better choice - otherwise you get errors like this one:
 -- [42636] ETL-3003: [Column=5 Row=0] [String data right truncation. String length exceeds limit of 2 characters] (Session: 1611884537138472475)
 -- In that case, configure your connection like this:
 -- create connection teradata_db to 'jdbc:teradata://some.teradata.host.internal/CHARSET=UTF16' user 'db_username' identified by 'exasolRocks!';
@@ -555,7 +554,7 @@ execute script database_migration.TERADATA_TO_EXASOL(
     ,true        	-- case sensitivity handling for identifiers -> false: handle them case sensitiv / true: handle them case insensitiv --> recommended: true
     ,'RETAIL_2020'	-- schema filter --> '%' to load all schemas except 'DBC' / '%pub%' to load all schemas like '%pub%'
     ,'%'			--'DimCustomer' -- table filter --> '%' to load all tables
-    ,true			-- boolean flag to create checking tables
+    ,false			-- boolean flag to create checking tables
 ) 
 --with output
 ;
