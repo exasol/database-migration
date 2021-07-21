@@ -490,7 +490,7 @@ order by "exa_table_schema","exa_table_name"
     union all
     select 2 ord2, 'insert into "' || "metric_schema" || '"."' || "exa_table_schema" || '_MIG_CHK" (schema_name, table_name, column_name, metric_schema, metric_table, metric_name, exasol_metric, teradata_metric) ' 
             || listagg(sql_text, '') within group(order by case when "db_system" = 'Exasol' then 1 else 2 end) || ' '
-            || 'select e.schema_name, e.table_name, e.column_name, e.metric_schema, e.metric_table, e.metric_name, e.exasol_metric, t.teradata_metric from exasol e join teradata t on e.schema_name = t.schema_name and e.table_name = t.table_name and e.column_name = t.column_name; ' as sql_text
+            || 'select e.schema_name, e.table_name, e.column_name, e.metric_schema, e.metric_table, e.metric_name, e.exasol_metric, t.teradata_metric from exasol e join teradata t on e.schema_name = t.schema_name and e.table_name = t.table_name and e.metric_name = t.metric_name; ' as sql_text
     from (
     
             select  "db_system", "exa_table_schema", "exa_table_name", "metric_schema",
@@ -554,7 +554,7 @@ execute script database_migration.TERADATA_TO_EXASOL(
     ,true        	-- case sensitivity handling for identifiers -> false: handle them case sensitiv / true: handle them case insensitiv --> recommended: true
     ,'RETAIL_2020'	-- schema filter --> '%' to load all schemas except 'DBC' / '%pub%' to load all schemas like '%pub%'
     ,'%'			--'DimCustomer' -- table filter --> '%' to load all tables
-    ,false			-- boolean flag to create checking tables
+    ,true			-- boolean flag to create checking tables
 ) 
 --with output
 ;
