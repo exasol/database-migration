@@ -3,16 +3,18 @@ create schema if not exists database_migration;
 /* 
      This script will generate create schema, create table and create import statements 
      to load all needed data from a teradata database. Automatic datatype conversion is 
-     applied whenever needed. Feel free to adjust it. 
+     applied whenever needed. Additionally the migration can be checked via generic 
+     standardized metrics to identify deviations between the data in Teradata and Exasol. 
+     Feel free to adjust it. 
 */
 
 --/
 create or replace script database_migration.TERADATA_TO_EXASOL(
-        CONNECTION_NAME              --name of the database connection inside exasol -> e.g. teradata_db
-        ,IDENTIFIER_CASE_INSENSITIVE -- true if identifiers should be stored case-insensitiv (will be stored upper_case)
-        ,SCHEMA_FILTER               --filter for the schemas to generate and load (except DBC)  -> '%' to load all
-        ,TABLE_FILTER                --filter for the tables to generate and load -> '%' to load all
-        ,CHECK_MIGRATION			 --true if checking tables and summary should be created
+        CONNECTION_NAME              	--name of the database connection inside exasol -> e.g. teradata_db
+        ,IDENTIFIER_CASE_INSENSITIVE 	--true if identifiers should be stored case-insensitiv (will be stored upper_case)
+        ,SCHEMA_FILTER               	--filter for the schemas to generate and load (except system schemas)  -> '%' to load all
+        ,TABLE_FILTER                	--filter for the tables to generate and load -> '%' to load all
+        ,CHECK_MIGRATION			 	--boolean flag to create and load checking tables with standardized metrics to identify deviations
         ) RETURNS TABLE
 AS
 
@@ -51,11 +53,11 @@ with vv_columns as (
         		DecimalFractionalDigits as datetime_precision, 
         		case when nullable = ''Y'' then 1 when nullable = ''N'' then 0 end as nullable 
         from    DBC.ColumnsV c
-        join    DBC.TablesV t
+		join    DBC.TablesV t
 		on 		c.databaseName=t.DatabaseName 
 		AND 	c.TableName=t.TableName 
 		AND 	TableKind=''T''
-        where   table_schema not in (''All'', ''Crashdumps'', ''DBC'', ''dbcmngr'', 
+		where   table_schema not in (''All'', ''Crashdumps'', ''DBC'', ''dbcmngr'', 
 				''Default'', ''External_AP'', ''EXTUSER'', ''LockLogShredder'', ''PUBLIC'',
 				''Sys_Calendar'', ''SysAdmin'', ''SYSBAR'', ''SYSJDBC'', ''SYSLIB'',
 				''SystemFe'', ''SYSUDTLIB'', ''SYSUIF'', ''TD_SERVER_DB'', ''TDStats'',
@@ -532,6 +534,7 @@ order by ord, ord2
 return(res)
 /
 ;
+
 -- !!! Important: Please upload the Teradata JDBC-Driver via EXAOperation (Webinterface) !!!
 -- !!! you can see a similar example for Oracle here: https://www.exasol.com/support/browse/SOL-179 !!!
 
@@ -550,11 +553,14 @@ STATEMENT 'SELECT ''connection to teradata works''';
 
 -- Finally start the import process
 execute script database_migration.TERADATA_TO_EXASOL(
-    'TERADATA_DB'	-- name of your dataabase connection
+    'TERADATA_DB'	-- name of your database connection
     ,true        	-- case sensitivity handling for identifiers -> false: handle them case sensitiv / true: handle them case insensitiv --> recommended: true
-    ,'RETAIL_2020'	-- schema filter --> '%' to load all schemas except 'DBC' / '%pub%' to load all schemas like '%pub%'
-    ,'%'			--'DimCustomer' -- table filter --> '%' to load all tables
-    ,true			-- boolean flag to create checking tables
+    ,'%'			-- schema filter --> '%' to load all schemas (except system schemas). Examples: 'CORE' (to migrate the 'CORE' schema), 'MART_%' (to migrate all schemas whose name starts with 'MART_')
+    ,'%'			-- table filter --> '%' to load all tables in the schemas considered. Examples: 'H_EMPLOYEE' (to migrate all the tables whose name is 'H_EMPLOYEE'), 'H_%' (to migrate all tables whose name starts with 'H_') 
+    ,false			-- boolean flag to create checking tables. TRUE -> create/load checking tables / FALSE -> do not create/load checking tables. -> default = FALSE. 
+    				-- When the option is used, a checking table will be created and loaded for each individual table being migrated. 
+    				-- The checking table will be created in the same schema with the same name adding '_MIG_CHK' as a suffix. 
+    				-- A summary table for all the checking tables of a specific schema will be created in the database migration schema with the name of the migrated schema adding '_MIG_CHK' as a suffix.
 ) 
 --with output
 ;
