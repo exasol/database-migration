@@ -166,6 +166,7 @@ function getForeignKeyInformationFromForeignDb(connection_type, connection_name,
 		JOIN information_schema.columns c ON (c.table_schema = cu.table_schema and c.table_name = cu.table_name and c.column_name = cu.column_name) 
 		WHERE cu.table_schema like '']]..schema_name..[[''
 		AND cu.table_name like '']]..table_name..[[''
+        AND cu.REFERENCED_TABLE_NAME is not null -- to prevent the evalauation of unique constraints
 		GROUP BY cu.Constraint_name, cu.table_schema, cu.table_name, cu.REFERENCED_TABLE_SCHEMA, cu.REFERENCED_TABLE_NAME
 		HAVING max(c.column_key) = ''MUL'';
 		]]
