@@ -854,7 +854,7 @@ execute script database_migration.oracle_to_exasol(
 	'ORACLE_OCI', 	-- connection name
 	true, 			-- case insensitivity flag
 	'C##DB_MIG', 	-- schema name filter
-	'DIM_DATE, DIM_PRODUCT, DIM_STORE, SALES, SALES_POSITION',	-- table name filter
+	'%%',			-- table name filter
 	4, 				-- degree of parallelism for the import statements.
 	false, 			-- flag for primary key generation.
 	false, 			-- flag for foreign key generation.
