@@ -24,15 +24,16 @@ end
 suc, res = pquery([[
 
 with vv_mysql_columns as (
-	select ]]..exa_upper_begin..[[table_catalog]]..exa_upper_end..[[ as "exa_table_catalog", ]]..exa_upper_begin..[[table_schema]]..exa_upper_end..[[ as "exa_table_schema", ]]..exa_upper_begin..[[table_name]]..exa_upper_end..[[ as "exa_table_name", ]]..exa_upper_begin..[[column_name]]..exa_upper_end..[[ as "exa_column_name", mysql.* from  
-		(import from jdbc at ]]..CONNECTION_NAME..[[ statement 
-			'select table_catalog, table_schema, table_name, column_name, ordinal_position, data_type, column_type, character_maximum_length, numeric_precision, numeric_scale  
-				from information_schema.columns join information_schema.tables using (table_catalog, table_schema, table_name) 
-				where table_type = ''BASE TABLE'' 
-				AND table_schema not in (''information_schema'',''performance_schema'', ''mysql'')
-				AND table_schema like '']]..SCHEMA_FILTER..[[''
-				AND table_name like '']]..TABLE_FILTER..[[''
-		') as mysql 
+    select table_catalog as "exa_table_catalog", table_schema as "exa_table_schema", table_name as "exa_table_name", column_name as "exa_column_name", mysql.* from  
+    ( import from jdbc at ]]..CONNECTION_NAME..[[ statement 
+        'select table_catalog, table_schema, table_name, column_name, ordinal_position, column_default, case when is_nullable=''NO'' then ''NOT NULL'' else ''NULL'' end as NOT_NULL_CONSTRAINT, data_type, column_type, character_maximum_length, numeric_precision, numeric_scale  
+           from information_schema.columns join information_schema.tables using (table_catalog, table_schema, table_name) 
+          where table_type = ''BASE TABLE'' 
+            AND table_schema not in (''information_schema'',''performance_schema'', ''mysql'')
+            AND table_schema like '']]..SCHEMA_FILTER..[[''
+            AND table_name like '']]..TABLE_FILTER..[[''
+        '
+    ) as mysql 
 )
 
 ,vv_create_schemas as(
@@ -40,57 +41,57 @@ with vv_mysql_columns as (
 )
 
 ,vv_create_tables as (
-	select 'create or replace table "' || "exa_table_schema" || '"."' || "exa_table_name" || '" (' || group_concat(
-	case 
+    select 'create or replace table "' || "exa_table_schema" || '"."' || "exa_table_name" || '" (' || group_concat(
+    case 
     -- ### numeric types ###
-    when upper(data_type) = 'INT' then '"' || "exa_column_name" || '" ' || 'DECIMAL(11,0)'
-    when upper(data_type) = 'INTEGER' then '"' || "exa_column_name" || '" ' || 'DECIMAL(11,0)'
-    when upper(data_type) = 'TINYINT' then '"' || "exa_column_name" || '" ' || 'DECIMAL(4,0)'
-    when upper(data_type) = 'SMALLINT' then '"' || "exa_column_name" || '" ' || 'DECIMAL(5,0)'
-    when upper(data_type) = 'MEDIUMINT' then '"' || "exa_column_name" || '" ' || 'DECIMAL(9,0)'
-    when upper(data_type) = 'BIGINT' then '"' || "exa_column_name" || '" ' || 'DECIMAL (20,0)'
-    when upper(data_type) = 'FLOAT' then '"' || "exa_column_name" || '" ' || 'FLOAT'
-    when upper(data_type) = 'DOUBLE' then '"' || "exa_column_name" || '" ' || 'DOUBLE'   
+    when upper(data_type) = 'INT' then '"' || "exa_column_name" || '" ' || 'DECIMAL(11,0) ' || case when column_default is not NULL then 'DEFAULT ' || column_default || ' ' end || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'INTEGER' then '"' || "exa_column_name" || '" ' || 'DECIMAL(11,0) ' || case when column_default is not NULL then 'DEFAULT ' || column_default || ' ' end || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'TINYINT' then '"' || "exa_column_name" || '" ' || 'DECIMAL(4,0) ' || case when column_default is not NULL then 'DEFAULT ' || column_default || ' ' end || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'SMALLINT' then '"' || "exa_column_name" || '" ' || 'DECIMAL(5,0) ' || case when column_default is not NULL then 'DEFAULT ' || column_default || ' ' end || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'MEDIUMINT' then '"' || "exa_column_name" || '" ' || 'DECIMAL(9,0) ' || case when column_default is not NULL then 'DEFAULT ' || column_default || ' ' end || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'BIGINT' then '"' || "exa_column_name" || '" ' || 'DECIMAL (20,0) ' || case when column_default is not NULL then 'DEFAULT ' || column_default || ' ' end || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'FLOAT' then '"' || "exa_column_name" || '" ' || 'FLOAT ' || case when column_default is not NULL then 'DEFAULT ' || column_default || ' ' end || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'DOUBLE' then '"' || "exa_column_name" || '" ' || 'DOUBLE ' || case when column_default is not NULL then 'DEFAULT ' || column_default || ' ' end || NOT_NULL_CONSTRAINT 
     -- in mysql scale <= 30 and scale <= precision
-	when upper(data_type) = 'DECIMAL' then case when numeric_precision is null then '"' || "exa_column_name" || '" ' || 'DOUBLE' else '"' || "exa_column_name" || '" ' || 'decimal(' || case when numeric_precision > 36 then 36 else numeric_precision end || ',' || case when (numeric_scale > numeric_precision) then numeric_precision else  case when numeric_scale < 0 then 0 else numeric_scale end end || ')' end 
+    when upper(data_type) = 'DECIMAL' then case when numeric_precision is null then '"' || "exa_column_name" || '" ' || 'DOUBLE' else '"' || "exa_column_name" || '" ' || 'decimal(' || case when numeric_precision > 36 then 36 else numeric_precision end || ',' || case when (numeric_scale > numeric_precision) then numeric_precision else  case when numeric_scale < 0 then 0 else numeric_scale end end || ') ' end || case when column_default is not NULL then 'DEFAULT ' || column_default || ' ' end || NOT_NULL_CONSTRAINT
     /* alternative when you want to keep the value as a double and precision > 36
     when upper(data_type) = 'DECIMAL' then case when numeric_precision is null or numeric_precision > 36 then 'DOUBLE' else 'decimal(' || numeric_precision || ',' || case when (numeric_scale > numeric_precision) then numeric_precision else  case when numeric_scale < 0 then 0 else numeric_scale end end || ')' end 
     */
-    when upper(data_type) = 'BIT' then '"' || "exa_column_name" || '" ' || 'DECIMAL('||numeric_precision||',0)'
+    when upper(data_type) = 'BIT' then '"' || "exa_column_name" || '" ' || 'DECIMAL('||numeric_precision||',0) ' || case when column_default is not NULL then 'DEFAULT ' || column_default || ' ' end || NOT_NULL_CONSTRAINT
 
     -- ### date and time types ###
-    when upper(data_type) = 'DATE' then '"' || "exa_column_name" || '" ' || 'DATE'
-    when upper(data_type) = 'DATETIME' then '"' || "exa_column_name" || '" ' || 'TIMESTAMP'
-    when upper(data_type) = 'TIMESTAMP' then '"' || "exa_column_name" || '" ' || 'TIMESTAMP'
-    when upper(data_type) = 'TIME' then '"' || "exa_column_name" || '" ' || 'varchar(8)'
-    when upper(data_type) = 'YEAR' then '"' || "exa_column_name" || '" ' || 'varchar(4)'
+    when upper(data_type) = 'DATE' then '"' || "exa_column_name" || '" ' || 'DATE ' || case when column_default is not NULL then 'DEFAULT ''' || column_default || ''' ' end || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'DATETIME' then '"' || "exa_column_name" || '" ' || 'TIMESTAMP ' || case when column_default is not NULL then 'DEFAULT ''' || column_default || ''' ' end || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'TIMESTAMP' then '"' || "exa_column_name" || '" ' || 'TIMESTAMP ' || case when column_default is not NULL then 'DEFAULT ''' || column_default || ''' ' end || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'TIME' then '"' || "exa_column_name" || '" ' || 'varchar(8) ' || case when column_default is not NULL then 'DEFAULT ''' || column_default || ''' ' end || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'YEAR' then '"' || "exa_column_name" || '" ' || 'varchar(4) ' || case when column_default is not NULL then 'DEFAULT ''' || column_default || ''' ' end || NOT_NULL_CONSTRAINT
 
     -- ### string types ###
-    when upper(data_type) = 'CHAR' then '"' || "exa_column_name" || '" ' || upper(column_type)
-    when upper(data_type) = 'VARCHAR' then '"' || "exa_column_name" || '" ' || upper(column_type)
-    when upper(data_type) = 'BINARY' then '"' || "exa_column_name" || '" ' || 'char('||character_maximum_length||')'
-    when upper(data_type) = 'VARBINARY' then '"' || "exa_column_name" || '" ' || 'varchar('||character_maximum_length||')'
-    when upper(data_type) = 'TINYTEXT' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
-	when upper(data_type) = 'TEXT' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
-	when upper(data_type) = 'MEDIUMTEXT' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
-	when upper(data_type) = 'LONGTEXT' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
-    when upper(data_type) = 'TINYBLOB' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
-	when upper(data_type) = 'BLOB' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
-	when upper(data_type) = 'MEDIUMBLOB' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
-	when upper(data_type) = 'LONGBLOB' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
-    when upper(data_type) = 'ENUM' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
-    when upper(data_type) = 'SET' then '"' || "exa_column_name" || '" ' || 'varchar(2000000)'
+    when upper(data_type) = 'CHAR' then '"' || "exa_column_name" || '" ' || upper(column_type) || ' ' || case when column_default is not NULL then 'DEFAULT ''' || column_default || ''' ' end || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'VARCHAR' then '"' || "exa_column_name" || '" ' || upper(column_type) || ' ' || case when column_default is not NULL then 'DEFAULT ''' || column_default || ''' ' end || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'BINARY' then '"' || "exa_column_name" || '" ' || 'char('||character_maximum_length||') ' || case when column_default is not NULL then 'DEFAULT ''' || column_default || ''' ' end || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'VARBINARY' then '"' || "exa_column_name" || '" ' || 'varchar('||character_maximum_length||') ' || case when column_default is not NULL then 'DEFAULT ''' || column_default || ''' ' end || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'TINYTEXT' then '"' || "exa_column_name" || '" ' || 'varchar(2000000) ' || case when column_default is not NULL then 'DEFAULT ''' || column_default || ''' ' end || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'TEXT' then '"' || "exa_column_name" || '" ' || 'varchar(2000000) ' || case when column_default is not NULL then 'DEFAULT ''' || column_default || ''' ' end || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'MEDIUMTEXT' then '"' || "exa_column_name" || '" ' || 'varchar(2000000) ' || case when column_default is not NULL then 'DEFAULT ''' || column_default || ''' ' end || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'LONGTEXT' then '"' || "exa_column_name" || '" ' || 'varchar(2000000) ' || case when column_default is not NULL then 'DEFAULT ''' || column_default || ''' ' end || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'TINYBLOB' then '"' || "exa_column_name" || '" ' || 'varchar(2000000) ' || case when column_default is not NULL then 'DEFAULT ''' || column_default || ''' ' end || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'BLOB' then '"' || "exa_column_name" || '" ' || 'varchar(2000000) ' || case when column_default is not NULL then 'DEFAULT ''' || column_default || ''' ' end || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'MEDIUMBLOB' then '"' || "exa_column_name" || '" ' || 'varchar(2000000) ' || case when column_default is not NULL then 'DEFAULT ''' || column_default || ''' ' end || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'LONGBLOB' then '"' || "exa_column_name" || '" ' || 'varchar(2000000) ' || case when column_default is not NULL then 'DEFAULT ''' || column_default || ''' ' end || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'ENUM' then '"' || "exa_column_name" || '" ' || 'varchar(2000000) ' || case when column_default is not NULL then 'DEFAULT ''' || column_default || ''' ' end || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'SET' then '"' || "exa_column_name" || '" ' || 'varchar(2000000) ' || case when column_default is not NULL then 'DEFAULT ''' || column_default || ''' ' end || NOT_NULL_CONSTRAINT
 
-	-- ### geospatial types ###	
-	when upper(data_type) = 'GEOMETRY' then '"' || "exa_column_name" || '" ' || upper(column_type)
-	when upper(data_type) = 'GEOMETRYCOLLECTION' then '"' || "exa_column_name" || '" ' || upper('geometry')
-	when upper(data_type) = 'POINT' then '"' || "exa_column_name" || '" ' || upper('geometry')
-	when upper(data_type) = 'MULTIPOINT' then '"' || "exa_column_name" || '" ' || upper('geometry')
-	when upper(data_type) = 'LINESTRING' then '"' || "exa_column_name" || '" ' || upper('geometry')
-	when upper(data_type) = 'MULTILINESTRING' then upper('geometry')
-	when upper(data_type) = 'POLYGON' then '"' || "exa_column_name" || '" ' || upper('geometry')
-	when upper(data_type) = 'MULTIPOLYGON' then '"' || "exa_column_name" || '" ' || upper('geometry')
-	
+    -- ### geospatial types ###    
+    when upper(data_type) = 'GEOMETRY' then '"' || "exa_column_name" || '" ' || upper(column_type) || ' ' || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'GEOMETRYCOLLECTION' then '"' || "exa_column_name" || '" ' || upper('geometry') || ' ' || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'POINT' then '"' || "exa_column_name" || '" ' || upper('geometry') || ' ' || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'MULTIPOINT' then '"' || "exa_column_name" || '" ' || upper('geometry') || ' ' || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'LINESTRING' then '"' || "exa_column_name" || '" ' || upper('geometry') || ' ' || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'MULTILINESTRING' then upper('geometry') || ' ' || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'POLYGON' then '"' || "exa_column_name" || '" ' || upper('geometry') || ' ' || NOT_NULL_CONSTRAINT
+    when upper(data_type) = 'MULTIPOLYGON' then '"' || "exa_column_name" || '" ' || upper('geometry') || ' ' || NOT_NULL_CONSTRAINT
+    
     end
 	order by ordinal_position) || ');' 
 
