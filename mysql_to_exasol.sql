@@ -24,7 +24,7 @@ end
 suc, res = pquery([[
 
 with vv_mysql_columns as (
-    select table_catalog as "exa_table_catalog", table_schema as "exa_table_schema", table_name as "exa_table_name", column_name as "exa_column_name", mysql.* from  
+    select ]]..exa_upper_begin..[[table_catalog]]..exa_upper_end..[[ as "exa_table_catalog", ]]..exa_upper_begin..[[table_schema]]..exa_upper_end..[[ as "exa_table_schema", ]]..exa_upper_begin..[[table_name]]..exa_upper_end..[[ as "exa_table_name", ]]..exa_upper_begin..[[column_name]]..exa_upper_end..[[ as "exa_column_name", mysql.* from   
     ( import from jdbc at ]]..CONNECTION_NAME..[[ statement 
         'select table_catalog, table_schema, table_name, column_name, ordinal_position, column_default, case when is_nullable=''NO'' then ''NOT NULL'' else ''NULL'' end as NOT_NULL_CONSTRAINT, data_type, column_type, character_maximum_length, numeric_precision, numeric_scale  
            from information_schema.columns join information_schema.tables using (table_catalog, table_schema, table_name) 
