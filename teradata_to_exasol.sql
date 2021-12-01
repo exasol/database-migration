@@ -3,8 +3,12 @@ create schema if not exists database_migration;
 /* 
      This script will generate create schema, create table and create import statements 
      to load all needed data from a teradata database. Automatic datatype conversion is 
-     applied whenever needed. Additionally the migration can be checked via generic 
-     standardized metrics to identify deviations between the data in Teradata and Exasol. 
+     applied whenever needed. Additionally the migration can be checked via generic metrics. 
+     For that a checking table will be created and loaded for each individual table being migrated. 
+     The checking table will be created in the same schema with the same name adding '_MIG_CHK' as a suffix. 
+     A summary table for all the checking tables of a specific schema will be created in the database migration schema with the name of the migrated schema adding '_MIG_CHK' as a suffix.
+     Querying the summary tables will help you to identify deviations easily.
+
      Feel free to adjust it. 
 */
 
