@@ -8,6 +8,7 @@ create schema if not exists database_migration;
      The checking table will be created in the same schema with the same name adding '_MIG_CHK' as a suffix. 
      A summary table for all the checking tables of a specific schema will be created in the database migration schema with the name of the migrated schema adding '_MIG_CHK' as a suffix.
      Querying the summary tables will help you to identify deviations easily.
+
      Feel free to adjust it. 
 */
 
@@ -561,6 +562,9 @@ execute script database_migration.TERADATA_TO_EXASOL(
     ,'%'			-- schema filter --> '%' to load all schemas (except system schemas). Examples: 'CORE' (to migrate the 'CORE' schema), 'MART_%' (to migrate all schemas whose name starts with 'MART_')
     ,'%'			-- table filter --> '%' to load all tables in the schemas considered. Examples: 'H_EMPLOYEE' (to migrate all the tables whose name is 'H_EMPLOYEE'), 'H_%' (to migrate all tables whose name starts with 'H_') 
     ,false			-- boolean flag to create checking tables. TRUE -> create/load checking tables / FALSE -> do not create/load checking tables. -> default = FALSE. 
+    				-- When the option is used, a checking table will be created and loaded for each individual table being migrated. 
+    				-- The checking table will be created in the same schema with the same name adding '_MIG_CHK' as a suffix. 
+    				-- A summary table for all the checking tables of a specific schema will be created in the database migration schema with the name of the migrated schema adding '_MIG_CHK' as a suffix.
 ) 
 --with output
 ;
