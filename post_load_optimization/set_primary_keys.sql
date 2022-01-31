@@ -64,12 +64,12 @@ function getPrimaryKeyColumnsFromPostgres(connection_type, connection_name, sche
 	from(import from ::ct at ::cn statement '
 		SELECT t.table_schema AS "TABLE_SCHEMA", t.table_name AS "TABLE_NAME", kcu.column_name AS "COLUMN_NAME", kcu.constraint_name AS "CONSTRAINT_NAME"
 		FROM INFORMATION_SCHEMA.TABLES t
-                JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
-                ON tc.table_catalog = t.table_catalog
+                LEFT JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+        	ON tc.table_catalog = t.table_catalog
                 AND tc.table_schema = t.table_schema
                 AND tc.table_name = t.table_name
                 AND tc.constraint_type = ''PRIMARY KEY''
-                JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+                LEFT JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
                 ON kcu.table_catalog = tc.table_catalog
                 AND kcu.table_schema = tc.table_schema
                 AND kcu.table_name = tc.table_name
@@ -79,7 +79,6 @@ function getPrimaryKeyColumnsFromPostgres(connection_type, connection_name, sche
 	')
 	GROUP BY (CONSTRAINT_NAME, TABLE_SCHEMA, TABLE_NAME);]], {ct=connection_type, cn = connection_name})
 	return res
-    
 end
 
 function getPrimaryKeyColumnsFromSqlserver(connection_type, connection_name, schema_name, table_name)
