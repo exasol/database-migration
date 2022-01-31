@@ -377,8 +377,8 @@ tgt_table  = quote(tgt_table)
         
         else
             -- we have a delta column
-             max_delta     = get_max_delta(wrapper, tgt_schema, tgt_table, delta_name, delta_type)
-             if (max_delta == NULL) then
+            max_delta     = get_max_delta(wrapper, tgt_schema, tgt_table, delta_name, delta_type)
+            if (max_delta == NULL) then
                  -- we have a delta column and a primary key, but no values with max_delta
                  -- --> full load into staging table & merge
                  table.insert(stmts_tbl, {src_schema, tgt_schema, tgt_table, 'Full load and merge (Only null values in delta_detection column)', full_load_staging_stmt})
