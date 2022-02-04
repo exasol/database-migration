@@ -76,11 +76,19 @@ For more details on `IMPORT` see paragraph 2.2.2 in the User Manual. For further
 See script [db2_to_exasol.sql](db2_to_exasol.sql)
 ### Exasol
 Step by Step guide:
-* create connection to the Exasol datanase you want to import from
-* create [exasol_to_exasol.sql](exasol_to_exasol.sql) script
-* adapt the variables for the execute script accordinglingy to your scenario and run the statement
-  * depending on your system and the amount of tables this might take a few 
-* copy the result set to another session and execute the statement in the correct order
+* create connection to the Exasol database you want to import from
+* create the [exasol_to_exasol.sql](exasol_to_exasol.sql) script
+* adapt the variables for the execute script accordingly to your scenario and run the statement
+  * depending on your system and the amount of tables this might take a few seconds
+* copy the result set to another session and execute the statement in the output order
+
+This script will generate the following information:
+* create schema
+* create table with primary keys
+* alter table add foreign keys
+* alter table set partion by 
+* alter table set distribution keys
+* import data
 
 See script [exasol_to_exasol.sql](exasol_to_exasol.sql) for more information!
 
