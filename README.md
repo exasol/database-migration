@@ -75,7 +75,14 @@ For more details on `IMPORT` see paragraph 2.2.2 in the User Manual. For further
 ### DB2
 See script [db2_to_exasol.sql](db2_to_exasol.sql)
 ### Exasol
-See script [exasol_to_exasol.sql](exasol_to_exasol.sql)
+Step by Step guide:
+* create connection to the Exasol datanase you want to import from
+* create [exasol_to_exasol.sql](exasol_to_exasol.sql) script
+* adapt the variables for the execute script accordinglingy to your scenario and run the statement
+  * depending on your system and the amount of tables this might take a few 
+* copy the result set to another session and execute the statement in the correct order
+
+See script [exasol_to_exasol.sql](exasol_to_exasol.sql) for more information!
 
 ### Google BigQuery
 
