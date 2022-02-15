@@ -47,6 +47,7 @@ create table if not exists ::s.::jl(
             end_time timestamp
         )
 ]], {s= staging_schema, jl=job_log_table})
+query[[commit]]
 
 query([[
         create table if not exists ::s.::jd (
@@ -58,6 +59,7 @@ query([[
             rowcount int
         )
 ]], {s= log_schema, jd=job_details_table})
+query[[commit]]
 end
 
 -----------------------------------------------------------------------------------------
