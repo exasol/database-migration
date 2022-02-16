@@ -94,7 +94,7 @@ select alter_partion from
                 ') AS partion_keys
 )
 , vv_imports as (
-  select 'import into "' || "exa_table_schema" || '"."' || "exa_table_name" || '" from exa at ]]..CONNECTION_NAME..[[ table "' || table_schema||'"."'||table_name||'";'  as sql_text
+  select 'import into "' || "exa_table_schema" || '"."' || "exa_table_name" || '" from ]]..CONNECTION_SETTING..[[ at ]]..CONNECTION_NAME..[[ table "' || table_schema||'"."'||table_name||'";'  as sql_text
 	from vv_exa_columns group by "exa_table_schema","exa_table_name", table_schema,table_name
 	order by "exa_table_schema","exa_table_name", table_schema,table_name
 )
