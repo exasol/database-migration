@@ -150,7 +150,9 @@ return(res)
 -- Create a connection to the your other Exasol database
 create connection SECOND_EXASOL_DB to '192.168.6.11..14:8563' user 'username' identified by 'exasolRocks!';
 
-
+-- JDBC connection
+CREATE CONNECTION SECOND_EXASOL_DB TO 'jdbc:exa:192.168.6.11..14:8563' user 'username' identified by 'exasolRocks!';
+										  
 execute script database_migration.EXASOL_TO_EXASOL(
    'SECOND_EXASOL_DB' -- name of your database connection   
    ,'JDBC'             -- set if import from EXA or JDBC connection
