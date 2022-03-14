@@ -1,12 +1,13 @@
 -- connection_type:						Type of connection, e.g. 'JDBC' or 'ORA'
 -- connection_name:						Name of connection, e.g. 'MY_JDBC_MYSQL_CONNECTION'
--- connection_database_type:			                Type of database from which the keys should be migrated, currently 'ORACLE', 'MYSQL', 'SQLSERVER', 'POSTGRES' and 'EXASOL' are supported
--- schema_filter:						Filter for the schemas, e.g. '%' to take all schemas, 'my_schema' to load only primary_keys from this schema
+-- connection_database_type:			Type of database from which the keys should be migrated, currently 'ORACLE', 'MYSQL', 'SQLSERVER', 'POSTGRES' and 'EXASOL' are supported
+-- schema_filter:						Filter for the source schema, e.g. 'my_schema' to load keys from this schema
 -- table_filter:						Filter for the tables matching schema_filter, e.g. '%' to take all tables, 'my_table' to only load keys for this table
+-- target_schema:                       Filter for the target schema, e.g. 'my_target_schema'
 -- constraint_status:					Could be 'ENABLE' or 'DISABLE' and specifies whether the generated keys should be enabled or disabled
 -- flag_identifier_case_insensitive: 	True if identifiers should be stored case-insensitiv (will be stored upper_case)
 --/
-create or replace script database_migration.set_primary_and_foreign_keys(connection_type, connection_name,connection_database_type, schema_filter, table_filter, constraint_status, flag_identifier_case_insensitive) RETURNS TABLE
+create or replace script database_migration.set_primary_and_foreign_keys(connection_type, connection_name,connection_database_type, schema_filter, table_filter, target_schema, constraint_status, flag_identifier_case_insensitive) RETURNS TABLE
  as
 ------------------------------------------------------------------------------------------------------
 -- returns colums for primary keys, if primary key constists of multiple colums they are returned as comma separated list
@@ -14,55 +15,55 @@ create or replace script database_migration.set_primary_and_foreign_keys(connect
 function getPrimaryKeyColumnsFromOracle(connection_type, connection_name, schema_name, table_name)
 	-- get columns for primary keys from oracle
 	-- owner, table_name, column_name
-	res = query([[select SCHEMA_NAME, TABLE_NAME, GROUP_CONCAT(COLUMN_NAME SEPARATOR ', '), CONSTRAINT_NAME
+	res = query([[select TABLE_NAME, GROUP_CONCAT(COLUMN_NAME SEPARATOR ', '), CONSTRAINT_NAME
 	from(import from ::ct at ::cn statement '
-		SELECT cons.owner as SCHEMA_NAME, cols.table_name, cols.column_name, cons.constraint_name
+		SELECT cols.table_name, cols.column_name, cons.constraint_name
 		FROM all_constraints cons, all_cons_columns cols
 		WHERE cons.owner = cols.owner
-		AND cons.OWNER LIKE '']]..schema_name..[['' -- Schema Filter
+		AND cons.OWNER = '']]..schema_name..[['' -- Schema Filter
 		AND cols.table_name LIKE '']] .. table_name..[['' -- Table Filter
 		AND cons.constraint_type = ''P''
 		AND cons.constraint_name = cols.constraint_name
 	')
-	GROUP BY (CONSTRAINT_NAME, SCHEMA_NAME, TABLE_NAME);]], {ct=connection_type, cn = connection_name, sn = schema_name})
+	GROUP BY (CONSTRAINT_NAME, TABLE_NAME);]], {ct=connection_type, cn = connection_name, sn = schema_name})
 	return res
 end
 
 function getPrimaryKeyColumnsFromExasol(connection_type, connection_name, schema_name, table_name)
-	res = query([[select SCHEMA_NAME, TABLE_NAME, GROUP_CONCAT(COLUMN_NAME SEPARATOR ', '), CONSTRAINT_NAME
+	res = query([[select TABLE_NAME, GROUP_CONCAT(COLUMN_NAME SEPARATOR ', '), CONSTRAINT_NAME
 	from(import from ::ct at ::cn statement '
-		select constraint_schema as schema_name, constraint_table as table_name, column_name, constraint_name 
+		select constraint_table as table_name, column_name, constraint_name 
 		from EXA_ALL_CONSTRAINT_COLUMNS
 		where constraint_type = ''PRIMARY KEY''
-		AND constraint_schema LIKE '']]..schema_name..[['' -- Schema Filter
+		AND constraint_schema = '']]..schema_name..[['' -- Schema Filter
 		AND constraint_table LIKE '']] .. table_name..[['' -- Table Filter
 	')
-	GROUP BY (CONSTRAINT_NAME, SCHEMA_NAME, TABLE_NAME);]],{ct=connection_type, cn = connection_name, sn = schema_name})
+	GROUP BY (CONSTRAINT_NAME, TABLE_NAME);]],{ct=connection_type, cn = connection_name, sn = schema_name})
 	return res
 end
 
 function getPrimaryKeyColumnsFromMySql(connection_type, connection_name, schema_name, table_name)
 	-- get columns for primary keys from mysql
 	-- owner, table_name, column_name
-	res = query([[select TABLE_SCHEMA, TABLE_NAME, GROUP_CONCAT(COLUMN_NAME SEPARATOR ', '), CONSTRAINT_NAME
+	res = query([[select TABLE_NAME, GROUP_CONCAT(COLUMN_NAME SEPARATOR ', '), CONSTRAINT_NAME
 	from(import from ::ct at ::cn statement '
-		SELECT cu.TABLE_SCHEMA, cu.TABLE_NAME, cu.COLUMN_NAME, cu.CONSTRAINT_NAME
+		SELECT cu.TABLE_NAME, cu.COLUMN_NAME, cu.CONSTRAINT_NAME
 		FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE cu
 		JOIN information_schema.columns c ON (c.table_schema = cu.table_schema and c.table_name = cu.table_name and c.column_name = cu.column_name) 
 		WHERE c.column_key = ''PRI''
-		AND cu.table_schema like '']]..schema_name..[[''
-		AND cu.table_name like '']] .. table_name..[[''
+		AND cu.table_schema = '']]..schema_name..[[''
+		AND cu.table_name LIKE '']] .. table_name..[[''
 	')
-	GROUP BY (CONSTRAINT_NAME, TABLE_SCHEMA, TABLE_NAME);]], {ct=connection_type, cn = connection_name})
+	GROUP BY (CONSTRAINT_NAME, TABLE_NAME);]], {ct=connection_type, cn = connection_name})
 	return res
 end
 
 function getPrimaryKeyColumnsFromPostgres(connection_type, connection_name, schema_name, table_name)
 	-- get columns for primary keys from postgres
 	-- owner, table_name, column_name
-	res = query([[select TABLE_SCHEMA, TABLE_NAME, GROUP_CONCAT(COLUMN_NAME SEPARATOR ', '), CONSTRAINT_NAME
+	res = query([[select TABLE_NAME, GROUP_CONCAT(COLUMN_NAME SEPARATOR ', '), CONSTRAINT_NAME
 	from(import from ::ct at ::cn statement '
-		SELECT t.table_schema AS "TABLE_SCHEMA", t.table_name AS "TABLE_NAME", kcu.column_name AS "COLUMN_NAME", kcu.constraint_name AS "CONSTRAINT_NAME"
+		SELECT t.table_name AS "TABLE_NAME", kcu.column_name AS "COLUMN_NAME", kcu.constraint_name AS "CONSTRAINT_NAME"
 		FROM INFORMATION_SCHEMA.TABLES t
                 JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
                 ON tc.table_catalog = t.table_catalog
@@ -74,10 +75,10 @@ function getPrimaryKeyColumnsFromPostgres(connection_type, connection_name, sche
                 AND kcu.table_schema = tc.table_schema
                 AND kcu.table_name = tc.table_name
                 AND kcu.constraint_name = tc.constraint_name
-		WHERE   t.table_schema like '']]..schema_name..[[''
+		WHERE   t.table_schema = '']]..schema_name..[[''
 		AND t.table_name like '']] .. table_name..[[''
 	')
-	GROUP BY (CONSTRAINT_NAME, TABLE_SCHEMA, TABLE_NAME);]], {ct=connection_type, cn = connection_name})
+	GROUP BY (CONSTRAINT_NAME, TABLE_NAME);]], {ct=connection_type, cn = connection_name})
 	return res
     
 end
@@ -85,19 +86,19 @@ end
 function getPrimaryKeyColumnsFromSqlserver(connection_type, connection_name, schema_name, table_name)
 	-- get columns for primary keys from sqlserver
 	-- owner, table_name, column_name
-	res = query([[select SCHEMA_NAME, TABLE_NAME, GROUP_CONCAT(COLUMN_NAME SEPARATOR ', '), CONSTRAINT_NAME
+	res = query([[select TABLE_NAME, GROUP_CONCAT(COLUMN_NAME SEPARATOR ', '), CONSTRAINT_NAME
 	from(import from ::ct at ::cn statement  '
-                SELECT TC.table_schema as SCHEMA_NAME, KU.table_name as TABLE_NAME,column_name as COLUMN_NAME, TC.constraint_name as CONSTRAINT_NAME
+                SELECT KU.table_name as TABLE_NAME,column_name as COLUMN_NAME, TC.constraint_name as CONSTRAINT_NAME
                 FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS AS TC
                 INNER JOIN
                     INFORMATION_SCHEMA.KEY_COLUMN_USAGE AS KU
                           ON TC.CONSTRAINT_TYPE = ''PRIMARY KEY''
                              AND TC.CONSTRAINT_NAME = KU.CONSTRAINT_NAME
-                             AND TC.table_schema like '']]..schema_name..[['' -- Schema Filter
+                             AND TC.table_schema = '']]..schema_name..[['' -- Schema Filter
                              AND KU.table_name like '']] .. table_name..[['' -- Table Filter
                 ORDER BY KU.TABLE_NAME, KU.ORDINAL_POSITION'
         )
-	GROUP BY (CONSTRAINT_NAME, SCHEMA_NAME, TABLE_NAME);]], {ct=connection_type, cn = connection_name, sn = schema_name})
+	GROUP BY (CONSTRAINT_NAME, TABLE_NAME);]], {ct=connection_type, cn = connection_name, sn = schema_name})
 	return res
 end
 
@@ -124,9 +125,9 @@ end
 
 -- query without group by here
 function getNotNullColumnsFromExasol(connection_type, connection_name, schema_name, table_name)
-	res = query([[select SCHEMA_NAME, TABLE_NAME, COLUMN_NAME
+	res = query([[select TABLE_NAME, COLUMN_NAME
 	from(import from ::ct at ::cn statement '
-		select constraint_schema as schema_name, constraint_table as table_name, column_name 
+		select constraint_table as table_name, column_name 
 		from EXA_ALL_CONSTRAINT_COLUMNS
 		where constraint_type = ''NOT NULL''
 		AND constraint_schema LIKE '']]..schema_name..[['' -- Schema Filter
@@ -162,40 +163,36 @@ function getForeignKeyInformationFromForeignDb(connection_type, connection_name,
 	foreignDbStatement = [[]]
 	if(connection_database_type == 'MYSQL') then
 		foreignDbStatement = [[
-		SELECT cu.constraint_name, cu.TABLE_SCHEMA, cu.TABLE_NAME, GROUP_CONCAT(c.COLUMN_NAME SEPARATOR '', '') as column_name, cu.REFERENCED_TABLE_SCHEMA, cu.REFERENCED_TABLE_NAME
+		SELECT cu.constraint_name, cu.TABLE_NAME, GROUP_CONCAT(c.COLUMN_NAME SEPARATOR '', '') as column_name, cu.REFERENCED_TABLE_NAME
 		FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE cu
 		JOIN information_schema.columns c ON (c.table_schema = cu.table_schema and c.table_name = cu.table_name and c.column_name = cu.column_name) 
 		WHERE cu.table_schema like '']]..schema_name..[[''
 		AND cu.table_name like '']]..table_name..[[''
         AND cu.REFERENCED_TABLE_NAME is not null -- to prevent the evalauation of unique constraints
-		GROUP BY cu.Constraint_name, cu.table_schema, cu.table_name, cu.REFERENCED_TABLE_SCHEMA, cu.REFERENCED_TABLE_NAME
+		GROUP BY cu.Constraint_name, cu.table_name, cu.REFERENCED_TABLE_NAME
 		HAVING max(c.column_key) = ''MUL'';
 		]]
 		
 		-- could not be unified for all connectoin_database_types because the select a as b does not work if already applied in the foreignDbStatement for Mysql
 		succ, res = pquery([[select *
 		from(import from ::ct at ::cn statement ']]..foreignDbStatement..[[')
-		;]], {ct=connection_type, cn = connection_name, sn = schema_name})
-
-		
+		;]], {ct=connection_type, cn = connection_name})
 	else
 		if (connection_database_type == 'ORACLE') then
 			foreignDbStatement = [[
-			SELECT c.constraint_name, c.owner as schema_name, c.table_name as table_name, c2.owner as referenced_schema, c2.table_name as referenced_table, cols.column_name as column_name
+			SELECT c.constraint_name, c.table_name as table_name, c2.table_name as referenced_table, cols.column_name as column_name
 			FROM all_constraints c 
 			JOIN all_constraints c2 ON (c.r_constraint_name = c2.constraint_name) 
 			JOIN all_cons_columns cols ON (cols.constraint_name = c.constraint_name)
-			WHERE c.OWNER LIKE '']]..schema_name..[['' -- Schema Filter
+			WHERE c.OWNER = '']]..schema_name..[['' -- Schema Filter
 			AND c.table_name LIKE '']] .. table_name..[['' -- Table Filter
 			AND c.constraint_TYPE = ''R''
 			]]
-	        elseif(connection_database_type == 'SQLSERVER') then
+	    elseif(connection_database_type == 'SQLSERVER') then
 	               foreignDbStatement = [[
                         SELECT  
                             obj.name AS [CONSTRAINT_NAME],
-                            sch.name AS [SCHEMA_NAME],
                             tab1.name AS [TABLE_NAME],
-                            sch2.name AS [REFERENCED_SCHEMA],
                             tab2.name AS [REFERENCED_TABLE],
                             col1.name AS [COLUMN_NAME]
                         FROM sys.foreign_key_columns fkc
@@ -211,7 +208,7 @@ function getForeignKeyInformationFromForeignDb(connection_type, connection_name,
                             ON tab2.object_id = fkc.referenced_object_id
                         INNER JOIN sys.schemas sch2
                             ON tab2.schema_id = sch2.schema_id
-                        WHERE sch.name like '']]..schema_name..[['' -- Schema Filter
+                        WHERE sch.name = '']]..schema_name..[['' -- Schema Filter
                         AND tab1.name like '']] .. table_name..[['' -- Table Filter
                         ORDER BY obj.name, fkc.referenced_column_id
 			]]
@@ -219,9 +216,7 @@ function getForeignKeyInformationFromForeignDb(connection_type, connection_name,
 	               foreignDbStatement = [[
                 	SELECT 
     			 tc.constraint_name AS "CONSTRAINT_NAME", 
-    		 	 tc.table_schema AS "SCHEMA_NAME",
-    	   	 	 tc.table_name AS "TABLE_NAME", 
-    			 ccu.table_schema AS "REFERENCED_SCHEMA",
+    		 	 tc.table_name AS "TABLE_NAME", 
     			 ccu.table_name AS "REFERENCED_TABLE",
     		 	 kcu.column_name AS "COLUMN_NAME" 
 			 FROM 
@@ -233,27 +228,26 @@ function getForeignKeyInformationFromForeignDb(connection_type, connection_name,
       			 ON ccu.constraint_name = tc.constraint_name
       			 AND ccu.table_schema = tc.table_schema
 			 WHERE tc.constraint_type = ''FOREIGN KEY'' 
-			 AND tc.table_schema like '']]..schema_name..[['' -- Schema Filter
+			 AND tc.table_schema = '']]..schema_name..[['' -- Schema Filter
 		 	 AND tc.table_name like '']] .. table_name..[['' -- Table Filter      
 			 ORDER BY tc.constraint_name, ccu.column_name
 			]]
 		elseif(connection_database_type == 'EXASOL') then
 			foreignDbStatement = [[
-			SELECT constraint_name, constraint_schema as schema_name, constraint_table as table_name, referenced_schema, referenced_table, column_name
+			SELECT constraint_name, constraint_table as table_name, referenced_table, column_name
 			FROM EXA_ALL_CONSTRAINT_COLUMNS
 			WHERE constraint_type = ''FOREIGN KEY''
-			AND constraint_schema LIKE '']]..schema_name..[['' -- Schema Filter
+			AND constraint_schema = '']]..schema_name..[['' -- Schema Filter
 			AND constraint_table LIKE '']] .. table_name..[['' -- Table Filter
  			]]
 		else
 			error('Unknown connection database type: '..connection_database_type)
 		end
 		
-		succ, res = pquery([[select constraint_name, schema_name, table_name, GROUP_CONCAT(COLUMN_NAME SEPARATOR ', ') , max(referenced_schema), max(referenced_table)
+		succ, res = pquery([[select constraint_name, table_name, GROUP_CONCAT(COLUMN_NAME SEPARATOR ', ') , max(referenced_table)
 			from(import from ::ct at ::cn statement ']]..foreignDbStatement..[[')
-			GROUP BY (CONSTRAINT_NAME, SCHEMA_NAME, TABLE_NAME)
-			;]], {ct=connection_type, cn = connection_name, sn = schema_name})
-
+			GROUP BY (CONSTRAINT_NAME, TABLE_NAME)
+			;]], {ct=connection_type, cn = connection_name})
 	end
 
 	if not succ then
@@ -323,21 +317,17 @@ end
 for i=1,#prim_cols do
 
 	if(flag_identifier_case_insensitive) then
-		pk_schema_name		= string.upper(prim_cols[i][1])
-		pk_table_name		= string.upper(prim_cols[i][2])
-		pk_column_name		= string.upper(prim_cols[i][3])
-		pk_constraint_name	= string.upper(prim_cols[i][4])
-		fk_table_ref_name	= string.upper(prim_cols[i][1])
+		pk_table_name		= string.upper(prim_cols[i][1])
+		pk_column_name		= string.upper(prim_cols[i][2])
+		pk_constraint_name	= string.upper(prim_cols[i][3])
 	else
-		pk_schema_name		= prim_cols[i][1]
-		pk_table_name		= prim_cols[i][2]
-		pk_column_name		= prim_cols[i][3]
-		pk_constraint_name	= prim_cols[i][4]
-		fk_table_ref_name	= prim_cols[i][1]
+		pk_table_name		= prim_cols[i][1]
+		pk_column_name		= prim_cols[i][2]
+		pk_constraint_name	= prim_cols[i][3]
 	end
 
-	result_success, result_text = setPrimaryKey(pk_schema_name, pk_table_name, pk_column_name, pk_constraint_name, constraint_status)
-	result_table[#result_table+1] = {pk_schema_name, pk_table_name, pk_column_name, result_success, result_text}
+	result_success, result_text = setPrimaryKey(target_schema, pk_table_name, pk_column_name, pk_constraint_name, constraint_status)
+	result_table[#result_table+1] = {target_schema, pk_table_name, pk_column_name, result_success, result_text}
 end
 
 -- get and set not null constraints
@@ -348,18 +338,16 @@ if (connection_database_type == 'EXASOL') then
 	for i=1,#not_null_cols do
 	
 		if(flag_identifier_case_insensitive) then
-			nn_schema_name		= string.upper(not_null_cols[i][1])
-			nn_table_name		= string.upper(not_null_cols[i][2])
-			nn_column_name		= string.upper(not_null_cols[i][3])
+			nn_table_name		= string.upper(not_null_cols[i][1])
+			nn_column_name		= string.upper(not_null_cols[i][2])
 
 		else
-			nn_schema_name		= not_null_cols[i][1]
-			nn_table_name		= not_null_cols[i][2]
-			nn_column_name		= not_null_cols[i][3]
+			nn_table_name		= not_null_cols[i][1]
+			nn_column_name		= not_null_cols[i][2]
 		end
 	
-		result_success, result_text = setNotNull(nn_schema_name, nn_table_name, nn_column_name, constraint_status)
-		result_table[#result_table+1] = {nn_schema_name, nn_table_name, nn_column_name, result_success, result_text}
+		result_success, result_text = setNotNull(target_schema, nn_table_name, nn_column_name, constraint_status)
+		result_table[#result_table+1] = {target_schema, nn_table_name, nn_column_name, result_success, result_text}
 	end
 end
 
@@ -372,23 +360,19 @@ for i=1,#fks do
 
 	if(flag_identifier_case_insensitive) then
 		fk_name				= fks[i][1]
-		fk_schema_name 		= string.upper(fks[i][2])
-		fk_table_name		= string.upper(fks[i][3])
-		fk_column_name		= string.upper(fks[i][4])
-		fk_schema_ref_name 	= string.upper(fks[i][5])
-		fk_table_ref_name	= string.upper(fks[i][6])
+		fk_table_name		= string.upper(fks[i][2])
+		fk_column_name		= string.upper(fks[i][3])
+		fk_table_ref_name	= string.upper(fks[i][4])
 	else
 		fk_name				= fks[i][1]
-		fk_schema_name 		= fks[i][2]
-		fk_table_name		= fks[i][3]
-		fk_column_name		= fks[i][4]
-		fk_schema_ref_name 	= fks[i][5]
-		fk_table_ref_name	= fks[i][6]
+		fk_table_name		= fks[i][2]
+		fk_column_name		= fks[i][3]
+		fk_table_ref_name	= fks[i][4]
 	end
 
 
-	result_success, result_text = setForeignKey(fk_schema_name, fk_table_name, fk_column_name, fk_schema_ref_name, fk_table_ref_name, fk_name, constraint_status)
-	result_table[#result_table+1] = {fk_schema_name, fk_table_name, fk_column_name, result_success, result_text}
+	result_success, result_text = setForeignKey(target_schema, fk_table_name, fk_column_name, target_schema, fk_table_ref_name, fk_name, constraint_status)
+	result_table[#result_table+1] = {target_schema, fk_table_name, fk_column_name, result_success, result_text}
 end
 
 
@@ -401,13 +385,14 @@ exit(result_table, "schema_name varchar(200), table_name varchar(200), column_na
 -- Examples of usage
 execute script DATABASE_MIGRATION.SET_PRIMARY_AND_FOREIGN_KEYS(
 'JDBC',				-- connection_type:						Type of connection, e.g. 'JDBC' or 'ORA'
-'JDBC_SQLSERVER',		-- connection_name:						Name of connection
-'SQLSERVER',			-- connection_database_type:			                Type of database from which the keys should be migrated, currently 'ORACLE', 'MYSQL', 'SQLSERVER', 'POSTGRES' and 'EXASOL' are supported
-'MY_SCHEMA',   		        -- schema_filter:						Filter for the schemas, e.g. '%' to take all schemas, 'my_schema' to load only primary_keys from this schema
+'JDBC_SQLSERVER',	-- connection_name:						Name of connection
+'SQLSERVER',		-- connection_database_type:			                Type of database from which the keys should be migrated, currently 'ORACLE', 'MYSQL', 'SQLSERVER', 'POSTGRES' and 'EXASOL' are supported
+'MY_SCHEMA',   		-- schema_filter:						Filter for the source schema, e.g. 'my_schema' to load the keys from this schema
 '%',				-- table_filter:						Filter for the tables matching schema_filter, e.g. '%' to take all tables, 'my_table' to only load keys for this table
-'DISABLE',		        -- constraint_status:					        Could be 'ENABLE' or 'DISABLE' and specifies whether the generated keys should be enabled or disabled
-'false'		                -- flag_identifier_case_insensitive: 	                        True if identifiers should be stored case-insensitiv (will be stored upper_case)
+'MY_TARGET_SCHEMA', -- target_schema_filter:                Filter for the target schema, e.g. 'my_target_schema'
+'DISABLE',		    -- constraint_status:					Could be 'ENABLE' or 'DISABLE' and specifies whether the generated keys should be enabled or disabled
+'false'		        -- flag_identifier_case_insensitive: 	True if identifiers should be stored case-insensitiv (will be stored upper_case)
 );
 
 -- Second example
-execute script database_migration.set_primary_and_foreign_keys('ORA', 'MY_CONN','ORACLE', 'SCOTT', 'MY_%', 'DISABLE', true);
+execute script database_migration.set_primary_and_foreign_keys('ORA', 'MY_CONN','ORACLE', 'SCOTT', 'MY_%', 'SCOTT', 'DISABLE', true);
