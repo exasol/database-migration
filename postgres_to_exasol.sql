@@ -119,111 +119,6 @@ with vv_pg_columns as (
 	when "data_type" = 'jsonb' then "column_name" ||'::text'
 	when "data_type" = 'line' then "column_name" ||'::text'
 	when "data_type" = 'lseg' then "column_name" ||'::text'
-CREATE LUA SCRIPT "POSTGRES_TO_EXASOL_V2" (CONNECTION_NAME,IDENTIFIER_CASE_INSENSITIVE,SCHEMA_FILTER,TABLE_FILTER,DEST_SCHEMA) RETURNS TABLE AS
-exa_upper_begin=''
-exa_upper_end=''
-if IDENTIFIER_CASE_INSENSITIVE == true then
-	exa_upper_begin='upper('
-	exa_upper_end=')'
-end
-if DEST_SCHEMA then
-	exa_table_schema_clause=[[']]..DEST_SCHEMA..[[']]
-else
-	exa_table_schema_clause=exa_upper_begin..[["table_schema"]]..exa_upper_end
-end
-res = query([[
-with vv_pg_columns as (
-	select ]]..exa_upper_begin..[["table_catalog"]]..exa_upper_end..[[ as "exa_table_catalog", ]]..exa_table_schema_clause..[[ as "exa_table_schema", ]]..exa_upper_begin..[["table_name"]]..exa_upper_end..[[ as "exa_table_name", ]]..exa_upper_begin..[["column_name"]]..exa_upper_end..[[ as "exa_column_name", pg.* from  
-		(import from jdbc at ]]..CONNECTION_NAME..[[ statement 
-			'select table_catalog, table_schema, table_name, column_name, ordinal_position, case when is_nullable=''NO'' then ''NOT NULL'' else ''NULL'' end as not_null_constraint, data_type, character_maximum_length, numeric_precision, numeric_scale, datetime_precision  
-				from information_schema.columns join information_schema.tables using (table_catalog, table_schema, table_name) 
--- change ''BASE TABLE'' to ''VIEW'' if you want to copy a view from Postgres to an Exasol table
-		 		where table_schema not in (''information_schema'',''pg_catalog'')
-				AND table_schema like '']]..SCHEMA_FILTER..[[''
-				AND table_name like '']]..TABLE_FILTER..[[''
-		') as pg order by false
-)
-,vv_create_schemas as(
-	SELECT 'create schema if not exists "' || "exa_table_schema" || '";' as sql_text from vv_pg_columns  group by "exa_table_catalog","exa_table_schema" order by "exa_table_catalog","exa_table_schema"
-)
-,vv_create_tables as (
-	select 'create or replace table "' || "exa_table_schema" || '"."' || "exa_table_name" || '" (' || group_concat(
-	case 
-	when "data_type" = 'ARRAY' then '"' || "exa_column_name" || '" ' || 'varchar(2000000) ' || "not_null_constraint"
-	when "data_type" = 'USER-DEFINED' then '"' || "exa_column_name" || '" ' || 'varchar(100000) '  || "not_null_constraint"
-	when "data_type" = 'bigint' then '"' || "exa_column_name" || '" ' || 'BIGINT '  || "not_null_constraint"
-	when "data_type" = 'bit' then case when "character_maximum_length"=1 then '"' || "exa_column_name" || '" ' || 'boolean' else '"' || "exa_column_name" || '" ' || 'varchar('||case when nvl("character_maximum_length",2000000) > 2000000 then 2000000 else nvl("character_maximum_length",2000000) end || ') ' || "not_null_constraint" end
-	when "data_type" = 'bit varying' then case when "character_maximum_length"=1 then '"' || "exa_column_name" || '" ' || 'boolean' else '"' || "exa_column_name" || '" ' || 'varchar('||case when nvl("character_maximum_length",2000000) > 2000000 then 2000000 else nvl("character_maximum_length",2000000) end|| ') '|| "not_null_constraint" end 
-	when "data_type" = 'boolean' then '"' || "exa_column_name" || '" ' || 'bool ' || "not_null_constraint"
-	when "data_type" = 'box' then '"' || "exa_column_name" || '" ' || 'varchar(1000) ' || "not_null_constraint"
-	when "data_type" = 'bytea' then '"' || "exa_column_name" || '" ' || 'varchar(2000000) ' || "not_null_constraint"
-	when "data_type" = 'character' then '"' || "exa_column_name" || '" ' || 'char(' || case when nvl("character_maximum_length",2000) > 2000 then 2000 else nvl("character_maximum_length",2000) end || ') ' || "not_null_constraint" 
-	when "data_type" = 'character varying' then '"' || "exa_column_name" || '" ' || 'varchar(' || case when nvl("character_maximum_length",2000000) > 2000000 then 2000000 else nvl("character_maximum_length",2000000) end || ') ' || "not_null_constraint" 
-	when "data_type" = 'cidr' then '"' || "exa_column_name" || '" ' ||'varchar(100) ' || "not_null_constraint" 
-	when "data_type" = 'circle' then '"' || "exa_column_name" || '" ' || 'varchar(1000) ' || "not_null_constraint" 
-	when "data_type" = 'date' then '"' || "exa_column_name" || '" ' || 'date ' || "not_null_constraint" 
-	when "data_type" = 'double precision' then '"' || "exa_column_name" || '" ' || 'DOUBLE ' || "not_null_constraint" 
-	when "data_type" = 'inet' then '"' || "exa_column_name" || '" ' || 'varchar(100) ' || "not_null_constraint" 
-	when "data_type" = 'integer' then '"' || "exa_column_name" || '" ' || 'INTEGER ' || "not_null_constraint" 
-	when "data_type" = 'interval' then '"' || "exa_column_name" || '" ' || 'varchar(1000) ' || "not_null_constraint" 
-	when "data_type" = 'json' then '"' || "exa_column_name" || '" ' || 'varchar(2000000) ' || "not_null_constraint" 
-	when "data_type" = 'jsonb' then '"' || "exa_column_name" || '" ' || 'varchar(2000000) ' || "not_null_constraint" 
-	when "data_type" = 'line' then '"' || "exa_column_name" || '" ' || 'varchar(2000000) ' || "not_null_constraint" 
-	when "data_type" = 'lseg' then '"' || "exa_column_name" || '" ' || 'varchar(50000) ' || "not_null_constraint" 
-	when "data_type" = 'macaddr' then '"' || "exa_column_name" || '" ' || 'varchar(100) ' || "not_null_constraint" 
-	when "data_type" = 'money' then '"' || "exa_column_name" || '" ' || 'varchar(100) '|| "not_null_constraint"  --maybe decimal instead?
-	when "data_type" = 'name' then '"' || "exa_column_name" || '" ' || 'varchar(1000) ' || "not_null_constraint" 
-	when "data_type" = 'numeric' then case when "numeric_precision" is null then '"' || "exa_column_name" || '" ' || 'DOUBLE' else case when "numeric_precision" > 36 and "numeric_scale" > 36 then '"' || "exa_column_name" || '" ' || 'decimal (36,36) ' when "numeric_precision" > 36 and "numeric_scale" <= 36 then '"' || "exa_column_name" || '" ' || 'decimal(36, ' || "numeric_scale" || ')' else '"' || "exa_column_name" || '" ' || 'decimal(' || "numeric_precision" || ',' || "numeric_scale" || ')' end end || ' ' || "not_null_constraint" 
-	/* alternative to keep the values with a precision/scale > 36 as a double: 
-	when "data_type" = 'numeric' then case when "numeric_precision" is null or "numeric_precision" > 36 then 'DOUBLE' else 'decimal(' || "numeric_precision" || ',' || case when ("numeric_scale" > "numeric_precision") then "numeric_precision" else  case when "numeric_scale" < 0 then 0 else "numeric_scale" end end || ')' end || ' ' || "not_null_constraint" 
-	*/
-	when "data_type" = 'oid' then '"' || "exa_column_name" || '" ' || 'decimal(36) ' || "not_null_constraint" 
-	when "data_type" = 'path' then '"' || "exa_column_name" || '" ' || 'varchar(2000000) ' || "not_null_constraint" 
-	when "data_type" = 'pg_lsn' then '"' || "exa_column_name" || '" ' || 'varchar(2000000) ' || "not_null_constraint" 
-	when "data_type" = 'point' then '"' || "exa_column_name" || '" ' || 'varchar(2000) ' || "not_null_constraint" 
-	when "data_type" = 'polygon' then '"' || "exa_column_name" || '" ' || 'varchar(50000) ' || "not_null_constraint" 
-	when "data_type" = 'real' then '"' || "exa_column_name" || '" ' || 'DOUBLE ' || "not_null_constraint" 
-	when "data_type" = 'smallint' then '"' || "exa_column_name" || '" ' || 'SMALLINT ' || "not_null_constraint" 
-	when "data_type" = 'text' then '"' || "exa_column_name" || '" ' || 'varchar(2000000) ' || "not_null_constraint" 
-	when "data_type" = 'time with time zone' then '"' || "exa_column_name" || '" ' || 'TIMESTAMP WITH LOCAL TIME ZONE ' || "not_null_constraint" 
-	when "data_type" = 'time without time zone' then '"' || "exa_column_name" || '" ' || 'TIMESTAMP ' || "not_null_constraint" 
-	when "data_type" = 'timestamp with time zone' then '"' || "exa_column_name" || '" ' || 'TIMESTAMP WITH LOCAL TIME ZONE ' || "not_null_constraint" 
-	when "data_type" = 'timestamp without time zone' then '"' || "exa_column_name" || '" ' || 'TIMESTAMP ' || "not_null_constraint" 
-	when "data_type" = 'tsquery' then '"' || "exa_column_name" || '" ' || 'varchar(2000000) ' || "not_null_constraint" 
-	when "data_type" = 'tsvector' then '"' || "exa_column_name" || '" ' || 'varchar(2000000) ' || "not_null_constraint" 
-	when "data_type" = 'txid_snapshot' then '"' || "exa_column_name" || '" ' || 'varchar(2000000) ' || "not_null_constraint" 
-	when "data_type" = 'uuid' then '"' || "exa_column_name" || '" ' || 'varchar(128) ' || "not_null_constraint" 
-	when "data_type" = 'xml' then '"' || "exa_column_name" || '" ' || 'varchar(2000000) ' || "not_null_constraint" 
-	-- else '/*UNKNOWN_DATATYPE:' || "data_type" || '*/ varchar(2000000) ' || "not_null_constraint" 
-	end
-	order by "ordinal_position") || ');'
-        -- ### unknown types ###
-	|| group_concat (
-	       case 
-	       when "data_type" not in ('ARRAY', 'USER-DEFINED', 'bigint', 'bit', 'bit varying', 'boolean', 'box', 'bytea', 'character', 'character varying', 'cidr', 'circle', 'date', 'double precision', 'inet', 'integer', 'interval', 'json', 'jsonb', 'line', 'lseg', 'macaddr', 'money', 'name', 'numeric', 'oid', 'path', 'pg_lsn', 'point', 'polygon', 'real', 'smallint', 'text', 'time with time zone', 'time without time zone','timestamp with time zone', 'timestamp without time zone', 'tsquery', 'tsvector', 'txid_snapshot', 'uuid', 'xml')
-	       then '--UNKNOWN_DATATYPE: "'|| "exa_column_name" || '" ' || "data_type" || ''
-	       end
-	)|| ' 'as sql_text
-	from vv_pg_columns  group by "exa_table_catalog","exa_table_schema", "exa_table_name"
-	order by "exa_table_catalog","exa_table_schema","exa_table_name"
-)
-, vv_imports as (
-	select 'import into "' || "exa_table_schema" || '"."' || "exa_table_name" || '" from jdbc at ]]..CONNECTION_NAME..[[ statement ''select ' || group_concat( 
-	case 
-	when "data_type" = 'ARRAY' then "column_name" ||'::text'
-	when "data_type" = 'USER-DEFINED' then "column_name" ||'::text' 
-	when "data_type" = 'bit' then "column_name" ||'::text'
-	when "data_type" = 'bit varying' then "column_name" ||'::text'
-	when "data_type" = 'box' then "column_name" ||'::text'
-	when "data_type" = 'bytea' then "column_name" ||'::text'
-	when "data_type" = 'cidr' then "column_name" ||'::text' 
-	when "data_type" = 'circle' then "column_name" ||'::text' 
-	when "data_type" = 'inet' then "column_name" ||'::text'
-	when "data_type" = 'interval' then "column_name" ||'::text' 
-	when "data_type" = 'json' then "column_name" ||'::text'
-	when "data_type" = 'jsonb' then "column_name" ||'::text'
-	when "data_type" = 'line' then "column_name" ||'::text'
-	when "data_type" = 'lseg' then "column_name" ||'::text'
 	when "data_type" = 'name' then "column_name" ||'::text'
 	when "data_type" = 'macaddr' then "column_name" ||'::text'
 	when "data_type" = 'money' then "column_name" ||'::text'
@@ -257,7 +152,6 @@ WHERE c.SQL_TEXT NOT LIKE '%select  from%'
 ]],{})
 
 return(res)
-
 /
 
 -- Create a connection to the Postgres database
