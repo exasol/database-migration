@@ -11,6 +11,7 @@ CONNECTION_NAME              -- name of the database connection inside exasol ->
 ,IDENTIFIER_CASE_INSENSITIVE -- true if identifiers should be stored case-insensitiv (will be stored upper_case)
 ,SCHEMA_FILTER               -- filter for the schemas to generate and load (except information_schema and pg_catalog) -> '%' to load all
 ,TABLE_FILTER                -- filter for the tables to generate and load -> '%' to load all
+,DEST_SCHEMA                 -- schema to write to (tables with same name in source schemas will overwrite each other)
 ) RETURNS TABLE
 AS
 exa_upper_begin=''
@@ -19,9 +20,14 @@ if IDENTIFIER_CASE_INSENSITIVE == true then
 	exa_upper_begin='upper('
 	exa_upper_end=')'
 end
+if DEST_SCHEMA then
+	exa_table_schema_clause=DEST_SCHEMA
+else
+	exa_table_schema_clause=exa_upper_begin..[["table_schema"]]..exa_upper_end
+end
 res = query([[
 with vv_pg_columns as (
-	select ]]..exa_upper_begin..[["table_catalog"]]..exa_upper_end..[[ as "exa_table_catalog", ]]..exa_upper_begin..[["table_schema"]]..exa_upper_end..[[ as "exa_table_schema", ]]..exa_upper_begin..[["table_name"]]..exa_upper_end..[[ as "exa_table_name", ]]..exa_upper_begin..[["column_name"]]..exa_upper_end..[[ as "exa_column_name", pg.* from  
+	select ]]..exa_upper_begin..[["table_catalog"]]..exa_upper_end..[[ as "exa_table_catalog", ]]..exa_table_schema_clause..[[ as "exa_table_schema", ]]..exa_upper_begin..[["table_name"]]..exa_upper_end..[[ as "exa_table_name", ]]..exa_upper_begin..[["column_name"]]..exa_upper_end..[[ as "exa_column_name", pg.* from  
 		(import from jdbc at ]]..CONNECTION_NAME..[[ statement 
 			'select table_catalog, table_schema, table_name, column_name, ordinal_position, case when is_nullable=''NO'' then ''NOT NULL'' else ''NULL'' end as not_null_constraint, data_type, character_maximum_length, numeric_precision, numeric_scale, datetime_precision  
 				from information_schema.columns join information_schema.tables using (table_catalog, table_schema, table_name) 
