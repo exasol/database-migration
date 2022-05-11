@@ -35,7 +35,7 @@ with vv_exa_columns as (
                                 AND constraint_schema like '']]..SCHEMA_FILTER..[[''
                                 AND constraint_table like '']]..TABLE_FILTER..[[''
                                 )
-                                select table_schema, table_name, c.column_name, COLUMN_ORDINAL_POSITION ordinal_position, COLUMN_TYPE data_type, column_type, COLUMN_MAXSIZE character_maximum_length, COLUMN_NUM_PREC numeric_precision, COLUMN_NUM_SCALE numeric_scale, cc.constraint_name ,cc.constraint_type
+                                select table_schema, table_name, c.column_name, COLUMN_ORDINAL_POSITION ordinal_position,  COLUMN_TYPE || CASE WHEN COLUMN_IDENTITY IS NOT NULL THEN '' IDENTITY '' || COLUMN_IDENTITY END || CASE WHEN COLUMN_IS_NULLABLE = FALSE THEN '' NOT NULL'' END data_type, column_type, COLUMN_MAXSIZE character_maximum_length, COLUMN_NUM_PREC numeric_precision, COLUMN_NUM_SCALE numeric_scale, cc.constraint_name ,cc.constraint_type
                                         from EXA_ALL_COLUMNS c 
                                         join EXA_ALL_TABLES t on t.table_schema = c.column_schema and t.table_name = c.column_table
                                         left join constr_cols cc on cc.constraint_schema = c.column_schema and cc.constraint_table = c.column_table and cc.column_name = c.column_name
