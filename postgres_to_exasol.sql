@@ -162,5 +162,6 @@ execute script database_migration.POSTGRES_TO_EXASOL(
     'postgres_db', -- name of your database connection
     true,          -- case sensitivity handling for identifiers -> false: handle them case sensitiv / true: handle them case insensitiv --> recommended: true
     '%',           -- schema filter --> '%' to load all schemas except 'information_schema' and 'pg_catalog' / '%publ%' to load all schemas like '%pub%'
-    '%'            -- table filter --> '%' to load all tables 
+    '%',           -- table filter --> '%' to load all tables 
+    'MY_SCHEMA'    -- destination schema 
 );
