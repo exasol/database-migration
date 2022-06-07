@@ -11,7 +11,7 @@ CONNECTION_NAME 				-- name of the database connection inside exasol, e.g. sqlse
 ,DB2SCHEMA 						-- if true then SQL Server: database.schema.table => EXASOL: database.schema_table; if false then SQLSERVER: schema.table => EXASOL: schema.table
 ,DB_FILTER 						-- filter for SQLSERVER db, e.g. 'master', 'ma%', 'first_db, second_db', '%'
 ,SCHEMA_FILTER 		-- filter for the schemas to generate and load, e.g. 'my_schema', 'my%', 'schema1, schema2', '%'
-,TARGET_SCHEMA          -- EXASOL_Target Schema, set to empty string to use original values
+,TARGET_SCHEMA          -- Target_Schema on Exasol side, set to empty string to use values from souce database
 ,TABLE_FILTER 					-- filter for the tables to generate and load, e.g. 'my_table', 'my%', 'table1, table2', '%'
 ,IDENTIFIER_CASE_INSENSITIVE 	-- TRUE if identifiers should be put uppercase
 ) RETURNS TABLE
@@ -177,11 +177,10 @@ with sqlserv_base as(
 					when 257 then '"' || column_name || '"' ||' ' ||'VARCHAR('||case when COL_MAX_LENGTH < 1 then 2000000 else COL_MAX_LENGTH end || ')'        --accountnumber (AdventureWorks)
 					when 258 then '"' || column_name || '"' ||' ' ||'DECIMAL(1,0)'        --OnlineOrderFlag (AdventureWorks)
 					when 261 then '"' || column_name || '"' ||' ' ||'VARCHAR('||case when COL_MAX_LENGTH < 1 then 2000000 else COL_MAX_LENGTH end || ')'        --PurchaseOrderNumber (AdventureWorks)
-					--- Addon DAK
 					when 165 then '"' || column_name || '"' ||' ' ||'VARCHAR(2000000)' -- varbinary to varchar
 					when 173 then '"' || column_name || '"' ||' ' ||'HASHTYPE('||case when COL_MAX_LENGTH <= 1024 then CEILING(COL_MAX_LENGTH/8)*8 else NULL end ||' BYTE)'        -- BINARY 16 aka GUID
 					when 34 then '"' || column_name || '"' ||' ' ||'VARCHAR(2000000)' -- image to varchar - placeholder value, data will not be imported
-					when 98 then '"' || column_name || '"' ||' ' ||'VARCHAR(2000000)' -- sql_variant to varchar - will not be imported
+					when 98 then '"' || column_name || '"' ||' ' ||'VARCHAR(2000000)' -- sql_variant to varchar - placeholder value, will not be imported
 					-- else '-- UNSUPPORTED DATATYPE IN COLUMN ' || column_name || '  MSSQL TYPE INFO: USER_TYPE_ID ' || USER_TYPE_ID || ', SYSTEM_TYPE_ID ' ||  SYSTEM_TYPE_ID || ', NAME ' || TYPE_NAME || ', PRECISION ' || PRECISION || ', SCALE ' || SCALE
  				end
  				|| case when IS_IDENTITY='1' then ' IDENTITY' end
@@ -329,12 +328,12 @@ create or replace CONNECTION sqlserver_connection
 -- Finally start the import process
 execute script database_migration.SQLSERVER_TO_EXASOL(
     'sqlserver_connection', -- CONNECTION_NAME:             name of the database connection inside exasol -> e.g. sqlserver_db
-    true,                   -- DB2SCHEMA:                   if true then SQL Server: database.schema.table => EXASOL: database.schema_table; if false then SQLSERVER: schema.table => EXASOL: schema.table
+    false,                   -- DB2SCHEMA:                   if true then SQL Server: database.schema.table => EXASOL: database.schema_table; if false then SQLSERVER: schema.table => EXASOL: schema.table
     'AdventureWorks%',      -- DB_FILTER:                   filter for SQLSERVER db, e.g. 'master', 'ma%', 'first_db, second_db', '%'
     '%',                    -- SCHEMA_FILTER:               filter for the schemas to generate and load e.g. 'my_schema', 'my%', 'schema1, schema2', '%'
-		'TEST',          -- EXASOL_Target Schema, set to empty string to use original values
+    '',                     -- EXASOL_TARGET_SCHEMA:        set to empty string to use original values
     '%',                    -- TABLE_FILTER:                filter for the tables to generate and load e.g. 'my_table', 'my%', 'table1, table2', '%'
-    false                   -- IDENTIFIER_CASE_INSENSITIVE: set to TRUE if identifiers should be put uppercase
+    false                    -- IDENTIFIER_CASE_INSENSITIVE: set to TRUE if identifiers should be put uppercase
 );
 
 
