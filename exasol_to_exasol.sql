@@ -134,7 +134,7 @@ union all
 select 12, f.* from vv_imports f
 union all
 select 13, cast('-- ### VIEWS - Add FORCE as needed to avoid ordering dependencies ###' as varchar(2000000)) SQL_TEXT
-from dual where ]]..GENERATE_VIEWS..[[ 
+from dual where ]]..GENERATE_VIEWS..[[ -- the whitespace at the end is important and must not be removed
 union all
 select 14, g.* from vv_create_views g
 ) order by ord
