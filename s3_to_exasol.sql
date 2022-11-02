@@ -1,7 +1,7 @@
 CREATE SCHEMA IF NOT EXISTS DATABASE_MIGRATION;
 
 --/
-CREATE OR REPLACE PYTHON SCALAR SCRIPT DATABASE_MIGRATION."S3_GET_FILENAMES"
+CREATE OR REPLACE PYTHON3 SCALAR SCRIPT DATABASE_MIGRATION."S3_GET_FILENAMES"
 (
  "force_http" BOOLEAN,
  "connection_name" VARCHAR(1024),
@@ -16,8 +16,9 @@ import glob
 # the package boto needs to be installed via EXAoperation first
 sys.path.extend(glob.glob('/buckets/bucketfs1/python/*'))
 
-import boto
-import boto.s3.connection
+import boto3
+from botocore.client import Config
+
 
 #####################################################################################
 
@@ -32,42 +33,48 @@ def s3_connection_helper(connection_name):
 
     bucket_name  = address[bucket_pos:host_pos-1]
     host_address = address[host_pos:]
-
-    # use sigv4: modify the connection to use the credentials provided below
-    if not boto.config.get('s3', 'use-sigv4'):
-        boto.config.add_section('s3')
-        boto.config.set('s3', 'use-sigv4' , 'True')
-
+        
     if aws_key == '':
-        s3conn = boto.s3.connection.S3Connection(host=host_address)
+        s3conn = boto3.client('s3', config=Config(signature_version='s3v4'))
     else:
-        s3conn = boto.s3.connection.S3Connection(aws_access_key_id=aws_key, aws_secret_access_key=aws_secret, host=host_address)
+        s3conn = boto3.client('s3', 
+            aws_access_key_id = aws_key,
+            aws_secret_access_key = aws_secret,
+            config=Config(signature_version='s3v4'))
     return s3conn, bucket_name;
 
 #####################################################################################
 
 def run(ctx):
     s3conn, bucket_name = s3_connection_helper(ctx.connection_name)
-    bucket = s3conn.get_bucket(bucket_name,validate=False)
-    rs = bucket.list(prefix=ctx.folder_name)
-
-    # if folder_name is empty, put a star to make filter work
-    if not ctx.folder_name:
-        ctx.folder_name = '*'
-
-    for key in rs:
-      if not ctx.filter_string or fnmatch.fnmatch(key.name, ctx.folder_name + ctx.filter_string):
-        # http://stackoverflow.com/questions/9954521/s3-boto-list-keys-sometimes-returns-directory-key
-        if not key.name.endswith('/'):
-            if ctx.generate_urls:
-                # expires_in: defines the expiry of the url in seconds. It has only an effect if query_auth=True. With value True, a signature is created.
-                # query_auth: can also be set to False, if it is not required. Then, no signature is created.
-                protocol, filepath = key.generate_url(expires_in=3600,force_http=ctx.force_http,query_auth=True).split('://', 1)
-                s3_bucket, localpath = filepath.split('/', 1)
-            else:
-                localpath = key.name
-            
-            ctx.emit(bucket_name, localpath, boto.utils.parse_ts(key.last_modified))
+    continuation_token = None
+    while True:
+        if continuation_token:
+            listresponse = s3conn.list_objects_v2(Bucket=bucket_name, ContinuationToken=continuation_token)
+        else:
+            listresponse = s3conn.list_objects_v2(Bucket=bucket_name)
+        rs = listresponse['Contents']
+    
+        # if folder_name is empty, put a star to make filter work
+        if not ctx.folder_name:
+            ctx.folder_name = '*'
+    
+        for key in rs:
+          if not ctx.filter_string or fnmatch.fnmatch(key['Key'], ctx.folder_name + ctx.filter_string):
+            # http://stackoverflow.com/questions/9954521/s3-boto-list-keys-sometimes-returns-directory-key
+            if not key['Key'].endswith('/'):
+                if ctx.generate_urls:
+                    # expires_in: defines the expiry of the url in seconds. It has only an effect if query_auth=True. With value True, a signature is created.
+                    # query_auth: can also be set to False, if it is not required. Then, no signature is created.
+                    protocol, filepath = s3conn.generate_presigned_url('get_object',  Params={'Bucket': bucket_name, 'Key': key['Key']}).split('://', 1)
+                    s3_bucket, localpath = filepath.split('/', 1)
+                else:
+                    localpath = key['Key']
+                
+                ctx.emit(bucket_name, localpath, key['LastModified'].replace(tzinfo=None))
+        continuation_token = listresponse.get('NextContinuationToken', None)
+        if not continuation_token:
+            break
 /
 
 
