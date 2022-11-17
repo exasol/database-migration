@@ -101,7 +101,7 @@ return res
 /
 
 -- !!! Important: Please upload the DB2 JDBC-Driver via EXAOperation (Webinterface) !!!
--- !!! you can find a small howto here: https://www.exasol.com/support/browse/SOL-213 !!!
+-- !!! you can find a small howto here: https://docs.exasol.com/loading_data/connect_databases/db2.htm !!!
 
 -- Create a connection to the DB2 database
 create or replace CONNECTION db2_connection 

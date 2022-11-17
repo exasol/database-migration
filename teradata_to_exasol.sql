@@ -540,7 +540,7 @@ return(res)
 ;
 
 -- !!! Important: Please upload the Teradata JDBC-Driver via EXAOperation (Webinterface) !!!
--- !!! you can see a similar example for Oracle here: https://www.exasol.com/support/browse/SOL-179 !!!
+-- !!! you can find an example here: https://docs.exasol.com/db/latest/loading_data/connect_sources/teradata.htm !!!
 
 -- Create a connection to the Teradata database
 create or replace connection teradata_db to 'jdbc:teradata://192.168.56.103/CHARSET=UTF8' user 'dbc' identified by 'dbc';
