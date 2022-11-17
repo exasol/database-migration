@@ -60,7 +60,7 @@ SKIP = 1 -- skip the header
 ;
 ```
 
-- Import from **HDFS**: See [SOL-322](https://www.exasol.com/support/browse/SOL-322)
+- Import from **HDFS**: See [Hadoop ETL UDFs](https://github.com/EXASOL/hadoop-etl-udfs/blob/main/README.md)
 
 - Import from **S3**: See [Exasol-1774](https://www.exasol.com/support/browse/Exasol-1774) for single file import, for importing multiple files scroll down to [S3](#s3)
 

@@ -149,7 +149,7 @@ return(res)
 /
 
 -- !!! Important: Please upload the Vertica JDBC-Driver via EXAOperation (Webinterface) !!!
--- !!! you can see a similar example for Oracle here: https://www.exasol.com/support/browse/SOL-179 !!!
+-- !!! you can see a similar example for Oracle here: https://docs.exasol.com/db/latest/loading_data/connect_sources/oracle.htm !!!
 
 -- Create a connection to the Vertica database
 create connection VERTICA_CONNECTION to 'jdbc:vertica://VerticaHostOrIP:portNumber/databaseName' user 'username' identified by 'exasolRocks!';
