@@ -62,15 +62,15 @@ SKIP = 1 -- skip the header
 
 - Import from **HDFS**: See [Hadoop ETL UDFs](https://github.com/EXASOL/hadoop-etl-udfs/blob/main/README.md)
 
-- Import from **S3**: See [Exasol-1774](https://www.exasol.com/support/browse/Exasol-1774) for single file import, for importing multiple files scroll down to [S3](#s3)
+- Import from **S3**: See [Load Data from Amazon S3 Using IMPORT](https://docs.exasol.com/db/latest/loading_data/load_data_amazon_s3.htm) for single file import, for importing multiple files scroll down to [S3](#s3)
 
 For more details on `IMPORT` see paragraph 2.2.2 in the User Manual. For further help on typical CSV-formatting issues, see
-* [How to load bad CSV files](https://www.exasol.com/support/browse/SOL-578)
-* [Proper csv export from MySQL](https://www.exasol.com/support/browse/SOL-428)
-* [Proper csv export from IBM DB2](https://www.exasol.com/support/browse/SOL-430)
-* [Proper csv export from Oracle](https://www.exasol.com/support/browse/SOL-440)
-* [Proper csv export from PostgreSQL](https://www.exasol.com/support/browse/SOL-442)
-* [Proper csv export from Microsoft SQL Server](https://www.exasol.com/support/browse/SOL-448)
+* [How to load bad CSV files](https://exasol.my.site.com/s/article/How-to-load-bad-CSV-files?language=en_US)
+* [Proper csv export from MySQL](https://exasol.my.site.com/s/article/Proper-csv-export-from-MySQL?language=en_US)
+* [Proper csv export from IBM DB2](https://exasol.my.site.com/s/article/Proper-csv-export-from-IBM-DB2?language=en_US)
+* [Proper csv export from Oracle](https://exasol.my.site.com/s/article/Proper-csv-export-from-Oracle?language=en_US)
+* [Proper csv export from PostgreSQL](https://exasol.my.site.com/s/article/Proper-csv-export-from-PostgreSQL?language=en_US)
+* [Proper csv export from Microsoft SQL Server](https://exasol.my.site.com/s/article/Proper-csv-export-from-Microsoft-SQL-Server?language=en_US)
 
 ### DB2
 See script [db2_to_exasol.sql](db2_to_exasol.sql)
@@ -177,7 +177,7 @@ For the actual data-migration, see script [netezza_to_exasol.sql](netezza_to_exa
 
 ### Oracle
 When importing from Oracle, you have two options. You could import via JDBC or the  native Oracle interface (OCI).
-- OCI: Log in to EXAoperation. Go to *Configuration -> Software*. Download the instant client from Oracle and select it at `Software Update File`. Click `Submit` to upload.
+- OCI: Log in to EXAoperation. Go to *Configuration -> Software*. Download the instant client from Oracle and select it at `Software Update File`. Click `Submit` to upload, see [Oracle OCI](https://docs.exasol.com/db/latest/loading_data/connect_sources/oracle.htm#OracleOCI).
 
   Create a connection:
   ``` SQL
@@ -187,7 +187,7 @@ When importing from Oracle, you have two options. You could import via JDBC or t
     IDENTIFIED BY '<password>';
   ```
 
-- JDBC: If you are using the community edition, you need to upload a JDBC driver in EXAoperation before being able to establish a connection, see [SOL-179](https://www.exasol.com/support/browse/SOL-179).
+- JDBC: If you are using the community edition, you need to upload a JDBC driver in EXAoperation before being able to establish a connection, see [Oracle JDBC](https://docs.exasol.com/db/latest/loading_data/connect_sources/oracle.htm#OracleJDBC).
 
   Create a connection:
   ```SQL
