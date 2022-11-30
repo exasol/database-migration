@@ -3,7 +3,6 @@ CREATE SCHEMA IF NOT EXISTS DATABASE_MIGRATION;
 --/
 CREATE OR REPLACE PYTHON3 SCALAR SCRIPT DATABASE_MIGRATION."S3_GET_FILENAMES"
 (
- "force_http" BOOLEAN,
  "connection_name" VARCHAR(1024),
  "folder_name" VARCHAR(1024) UTF8,
  "generate_urls" BOOLEAN,
@@ -79,7 +78,6 @@ def run(ctx):
 
 
 --select DATABASE_MIGRATION.s3_get_filenames(
---  true			    					-- force_http
 --, 'S3_IMPORT_BOTO'						-- connection_name
 --, '<some folder>/<some_date>/dump-' 	-- folder_name
 --, false			    					-- generate_urls
@@ -194,7 +192,6 @@ end
 
 	-- additional parameters that won't need to be modified normally
 	generate_urls = false
-	force_http    = false
 	script_schema = quote(exa.meta.script_schema)
 
 	-- quote everything to handle case sensitivity
@@ -244,11 +241,11 @@ end
 	-- for all existing files, update FILE_LAST_MODIFIED column and status column
 	query([[
 		merge into ::ls.::lt as l using 
-		( select ::ss.s3_get_filenames(:fh,:c,:fn, :gu, :fi) order by 1) as p
+		( select ::ss.s3_get_filenames(:c,:fn, :gu, :fi) order by 1) as p
 		on p.url = l.file_name and p.bucket_name = l.bucket_name
 		WHEN MATCHED THEN UPDATE SET l.status = :wu, l.FILE_LAST_MODIFIED = p.FILE_LAST_MODIFIED where p.FILE_LAST_MODIFIED > l.FILE_LAST_MODIFIED or status not = :sd
 		WHEN NOT MATCHED THEN INSERT (bucket_name, file_name, FILE_LAST_MODIFIED, status) VALUES (p.bucket_name, p.url, p.FILE_LAST_MODIFIED, :wi);
-	]], {ss=script_schema, fh=force_http, c=connection_name, fn=folder_name, fi=filter_string, gu=generate_urls, ls=logging_schema, lt=logging_table, sd=status_done, wu=waiting_for_update, wi=waiting_for_insertion})
+	]], {ss=script_schema, c=connection_name, fn=folder_name, fi=filter_string, gu=generate_urls, ls=logging_schema, lt=logging_table, sd=status_done, wu=waiting_for_update, wi=waiting_for_insertion})
 
 
 	-- get the bucket name and the file names of the files that should be modified
