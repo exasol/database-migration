@@ -170,10 +170,18 @@ info_tbl = wrapper:query_values([[/*snapshot execution*/
     src_cols (src_tbl_name, src_col_name) as 
     (]]..src_cols_stmt..[[),
     cols as (
-        select t.column_schema, t.column_table, t.column_name, t.column_ordinal_position
+        select t.column_schema, t.column_table, t.column_name, t.column_ordinal_position, 
+		CASE WHEN t.COLUMN_TYPE like 'HASHTYPE%' 
+		     THEN 'RAWTOHEX("'|| t.column_name||'")'
+		     ELSE '"' || t.COLUMN_NAME || '"'
+		END as column_name_src
         from EXA_ALL_COLUMNS t
+				left join src_cols s
+				on s.src_tbl_name = t.column_table
+        		and s.src_col_name = t.column_name
         where t.column_schema = :tgt_schema
         and t.column_table = :tgt_table
+		and (not ]]..tostring(cross_check_column_list)..[[ or s.src_col_name is not null)
         ),
     no_key_cols as (
         select cols.column_schema, cols.column_table, cols.column_name
@@ -199,6 +207,7 @@ info_tbl = wrapper:query_values([[/*snapshot execution*/
                 then NULL
                 else group_concat(distinct 'a.' || '"' || constr.column_name || '"' || '=b.' || '"' || constr.column_name || '"' SEPARATOR ' and ') end key_columns,
             group_concat(distinct '"' || cols.column_name || '"' order by    column_ordinal_position    ) all_columns,
+			group_concat(distinct cols.column_name_src order by	column_ordinal_position	) all_src_columns,
             group_concat(distinct 'a.' || '"' || no_key_cols.column_name || '"' || '=b.' || '"' || no_key_cols.column_name || '"') no_key_columns
         from cols
             left join constr on
@@ -212,6 +221,7 @@ select
     '"' || all_tables.table_schema || '"' table_schema,
     '"' || all_tables.table_name || '"' table_name,
     all_columns,
+    all_src_columns,
     key_columns,
     no_key_columns,
     case when length(delta_cols.column_name) > 0 then 
@@ -229,7 +239,7 @@ order by 1,2 asc;
 ]])
 
 return info_tbl
--- table_schema, table_name, all_columns(unified), key_columns, key_columns, no_key_columns, delta_name, delta_type
+-- table_schema, table_name, all_columns(unified), all_src_columns, key_columns, key_columns, no_key_columns, delta_name, delta_type
 
 end
 -----------------------------------------------------------------------------------------
@@ -258,7 +268,7 @@ end
 -- timestamps and dates have a different syntax in each database system.
 -- therefore, for each source database different code is generated
 function get_max_stmt_for_src(value, value_type, conn_db)
-    value_converted = value
+    value_converted = [['']]..value..[['']]
     if (value_type == 'TIMESTAMP' or value_type == 'DATE') then
         if (conn_db == 'MYSQL') then
             value_converted = [[STR_TO_DATE('']]..value..[['', ''%Y-%m-%d %H:%i:%s.%f'')]]
@@ -289,6 +299,9 @@ conn_name             = quote(conn_name)
 staging_schema         = quote(staging_schema)
 conn_db                = string.upper(conn_db)
 
+-- a parameter to enforce that only columns existing both in source and target are loaded
+-- if you know that table definitions are the same, you can keep it as false
+cross_check_column_list = false
 
 local result_table = {}
 
@@ -334,7 +347,7 @@ info = get_delta_load_information(wrapper, conn_type, conn_db, conn_name, src_sc
 stmts_tbl = {}
 
 -- only one row as result but for loop because of the way the query wrapper works
-for tbl_schema, tbl_name, all_columns, key_columns_stmt, no_key_columns_stmt, delta_name, delta_type in info do
+for tbl_schema, tbl_name, all_columns, all_src_columns, key_columns_stmt, no_key_columns_stmt, delta_name, delta_type in info do
 
 src_schema = quote(src_schema)
 tgt_schema = quote(tgt_schema)
@@ -351,7 +364,7 @@ tgt_table  = quote(tgt_table)
     create_staging_stmt      = [[create or replace table ]]..staging_schema..[[.]]..tgt_table..[[ like ]]..tgt_schema..[[.]]..tgt_table..[[;]]
     drop_staging_stmt        = [[drop table ]]..staging_schema..[[.]]..tgt_table..[[;]]
 
-    select_star_src_stmt     = [[select ]]..changeQuotesForDb(conn_db, all_columns) ..[[ from ]]..quoteForDb(conn_db,src_schema)..[[.]]..quoteForDb(conn_db, src_table)
+    select_star_src_stmt     = [[select ]]..changeQuotesForDb(conn_db, all_src_columns) ..[[ from ]]..quoteForDb(conn_db,src_schema)..[[.]]..quoteForDb(conn_db, src_table)
     if (conn_db == 'POSTGRES') then
         -- PostgreSQL converts all table column names into lowercase, unless quoted. Thus, the select to be sent to POSTGRES needs to be prepared accordingly.
         select_star_src_stmt=string.lower(select_star_src_stmt)
@@ -388,7 +401,7 @@ tgt_table  = quote(tgt_table)
                  -- we have a delta column and a primary key, and a max_delta
                  -- --> load into staging table with where clause & merge
                  max_delta_src_format  = get_max_stmt_for_src(max_delta, delta_type, conn_db)
-                 select_delta_src_stmt = [[select ]].. changeQuotesForDb(conn_db, all_columns) ..[[ from ]]..quoteForDb(conn_db,src_schema)..[[.]]..quoteForDb(conn_db,src_table)..[[ where ]]..quoteForDb(conn_db,delta_name)..[[ >= '']]..max_delta_src_format .. [['']]
+                 select_delta_src_stmt = [[select ]].. changeQuotesForDb(conn_db, all_src_columns) ..[[ from ]]..quoteForDb(conn_db,src_schema)..[[.]]..quoteForDb(conn_db,src_table)..[[ where ]]..quoteForDb(conn_db,delta_name)..[[ >= ]]..max_delta_src_format
                  if (conn_db == 'POSTGRES') then
                      -- PostgreSQL converts all table column names into lowercase, unless quoted. Thus, the select to be sent to POSTGRES needs to be prepared accordingly.
                      select_delta_src_stmt = string.lower(select_delta_src_stmt)
