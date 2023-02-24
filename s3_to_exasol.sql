@@ -9,11 +9,7 @@ CREATE OR REPLACE PYTHON3 SCALAR SCRIPT DATABASE_MIGRATION."S3_GET_FILENAMES"
  "filter_string" VARCHAR(1024)
 ) 
 EMITS ("BUCKET_NAME" VARCHAR(1024) UTF8, "URL" VARCHAR(4096) UTF8, "FILE_LAST_MODIFIED" TIMESTAMP) AS
-import sys
 import fnmatch
-import glob
-# the package boto needs to be installed via EXAoperation first
-sys.path.extend(glob.glob('/buckets/bucketfs1/python/*'))
 
 import boto3
 from botocore.client import Config
