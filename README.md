@@ -18,7 +18,7 @@
     * [Redshift](#redshift)
     * [S3](#s3)
     * [SAP Hana](#sap-hana)
-    * [Snowflake] (#snowflake)
+    * [Snowflake](#snowflake)
     * [SQL Server](#sql-server)
     * [Teradata](#teradata)
     * [Vectorwise](#vectorwise)
@@ -301,7 +301,7 @@ CREATE OR REPLACE CONNECTION SNOWFLAKE_CONNECTION TO
   USER '<sfuser>' IDENTIFIED BY '<sfpwd>';
 ```
 
-You need to have CREATE CONNECTION privilege granted to the user used to do this.
+You need to have CREATE CONNECTION privilege granted to the user used to do this. Replace the placeholders including <> with your account information.
 
 Now, test the connectivity with a simple query like:
 
