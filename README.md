@@ -14,10 +14,11 @@
     * [MySQL](#mysql)
     * [Netezza](#netezza)
     * [Oracle](#oracle)
-    * [PostgreSQL](#postgres)
+    * [PostgreSQL](#postgressql)
     * [Redshift](#redshift)
     * [S3](#s3)
     * [SAP Hana](#sap-hana)
+    * [Snowflake] (#snowflake)
     * [SQL Server](#sql-server)
     * [Teradata](#teradata)
     * [Vectorwise](#vectorwise)
@@ -272,6 +273,48 @@ SELECT *
            );
 ```
 For the actual data-migration, see script [sap_hana_to_exasol.sql](sap_hana_to_exasol.sql)
+
+
+
+### Snowflake
+The first thing you need to do is add the Snowflake JDBC driver to Exasol. The JDBC driver can be downloaded from the [Snowflake website](https://docs.snowflake.com/developer-guide/jdbc/jdbc-download).
+
+In order to add the driver to Exasol log into your EXAOperations, select the 'Software', then 'JDBC Drivers'-Tab.
+
+Click Add then specify the following details:
+
+* Driver Name: `Snowflake`
+* Main Class: `net.snowflake.client.jdbc.SnowflakeDriver`
+* Prefix: `jdbc:snowflake:`
+* Disable Security Manager: `Check this box`
+
+After clicking Apply, you will see the newly added driver's details on the top section of the driver list. Select the Snowflake driver by locating the corresponding jar and upload it. When done the .jar file should be listed in the files column for the Snowflake driver.
+
+You can find a detailed information about configuring the Snowflake driver at the following link:
+https://docs.snowflake.com/en/developer-guide/jdbc/jdbc-configure
+
+To test the connectivity of Exasol to Snowflake create the following connection in your SQL-client:
+
+```SQL
+CREATE OR REPLACE CONNECTION SNOWFLAKE_CONNECTION TO
+  'jdbc:snowflake://<myorganization>-<myaccount>.snowflakecomputing.com/?warehouse=<my_compute_wh>&role=<my_role>&CLIENT_SESSION_KEEP_ALIVE=true'
+  USER '<sfuser>' IDENTIFIED BY '<sfpwd>';
+```
+
+You need to have CREATE CONNECTION privilege granted to the user used to do this.
+
+Now, test the connectivity with a simple query like:
+
+```SQL
+
+SELECT * FROM 
+(
+IMPORT FROM JDBC AT SNOWFLAKE_CONNECTION
+STATEMENT 'select ''Connection works!'' as connection_status'
+);
+```
+For the actual data-migration, see script [snowflake_to_exasol.sql](snowflake_to_exasol.sql)
+
 
 ### SQL Server
 See script [sqlserver_to_exasol.sql](sqlserver_to_exasol.sql)
