@@ -11,10 +11,11 @@
     * [DB2](#db2)
     * [Exasol](#exasol)
     * [Google BigQuery](#google-bigquery)
+    * [MariaDB](#mariadb)
     * [MySQL](#mysql)
     * [Netezza](#netezza)
     * [Oracle](#oracle)
-    * [PostgreSQL](#postgressql)
+    * [PostgreSQL](#postgresql)
     * [Redshift](#redshift)
     * [S3](#s3)
     * [SAP Hana](#sap-hana)
@@ -110,6 +111,62 @@ FROM   (
 For the actual data-migration, see script [bigquery_to_exasol.sql](bigquery_to_exasol.sql)
 
 Note: Due to the lack of an alternative datatype, the following Google BigQuery datatypes; `DATE`,`DATETIME`,`TIMESTAMP` and `ARRAY` are stored as VARCHAR. 
+
+
+### MariaDB
+
+
+**Download Driver**
+
+Download the JDBC driver for MariaDB from the [MariaDB connectors page](https://mariadb.com/downloads/connectors/connectors-data-access/java8-connector/). In the Product dropdown menu select **Java 8+connector**, in the Version dropdown menu select **the newest version**, in the OS dropdown menu select **Platform Independent**.
+
+
+**Configure the Driver in EXAoperation**
+
+Do the following to configure the driver in EXAoperation:
+1.	Log in to EXAoperation user interface as an Administrator user.
+2.	Select **Configuration > Software** and click the **JDBC Drivers** tab.
+3.	Click **Add** to add the JDBC driver details.
+4.	Enter the following details for the JDBC properties:
+* **Driver Name:** `MariaDB`
+* **Main Class:** `org.mariadb.jdbc.Driver`
+* **Prefix:** `jdbc:mariadb:`
+* **Disable Security Manager:** `Check the box to disable the security manager.` This allows the JDBC Driver to access certificate and additional information.
+* **Comment:** `This is an optional field.`
+
+5.	Click **Add** to save the settings.
+6.	Select the radio button next to the driver from list of JDBC driver.
+7.	Click **Choose File** to locate the downloaded driver and click **Upload** to upload the JDBC driver.
+
+You can find a detailed information about the MariaDB driver at the following link: https://mariadb.com/kb/en/about-mariadb-connector-j/
+
+
+**Test Connectivity**
+
+
+To test the connectivity of Exasol to MariaDB create the following connection in your SQL client:
+
+```SQL
+CREATE OR REPLACE CONNECTION JDBC_MARIADB
+    TO 'jdbc:mariadb://192.168.56.103:3306/my_database'
+    USER 'user_name'
+    IDENTIFIED BY 'my_password';
+```
+
+You need to have CREATE CONNECTION privilege granted to the user used to do this. The connection string and authentication details in the example must be replaced with your own values.
+
+Run the following statement to test the connection:
+
+```SQL
+select * from 
+(
+import from JDBC at JDBC_MARIADB
+statement 'select ''Connection works'' from dual'
+);
+```
+
+For the actual data-migration, see script [mariadb_to_exasol.sql](mariadb_to_exasol.sql)
+
 
 ### MySQL
 
