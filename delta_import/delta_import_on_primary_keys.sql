@@ -103,6 +103,14 @@ function get_src_cols_stmt (conn_type, conn_db, conn_name, src_schema, src_table
         WHERE TABLE_SCHEMA like '']]..src_schema..[[''
         AND TABLE_NAME like '']]..src_table..[[''
         ']]
+    
+    elseif (conn_db == 'REDSHIFT') then
+        src_system_stmt = [['
+        SELECT table_name, column_name
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA like '']]..src_schema..[[''
+        AND TABLE_NAME like '']]..src_table..[[''
+        ']]
 
     elseif (conn_db == 'ORACLE') then
         src_system_stmt = [['
@@ -275,6 +283,9 @@ function get_max_stmt_for_src(value, value_type, conn_db)
 
         elseif  (conn_db == 'SQLSERVER') then
             value_converted = [[CONVERT(datetime,'']]..string.sub(value, 1, #value-3)..[['', 121)]]
+            
+        elseif  (conn_db == 'REDSHIFT') then
+            value_converted = [[to_timestamp('']]..value..[['', ''YYYY-MM-DD HH24:MI:SS.FF6'')]]
 
         elseif  (conn_db == 'DB2') then
             value_converted = [[to_date('']]..value..[['','YYYY-MM-DD HH24.MI.SS.FF6')]]
