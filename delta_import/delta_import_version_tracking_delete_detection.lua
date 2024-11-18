@@ -344,41 +344,7 @@ for i=1, #queryRepo do
         EvalQuery(suc, mergeData.error_message)
         insertedRows=mergeData.rows_inserted
         updatedRows=mergeData.rows_updated
-        
-        /*
-        local logQuery_pk = [[INSERT INTO SYS_DWH.SYS_DWH_ETL_LOGGING 
-                                    (TIME_STAMP, SCHEMA_NAME, TABLE_NAME, ROWS_INSERTED, ROWS_UPDATED, ROWS_DELETED, LAST_VERSION, ERROR_MESSAGES) 
-                                    VALUES (current_timestamp(), 's2', 's2', 0, 0, 0, 0, ']]..queryPK[1][3]..[[')]]
             
-        -- Execute the logging query for each chunk
-        suc_log_pk, result_log_pk = pquery(logQuery_pk)
-    
-        -- Check for errors after each chunk insertion
-        EvalQuery(suc_log_pk, result_log_pk.error_message)
-        */
-        
-        /*
-        local logQuery_pk = [[INSERT INTO SYS_DWH.SYS_DWH_ETL_LOGGING 
-                                    (TIME_STAMP, SCHEMA_NAME, TABLE_NAME, ROWS_INSERTED, ROWS_UPDATED, ROWS_DELETED, LAST_VERSION, ERROR_MESSAGES) 
-                                    VALUES (current_timestamp(), 's2', 's2', 0, 0, 0, 0, ']]..convertedColTypesSQLServer..[[')]]
-                
-        -- Execute the logging query for each chunk
-        suc_log_pk, result_log_pk = pquery(logQuery_pk)
-    
-        -- Check for errors after each chunk insertion
-        EvalQuery(suc_log_pk, result_log_pk.error_message)
-        
-                local logQuery_pk = [[INSERT INTO SYS_DWH.SYS_DWH_ETL_LOGGING 
-                                    (TIME_STAMP, SCHEMA_NAME, TABLE_NAME, ROWS_INSERTED, ROWS_UPDATED, ROWS_DELETED, LAST_VERSION, ERROR_MESSAGES) 
-                                    VALUES (current_timestamp(), 's2', 's2', 0, 0, 0, 0, ']]..convertedColTypesExasol..[[')]]
-                
-        -- Execute the logging query for each chunk
-        suc_log_pk, result_log_pk = pquery(logQuery_pk)
-    
-        -- Check for errors after each chunk insertion
-        EvalQuery(suc_log_pk, result_log_pk.error_message)
-        */
-        
         -- NEW: Deleted rows
         -- detect primary keys
         -- Split primary keys into a table
@@ -392,11 +358,6 @@ for i=1, #queryRepo do
         end
         local primaryKeysList = table.concat(primaryKeys, ", ")
         
-        /*
-        -- Write the primaryKeys object (list of primary keys) to the ETL logging table
-        local suc_log, result_log = pquery([[INSERT INTO SYS_DWH.SYS_DWH_ETL_LOGGING (TIME_STAMP, SCHEMA_NAME, TABLE_NAME, ROWS_INSERTED, ROWS_UPDATED, ROWS_DELETED, LAST_VERSION, ERROR_MESSAGES) 
-                                               VALUES (current_timestamp(), ']]..source_schema..[[', ']]..sourceTable..[[', 0, 0, 0, 0, 'Primary Keys: ]]..primaryKeysList..[[')]])
-        */
         
         -- Create a table to store added columns to avoid duplicates
         local addedColumns = {}
@@ -454,33 +415,6 @@ for i=1, #queryRepo do
         output("[Primary Key Columns in SQL Server] " .. convertedPKSQLServer)
         output("[Primary Key Columns in Exasol] " .. convertedPKExasol)
 
-
-        /*
-        -- Debug: Output the primary key columns for verification
-        convertedPKExasol = convertedPKExasol:gsub("'", "''")
-        local logQuery_pk = [[INSERT INTO SYS_DWH.SYS_DWH_ETL_LOGGING 
-                                    (TIME_STAMP, SCHEMA_NAME, TABLE_NAME, ROWS_INSERTED, ROWS_UPDATED, ROWS_DELETED, LAST_VERSION, ERROR_MESSAGES) 
-                                    VALUES (current_timestamp(), 's2', 's2', 0, 0, 0, 0, ']]..convertedPKExasol..[[')]]
-                
-        -- Execute the logging query for each chunk
-        suc_log_pk, result_log_pk = pquery(logQuery_pk)
-    
-        -- Check for errors after each chunk insertion
-        EvalQuery(suc_log_pk, result_log_pk.error_message)      
-        
-        
-        -- Assuming queryPK[1][1] contains the primary key columns like 'GUID, ORGANIZATIONALUNIT'
-        
-        local logQuery_pk = [[INSERT INTO SYS_DWH.SYS_DWH_ETL_LOGGING 
-                                    (TIME_STAMP, SCHEMA_NAME, TABLE_NAME, ROWS_INSERTED, ROWS_UPDATED, ROWS_DELETED, LAST_VERSION, ERROR_MESSAGES) 
-                                    VALUES (current_timestamp(), 's2', 's2', 0, 0, 0, 0, ']]..convertedPKSQLServer..[[')]]
-                
-        -- Execute the logging query for each chunk
-        suc_log_pk, result_log_pk = pquery(logQuery_pk)
-    
-        -- Check for errors after each chunk insertion
-        EvalQuery(suc_log_pk, result_log_pk.error_message)
-        */
         
         local mergeData_delete_query = [[merge into ]]..quote(target_schema)..'.'..quote(targetTable)..[[ tgt using (select ]]..convertedPKExasol..
                                             [[ , SYS_CHANGE_OPERATION from (import from JDBC at ]]..exa_connection..[[ statement 'select ]]..convertedPKSQLServer..[[, T.SYS_CHANGE_OPERATION from CHANGETABLE(CHANGES ]]..source_schema..'.'..sourceTable..[[, ]]..lastVersion..[[) AS T WHERE T.SYS_CHANGE_OPERATION = ''D'' ')) src ON (]]..queryPK[1][3]..[[ AND tgt.SYS_DWH_CHANGE_TYPE != 'D') -- Check if record is already marked as deleted
