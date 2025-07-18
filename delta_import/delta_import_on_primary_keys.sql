@@ -12,7 +12,7 @@ as
 
 
 -----------------------------------------------------------------------------------------
--- use a function here so that the query_wrapper does proper error logging and the user also gets feedback if he calls the script ineractively
+-- use a function here so that the query_wrapper does proper error logging and the user also gets feedback if he calls the script interactively
 function finish_with_error(error_text)
         wrapper:log('ERROR', error_text, 1)
         -- uncomment this in case you want error messages instead of the log output as result
@@ -260,8 +260,10 @@ function get_max_delta(wrapper, schema, tbl, col, col_type)
 
     max_query = [[max(::max_col)]]
 
-    if(col_type == 'TIMESTAMP' or col_type == 'DATE') then
-        max_query = [[to_char(max(::max_col), 'YYYY-MM-DD HH24:MI:SS.FF6')]]
+    if(col_type == 'DATE') then
+        max_query = [[to_char(max(::max_col), 'YYYY-MM-DD HH24:MI:SS')]]
+    elseif (string.sub(col_type,1,9) == 'TIMESTAMP') then
+        max_query = [[to_char(max(::max_col), 'YYYY-MM-DD HH24:MI:SS.FF9')]]
     end
 
     suc, max_value = wrapper:query([[select ]]..max_query..[[ from ::max_schema.::max_tbl;]])    
@@ -277,7 +279,7 @@ end
 -- therefore, for each source database different code is generated
 function get_max_stmt_for_src(value, value_type, conn_db)
     value_converted = [['']]..value..[['']]
-    if (value_type == 'TIMESTAMP' or value_type == 'DATE') then
+    if (string.sub(value_type,1,9) == 'TIMESTAMP' or value_type == 'DATE') then
         if (conn_db == 'MYSQL') then
             value_converted = [[STR_TO_DATE('']]..value..[['', ''%Y-%m-%d %H:%i:%s.%f'')]]
 
@@ -290,13 +292,17 @@ function get_max_stmt_for_src(value, value_type, conn_db)
         elseif  (conn_db == 'DB2') then
             value_converted = [[to_date('']]..value..[['','YYYY-MM-DD HH24.MI.SS.FF6')]]
 
-        elseif  (conn_db == 'ORACLE' or conn_db == 'POSTGRES') then
-            value_converted = [[to_timestamp('']]..value..[['', ''YYYY-MM-DD HH24:MI:SS.FF6'')]]
-            -- alternatively, use the line underneath
-            --value_converted = [[to_date(('']]..value..[['', ''YYYY-MM-DD HH24:MI:SS'')]]
+        elseif  (conn_db == 'POSTGRES') then
+            value_converted = [[to_date('']]..value..[['', ''YYYY-MM-DD HH24:MI:SS'')]]
+			
+        elseif  (conn_db == 'ORACLE' and value_type == 'DATE') then
+            value_converted = [[to_date('']]..value..[['', ''YYYY-MM-DD HH24:MI:SS'')]]
+			
+        elseif  (conn_db == 'ORACLE' and string.sub(value_type,1,9) == 'TIMESTAMP') then
+            value_converted = [[to_timestamp('']]..value..[['', ''YYYY-MM-DD HH24:MI:SS.FF9'')]]
 
         else -- case: conn_db == 'EXASOL'
-            value_converted = [[to_timestamp('']]..value..[['', ''YYYY-MM-DD HH24:MI:SS.FF6'')]]
+            value_converted = [[to_timestamp('']]..value..[['', ''YYYY-MM-DD HH24:MI:SS.FF9'')]]
         end
 
     end
