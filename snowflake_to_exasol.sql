@@ -14,6 +14,7 @@ CONNECTION_NAME 	-- name of the database connection inside exasol, e.g. snowflak
 ,TARGET_SCHEMA          -- target schema on Exasol side, set to empty string to use values from souce database
 ,TABLE_FILTER 		-- filter for the tables to generate and load, e.g. 'my_table', 'my%', 'table1, table2', '%'
 ,IDENTIFIER_CASE_INSENSITIVE 	-- TRUE if identifiers should be put uppercase
+,EXECUTION_MODE 	-- 'DEBUG' (default): return SQL as result set; 'EXECUTE': execute all statements
 ) RETURNS TABLE
 AS
 
@@ -22,6 +23,16 @@ exa_upper_end=''
 if IDENTIFIER_CASE_INSENSITIVE == true then
 	exa_upper_begin='upper('
 	exa_upper_end=')'
+end
+
+if EXECUTION_MODE == null or EXECUTION_MODE == NULL then
+	debug = true
+elseif string.upper(EXECUTION_MODE) == 'EXECUTE' then
+	debug = false
+elseif string.upper(EXECUTION_MODE) == 'DEBUG' then
+	debug = true
+else
+	error([[Invalid EXECUTION_MODE. Use 'DEBUG' or 'EXECUTE']])
 end
 
 if string.match(DB_FILTER, '%%') then
@@ -223,12 +234,45 @@ where c.IMP not like '%() from%'
 ]],{})
 output(res.statement_text)
 if not success then error(res.error_message) end
-return(res)
+
+summary = {}
+
+if debug then
+	for i = 1, #res do
+		summary[#summary+1] = {res[i].SQL_TEXT, 'PREVIEW', NULL}
+	end
+else
+	local fail_count = 0
+	for i = 1, #res do
+		local sql = res[i].SQL_TEXT
+		if sql ~= nil and sql ~= '' and not sql:match('^%-%-') then
+			local suc, info = pquery(sql)
+			if suc then
+				summary[#summary+1] = {sql, 'TRUE', NULL}
+			else
+				fail_count = fail_count + 1
+				summary[#summary+1] = {sql, 'FALSE', info.error_message}
+			end
+		else
+			summary[#summary+1] = {sql, 'SKIPPED', 'Comment or empty'}
+		end
+	end
+	-- Prepend a success/failure banner
+	-- TODO: Discuss error handling strategy — should we add settings to control
+	--       behavior on failure (e.g. stop on first error, continue, rollback)?
+	if fail_count == 0 then
+		table.insert(summary, 1, {'-- The following statements were executed successfully.', 'SKIPPED', NULL})
+	else
+		table.insert(summary, 1, {'-- Execution completed with ' .. fail_count .. ' error(s). See ERROR_MESSAGE column for details.', 'SKIPPED', NULL})
+	end
+end
+
+return summary, "SQL_TEXT VARCHAR(2000000), SUCCESS VARCHAR(10), ERROR_MESSAGE VARCHAR(20000)"
 /
 
 -- Create a connection to Snowflake
 CREATE OR REPLACE CONNECTION SNOWFLAKE_CONNECTION TO
-  'jdbc:snowflake://<myorganization>-<myaccount>.snowflakecomputing.com/?warehouse=<my_compute_wh>&role=<my_role>&CLIENT_SESSION_KEEP_ALIVE=true'
+  'jdbc:snowflake://<myorganization>-<myaccount>.snowflakecomputing.com/?warehouse=<my_compute_wh>&role=<my_role>&CLIENT_SESSION_KEEP_ALIVE=true&JDBC_QUERY_RESULT_FORMAT=JSON'
   USER '<sfuser>' IDENTIFIED BY '<sfpwd>';
 
 -- Finally start the import process
@@ -239,6 +283,7 @@ execute script database_migration.SNOWFLAKE_TO_EXASOL(
     '%',                        -- SCHEMA_FILTER:        filter for the schemas to generate and load e.g. 'my_schema', 'my%', 'schema1, schema2', '%'
     '',                         -- EXASOL_TARGET_SCHEMA: set to empty string to use original values
     '%',                        -- TABLE_FILTER:         filter for the tables to generate and load e.g. 'my_table', 'my%', 'table1, table2', '%'
-    false                       -- IDENTIFIER_CASE_INSENSITIVE: set to TRUE if identifiers should be put uppercase
+    false,                      -- IDENTIFIER_CASE_INSENSITIVE: set to TRUE if identifiers should be put uppercase
+    'DEBUG'                     -- EXECUTION_MODE:       'DEBUG' (default) returns SQL as preview; 'EXECUTE' runs all statements
 );
 
