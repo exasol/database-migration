@@ -280,6 +280,323 @@ test("EXECUTE mode: error banner prepended when failures occur", function()
     assert_eq(summary[3][2], 'FALSE')
 end)
 
+-- === PARALLEL_CONNECTIONS Tests ===
+
+-- Simulate the PARALLEL_CONNECTIONS parsing logic from snowflake_to_exasol.sql
+-- mock_vcpu: simulates the VCPU value returned by pquery on EXA_SYSTEM_EVENTS
+local AUTO_VCPU_RATIO = 0.75
+
+local function parse_parallel_connections(PARALLEL_CONNECTIONS, mock_vcpu)
+    local parallel = 1
+    local parallel_info_mode = false
+    local vcpu_count = 0
+    -- In Exasol Lua, unset params are `null`; locally we simulate with nil.
+    if PARALLEL_CONNECTIONS ~= nil then
+        if type(PARALLEL_CONNECTIONS) == 'string' then
+            local mode = string.upper(PARALLEL_CONNECTIONS)
+            if mode == 'AUTO' or mode == 'INFO' then
+                -- In real script this queries EXA_STATISTICS.EXA_SYSTEM_EVENTS
+                if mock_vcpu == nil then
+                    error('Could not determine VCPU count from EXA_STATISTICS.EXA_SYSTEM_EVENTS.')
+                end
+                vcpu_count = mock_vcpu
+                parallel = math.max(1, math.floor(vcpu_count * AUTO_VCPU_RATIO))
+
+                if mode == 'INFO' then
+                    parallel_info_mode = true
+                end
+            else
+                error([[Invalid PARALLEL_CONNECTIONS. Use a positive integer, 'AUTO', 'INFO', or NULL.]])
+            end
+        elseif type(PARALLEL_CONNECTIONS) == 'number' then
+            parallel = math.max(1, math.floor(PARALLEL_CONNECTIONS))
+        else
+            error([[Invalid PARALLEL_CONNECTIONS. Use a positive integer, 'AUTO', 'INFO', or NULL.]])
+        end
+    end
+    return parallel, parallel_info_mode, vcpu_count
+end
+
+print("")
+print("=== PARALLEL_CONNECTIONS Parsing Tests ===")
+
+test("nil defaults to parallel=1", function()
+    assert_eq(parse_parallel_connections(nil), 1)
+end)
+
+test("1 returns parallel=1", function()
+    assert_eq(parse_parallel_connections(1), 1)
+end)
+
+test("4 returns parallel=4", function()
+    assert_eq(parse_parallel_connections(4), 4)
+end)
+
+test("0 is clamped to 1", function()
+    assert_eq(parse_parallel_connections(0), 1)
+end)
+
+test("-5 is clamped to 1", function()
+    assert_eq(parse_parallel_connections(-5), 1)
+end)
+
+test("3.7 is floored to 3", function()
+    assert_eq(parse_parallel_connections(3.7), 3)
+end)
+
+test("invalid string value raises error", function()
+    local ok, err = pcall(parse_parallel_connections, 'four')
+    assert_eq(ok, false, "should have raised error")
+    assert(tostring(err):find("Invalid PARALLEL_CONNECTIONS"), "error message should mention PARALLEL_CONNECTIONS")
+end)
+
+test("'AUTO' with VCPU=8 returns parallel=6", function()
+    local parallel, info_mode = parse_parallel_connections('AUTO', 8)
+    assert_eq(parallel, 6)  -- floor(8 * 0.75) = 6
+    assert_eq(info_mode, false)
+end)
+
+test("'AUTO' with VCPU=1 returns parallel=1 (clamped)", function()
+    local parallel = parse_parallel_connections('AUTO', 1)
+    assert_eq(parallel, 1)  -- floor(1 * 0.75) = 0, clamped to 1
+end)
+
+test("'auto' (lowercase) works same as 'AUTO'", function()
+    local parallel, info_mode = parse_parallel_connections('auto', 8)
+    assert_eq(parallel, 6)
+    assert_eq(info_mode, false)
+end)
+
+test("'Auto' (mixed case) works same as 'AUTO'", function()
+    local parallel, info_mode = parse_parallel_connections('Auto', 4)
+    assert_eq(parallel, 3)  -- floor(4 * 0.75) = 3
+    assert_eq(info_mode, false)
+end)
+
+test("'INFO' sets parallel_info_mode=true and computes parallel", function()
+    local parallel, info_mode, vcpu = parse_parallel_connections('INFO', 8)
+    assert_eq(parallel, 6)
+    assert_eq(info_mode, true)
+    assert_eq(vcpu, 8)
+end)
+
+test("'info' (lowercase) works same as 'INFO'", function()
+    local parallel, info_mode = parse_parallel_connections('info', 8)
+    assert_eq(parallel, 6)
+    assert_eq(info_mode, true)
+end)
+
+test("'INVALID_STRING' raises error", function()
+    local ok, err = pcall(parse_parallel_connections, 'INVALID_STRING', 8)
+    assert_eq(ok, false, "should have raised error")
+    assert(tostring(err):find("Invalid PARALLEL_CONNECTIONS"), "error message should mention PARALLEL_CONNECTIONS")
+end)
+
+test("'AUTO' without VCPU data raises error", function()
+    local ok, err = pcall(parse_parallel_connections, 'AUTO', nil)
+    assert_eq(ok, false, "should have raised error")
+    assert(tostring(err):find("Could not determine VCPU"), "error message should mention VCPU")
+end)
+
+-- Simulate the parallel import rewriting logic from snowflake_to_exasol.sql
+local function rewrite_imports(res, parallel)
+    if parallel > 1 then
+        local new_res = {}
+        for i = 1, #res do
+            local sql = res[i].SQL_TEXT
+            -- Normalize whitespace and trim (Exasol may reformat with newlines)
+            local norm = sql:gsub("%s+", " "):match("^%s*(.-)%s*$")
+            -- Case-insensitive match via lowered copy; byte positions identical for ASCII
+            local lower_norm = norm:lower()
+            local lprefix, linner = lower_norm:match("^(import into .+ from jdbc at .+) statement '(select .+)'%s*;$")
+            if lprefix and linner then
+                local prefix = norm:sub(1, #lprefix)
+                local sep_len = #" statement '"
+                local inner_select = norm:sub(#lprefix + sep_len + 1, #lprefix + sep_len + #linner)
+                local parallel_sql = prefix
+                for p = 0, parallel - 1 do
+                    parallel_sql = parallel_sql .. "\n  STATEMENT 'SELECT * EXCLUDE (_prt) FROM ("
+                        .. "SELECT *, MOD(ABS(HASH(*)), " .. parallel .. ") AS _prt FROM ("
+                        .. inner_select .. ")) WHERE _prt = " .. p .. "'"
+                end
+                parallel_sql = parallel_sql .. ';'
+                new_res[#new_res + 1] = {SQL_TEXT = parallel_sql}
+            else
+                new_res[#new_res + 1] = res[i]
+            end
+        end
+        return new_res
+    end
+    return res
+end
+
+print("")
+print("=== Parallel Import Rewriting Tests ===")
+
+test("parallel=1 does not rewrite imports", function()
+    local res = {
+        {SQL_TEXT = 'import into "S"."T"("col1","col2") from jdbc at CONN statement \'select "col1","col2" from "DB"."S"."T"\';'},
+    }
+    local result = rewrite_imports(res, 1)
+    assert_eq(#result, 1)
+    assert_eq(result[1].SQL_TEXT, res[1].SQL_TEXT, "should be unchanged")
+end)
+
+test("parallel=2 rewrites import into 2 STATEMENT clauses", function()
+    local res = {
+        {SQL_TEXT = 'import into "S"."T"("col1") from jdbc at CONN statement \'select "col1" from "DB"."S"."T"\';'},
+    }
+    local result = rewrite_imports(res, 2)
+    assert_eq(#result, 1)
+    local sql = result[1].SQL_TEXT
+    -- Should contain 2 STATEMENT clauses
+    local count = 0
+    for _ in sql:gmatch("STATEMENT '") do count = count + 1 end
+    assert_eq(count, 2, "should have 2 STATEMENT clauses")
+    -- Should contain partition filters for 0 and 1
+    assert(sql:find("WHERE _prt = 0"), "should have partition filter for 0")
+    assert(sql:find("WHERE _prt = 1"), "should have partition filter for 1")
+    -- HASH(*) should be in the inner SELECT, not the WHERE
+    assert(sql:find("MOD%(ABS%(HASH%(%*%)%), 2%) AS _prt"), "should compute _prt via HASH(*) in SELECT")
+end)
+
+test("parallel=4 rewrites import into 4 STATEMENT clauses", function()
+    local res = {
+        {SQL_TEXT = 'import into "S"."T"("col1") from jdbc at CONN statement \'select "col1" from "DB"."S"."T"\';'},
+    }
+    local result = rewrite_imports(res, 4)
+    assert_eq(#result, 1)
+    local sql = result[1].SQL_TEXT
+    local count = 0
+    for _ in sql:gmatch("STATEMENT '") do count = count + 1 end
+    assert_eq(count, 4, "should have 4 STATEMENT clauses")
+    assert(sql:find("WHERE _prt = 3"), "should have partition filter for 3")
+end)
+
+test("parallel rewriting wraps original SELECT as subquery", function()
+    local res = {
+        {SQL_TEXT = [[import into "S"."T"("col1") from jdbc at CONN statement 'select substring("col1" ,0, 100) from "DB"."S"."T"';]]},
+    }
+    local result = rewrite_imports(res, 2)
+    local sql = result[1].SQL_TEXT
+    -- The original select should be wrapped inside the HASH computation
+    assert(sql:find('HASH%(%*%)'), "should use HASH(*) for partitioning")
+    assert(sql:find('FROM %(select substring'), "should wrap original SELECT as subquery")
+end)
+
+test("non-import statements pass through unchanged", function()
+    local res = {
+        {SQL_TEXT = '-- ### SCHEMAS ###'},
+        {SQL_TEXT = 'create schema if not exists "MY_SCHEMA";'},
+        {SQL_TEXT = 'create or replace table "MY_SCHEMA"."T1" ("ID" DECIMAL(10,0));'},
+        {SQL_TEXT = '-- ### IMPORTS ###'},
+    }
+    local result = rewrite_imports(res, 4)
+    assert_eq(#result, 4)
+    assert_eq(result[1].SQL_TEXT, '-- ### SCHEMAS ###')
+    assert_eq(result[2].SQL_TEXT, 'create schema if not exists "MY_SCHEMA";')
+    assert_eq(result[3].SQL_TEXT, 'create or replace table "MY_SCHEMA"."T1" ("ID" DECIMAL(10,0));')
+    assert_eq(result[4].SQL_TEXT, '-- ### IMPORTS ###')
+end)
+
+test("parallel rewriting handles uppercase keywords from Exasol", function()
+    local res = {
+        {SQL_TEXT = [[IMPORT INTO "S"."T"("col1") FROM JDBC at CONN STATEMENT 'select "col1"from "DB"."S"."T"';]]},
+    }
+    local result = rewrite_imports(res, 2)
+    assert_eq(#result, 1)
+    local sql = result[1].SQL_TEXT
+    local count = 0
+    for _ in sql:gmatch("STATEMENT '") do count = count + 1 end
+    assert_eq(count, 2, "should have 2 STATEMENT clauses")
+end)
+
+test("parallel rewriting handles multiline SQL from Exasol", function()
+    local res = {
+        {SQL_TEXT = "IMPORT INTO \"S\".\"T\"(\"col1\") FROM \nJDBC at CONN STATEMENT\n'select \"col1\"\nfrom \"DB\".\"S\".\"T\"'\n;"},
+    }
+    local result = rewrite_imports(res, 3)
+    assert_eq(#result, 1)
+    local sql = result[1].SQL_TEXT
+    local count = 0
+    for _ in sql:gmatch("STATEMENT '") do count = count + 1 end
+    assert_eq(count, 3, "should have 3 STATEMENT clauses")
+    assert(sql:find("WHERE _prt = 2"), "should have partition filter for 2")
+end)
+
+test("parallel rewriting preserves original case in table/column names", function()
+    local res = {
+        {SQL_TEXT = [[IMPORT INTO "MySchema"."MyTable"("MyCol") FROM JDBC at CONN STATEMENT 'select "MyCol"from "DB"."MySchema"."MyTable"';]]},
+    }
+    local result = rewrite_imports(res, 2)
+    local sql = result[1].SQL_TEXT
+    assert(sql:find('"MySchema"'), "should preserve original case in schema name")
+    assert(sql:find('"MyCol"'), "should preserve original case in column name")
+end)
+
+test("mixed import and non-import statements", function()
+    local res = {
+        {SQL_TEXT = '-- comment'},
+        {SQL_TEXT = 'create schema if not exists "S";'},
+        {SQL_TEXT = 'import into "S"."T"("col1") from jdbc at CONN statement \'select "col1" from "DB"."S"."T"\';'},
+    }
+    local result = rewrite_imports(res, 2)
+    assert_eq(#result, 3)
+    assert_eq(result[1].SQL_TEXT, '-- comment', "comment should be unchanged")
+    assert_eq(result[2].SQL_TEXT, 'create schema if not exists "S";', "create schema should be unchanged")
+    -- Only the import should be rewritten
+    local count = 0
+    for _ in result[3].SQL_TEXT:gmatch("STATEMENT '") do count = count + 1 end
+    assert_eq(count, 2, "import should be rewritten with 2 STATEMENT clauses")
+end)
+
+-- === INFO Output Format Tests ===
+print("")
+print("=== INFO Output Format Tests ===")
+
+-- Simulate the INFO early-return output from snowflake_to_exasol.sql
+local function build_info_output(vcpu_count, parallel)
+    return {
+        {'-- PARALLEL_CONNECTIONS INFO', 'INFO', nil},
+        {'-- Cluster VCPUs: ' .. vcpu_count, 'INFO', nil},
+        {'-- AUTO would use: ' .. parallel .. ' parallel connections (ratio: ' .. AUTO_VCPU_RATIO .. ')', 'INFO', nil},
+        {'-- Max possible: ' .. vcpu_count, 'INFO', nil},
+    }
+end
+
+test("INFO output has 4 rows", function()
+    local parallel, info_mode, vcpu = parse_parallel_connections('INFO', 8)
+    assert_eq(info_mode, true)
+    local output = build_info_output(vcpu, parallel)
+    assert_eq(#output, 4)
+end)
+
+test("INFO output rows have correct structure", function()
+    local parallel, info_mode, vcpu = parse_parallel_connections('INFO', 8)
+    local output = build_info_output(vcpu, parallel)
+    -- All rows should have 'INFO' as second element
+    for i = 1, #output do
+        assert_eq(output[i][2], 'INFO', "row " .. i .. " should have INFO status")
+    end
+end)
+
+test("INFO output contains expected text patterns", function()
+    local parallel, info_mode, vcpu = parse_parallel_connections('INFO', 12)
+    local output = build_info_output(vcpu, parallel)
+    assert(output[1][1]:find('PARALLEL_CONNECTIONS INFO'), "row 1 should mention PARALLEL_CONNECTIONS INFO")
+    assert(output[2][1]:find('Cluster VCPUs: 12'), "row 2 should show VCPU count")
+    assert(output[3][1]:find('AUTO would use: 9'), "row 3 should show computed parallel")  -- floor(12*0.75)=9
+    assert(output[3][1]:find('ratio: 0.75'), "row 3 should show ratio")
+    assert(output[4][1]:find('Max possible: 12'), "row 4 should show max")
+end)
+
+test("INFO output with VCPU=1 shows clamped parallel=1", function()
+    local parallel, info_mode, vcpu = parse_parallel_connections('INFO', 1)
+    local output = build_info_output(vcpu, parallel)
+    assert(output[2][1]:find('Cluster VCPUs: 1'), "should show VCPU=1")
+    assert(output[3][1]:find('AUTO would use: 1'), "should show parallel=1 (clamped)")
+end)
+
 -- Verify the Lua source in the actual SQL file parses correctly
 print("")
 print("=== Lua Syntax Validation ===")

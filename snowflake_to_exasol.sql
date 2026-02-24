@@ -15,6 +15,7 @@ CONNECTION_NAME 	-- name of the database connection inside exasol, e.g. snowflak
 ,TABLE_FILTER 		-- filter for the tables to generate and load, e.g. 'my_table', 'my%', 'table1, table2', '%'
 ,IDENTIFIER_CASE_INSENSITIVE 	-- TRUE if identifiers should be put uppercase
 ,EXECUTION_MODE 	-- 'DEBUG' (default): return SQL as result set; 'EXECUTE': execute all statements
+,PARALLEL_CONNECTIONS	-- Parallel JDBC connections per IMPORT: integer, 'AUTO' (75% of VCPUs), 'INFO' (returns VCPU stats only; skips migration), or NULL (default 1)
 ) RETURNS TABLE
 AS
 
@@ -33,6 +34,51 @@ elseif string.upper(EXECUTION_MODE) == 'DEBUG' then
 	debug = true
 else
 	error([[Invalid EXECUTION_MODE. Use 'DEBUG' or 'EXECUTE']])
+end
+
+local AUTO_VCPU_RATIO = 0.75  -- AUTO uses 75% of cluster VCPUs; adjust to taste
+
+local parallel = 1
+local parallel_info_mode = false
+local vcpu_count = 0
+
+if PARALLEL_CONNECTIONS ~= null and PARALLEL_CONNECTIONS ~= NULL then
+	if type(PARALLEL_CONNECTIONS) == 'string' then
+		local mode = string.upper(PARALLEL_CONNECTIONS)
+		if mode == 'AUTO' or mode == 'INFO' then
+			-- Query VCPU from the latest cluster startup event
+			local vcpu_success, vcpu_res = pquery([[
+				SELECT VCPU FROM EXA_STATISTICS.EXA_SYSTEM_EVENTS
+				WHERE EVENT_TYPE = 'STARTUP'
+				ORDER BY MEASURE_TIME DESC
+				LIMIT 1
+			]])
+			if not vcpu_success or #vcpu_res == 0 then
+				error('Could not determine VCPU count from EXA_STATISTICS.EXA_SYSTEM_EVENTS.')
+			end
+			vcpu_count = vcpu_res[1].VCPU
+			parallel = math.max(1, math.floor(vcpu_count * AUTO_VCPU_RATIO))
+
+			if mode == 'INFO' then
+				parallel_info_mode = true
+			end
+		else
+			error([[Invalid PARALLEL_CONNECTIONS. Use a positive integer, 'AUTO', 'INFO', or NULL.]])
+		end
+	elseif type(PARALLEL_CONNECTIONS) == 'number' then
+		parallel = math.max(1, math.floor(PARALLEL_CONNECTIONS))
+	else
+		error([[Invalid PARALLEL_CONNECTIONS. Use a positive integer, 'AUTO', 'INFO', or NULL.]])
+	end
+end
+
+if parallel_info_mode then
+	return {
+		{'-- PARALLEL_CONNECTIONS INFO', 'INFO', NULL},
+		{'-- Cluster VCPUs: ' .. vcpu_count, 'INFO', NULL},
+		{'-- AUTO would use: ' .. parallel .. ' parallel connections (ratio: ' .. AUTO_VCPU_RATIO .. ')', 'INFO', NULL},
+		{'-- Max possible: ' .. vcpu_count, 'INFO', NULL},
+	}, "SQL_TEXT VARCHAR(2000000), SUCCESS VARCHAR(10), ERROR_MESSAGE VARCHAR(20000)"
 end
 
 if string.match(DB_FILTER, '%%') then
@@ -235,6 +281,36 @@ where c.IMP not like '%() from%'
 output(res.statement_text)
 if not success then error(res.error_message) end
 
+if parallel > 1 then
+	local new_res = {}
+	for i = 1, #res do
+		local sql = res[i].SQL_TEXT
+		-- Normalize whitespace and trim (Exasol may reformat SQL with newlines/extra spaces)
+		local norm = sql:gsub("%s+", " "):match("^%s*(.-)%s*$")
+		-- Case-insensitive match via lowered copy (Exasol may uppercase keywords);
+		-- byte positions are identical for ASCII so we can index into the original
+		local lower_norm = norm:lower()
+		local lprefix, linner = lower_norm:match("^(import into .+ from jdbc at .+) statement '(select .+)'%s*;$")
+		if lprefix and linner then
+			local prefix = norm:sub(1, #lprefix)
+			local sep_len = #" statement '"
+			local inner_select = norm:sub(#lprefix + sep_len + 1, #lprefix + sep_len + #linner)
+			-- Build parallel IMPORT with multiple STATEMENT clauses
+			local parallel_sql = prefix
+			for p = 0, parallel - 1 do
+				parallel_sql = parallel_sql .. "\n  STATEMENT 'SELECT * EXCLUDE (_prt) FROM ("
+					.. "SELECT *, MOD(ABS(HASH(*)), " .. parallel .. ") AS _prt FROM ("
+					.. inner_select .. ")) WHERE _prt = " .. p .. "'"
+			end
+			parallel_sql = parallel_sql .. ';'
+			new_res[#new_res + 1] = {SQL_TEXT = parallel_sql}
+		else
+			new_res[#new_res + 1] = res[i]
+		end
+	end
+	res = new_res
+end
+
 summary = {}
 
 if debug then
@@ -284,6 +360,7 @@ execute script database_migration.SNOWFLAKE_TO_EXASOL(
     '',                         -- EXASOL_TARGET_SCHEMA: set to empty string to use original values
     '%',                        -- TABLE_FILTER:         filter for the tables to generate and load e.g. 'my_table', 'my%', 'table1, table2', '%'
     false,                      -- IDENTIFIER_CASE_INSENSITIVE: set to TRUE if identifiers should be put uppercase
-    'DEBUG'                     -- EXECUTION_MODE:       'DEBUG' (default) returns SQL as preview; 'EXECUTE' runs all statements
+    'DEBUG',                    -- EXECUTION_MODE:       'DEBUG' (default) returns SQL as preview; 'EXECUTE' runs all statements
+    'AUTO'                      -- PARALLEL_CONNECTIONS: integer, 'AUTO' (75% of VCPUs), 'INFO' (returns VCPU stats only; skips migration), or NULL (= 1)
 );
 
