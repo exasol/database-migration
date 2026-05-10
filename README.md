@@ -5,9 +5,11 @@
 
 ## Table of Contents
 1. [Overview](#overview)
-2. [Migration source:](#migration-source)
+2. [Unified migration entry point](#unified-migration-entry-point)
+3. [Migration source:](#migration-source)
     * [Azure Sql](#azure-sql)
     * [CSV](#csv)
+    * [Databricks](#databricks)
     * [DB2](#db2)
     * [Exasol](#exasol)
     * [Google BigQuery](#google-bigquery)
@@ -25,8 +27,8 @@
     * [Vectorwise](#vectorwise)
     * [Vertica](#vertica)
     
-3. [Post-load optimization](#post-load-optimization)
-4. [Delta import](#delta-import)
+4. [Post-load optimization](#post-load-optimization)
+5. [Delta import](#delta-import)
 
 
 ## Overview
@@ -37,6 +39,39 @@ You'll find SQL scripts which you can execute on Exasol to load data from certai
 database management systems. The scripts try to extract the meta data from the source system and create the appropriate IMPORT statements automatically so that you don't have to care about table names, column names and types.
 
 If you want to optimize existing scripts or create new scripts for additional systems, we would be very glad if you share your work with the Exasol user community.
+
+## Unified migration entry point
+
+The script [migrate_to_exasol.sql](migrate_to_exasol.sql) provides one standardized execute interface for the source-specific migration scripts. It dispatches to the existing scripts, so the matching source script still needs to be installed in `DATABASE_MIGRATION`.
+
+```sql
+EXECUTE SCRIPT DATABASE_MIGRATION.MIGRATE_TO_EXASOL(
+    'SNOWFLAKE',                 -- SOURCE_TYPE
+    'SNOWFLAKE_CONNECTION',      -- CONNECTION_NAME
+    'JDBC',                      -- CONNECTION_TYPE
+    '%',                         -- DB_FILTER
+    '%',                         -- SCHEMA_FILTER
+    '%',                         -- TABLE_FILTER
+    NULL,                        -- TARGET_SCHEMA
+    TRUE,                        -- IDENTIFIER_CASE_INSENSITIVE
+    TRUE,                        -- DEBUG: TRUE previews, FALSE executes
+    'DB2SCHEMA=true'             -- OPTIONS
+);
+```
+
+Common parameters:
+- `SOURCE_TYPE`: `MYSQL`, `MARIADB`, `POSTGRES`, `REDSHIFT`, `DB2`, `VERTICA`, `HANA`, `AZURE_SQL`, `BIGQUERY`, `DATABRICKS`, `SQLSERVER`, `SNOWFLAKE`, `ORACLE`, `TERADATA`, `EXASOL`, `NETEZZA`, or `VECTORWISE`.
+- `DEBUG`: `TRUE` returns generated SQL. `FALSE` executes generated SQL and returns status rows.
+- `OPTIONS`: source-specific `KEY=VALUE` pairs separated by semicolons.
+
+Useful `OPTIONS` keys:
+- `PROJECT_ID`: required for `BIGQUERY` unless `DB_FILTER` contains the project ID.
+- `CATALOG2SCHEMA`: `true` or `false` for `DATABRICKS`.
+- `DB2SCHEMA`: `true` or `false` for `SNOWFLAKE` and `SQLSERVER`.
+- `PARALLEL_STATEMENTS`, `CREATE_PK`, `CREATE_FK`, `CHECK_MIGRATION`: Oracle/Teradata options.
+- `GENERATE_VIEWS`, `VIEW_FILTER`, `PK_SETTING`: Exasol-to-Exasol options.
+
+The S3 parallel loader keeps its direct script interface because it uses a different parameter shape.
 
 ## Migration source
 
@@ -111,6 +146,37 @@ FROM   (
 For the actual data-migration, see script [bigquery_to_exasol.sql](bigquery_to_exasol.sql)
 
 Note: Due to the lack of an alternative datatype, the following Google BigQuery datatypes; `DATE`,`DATETIME`,`TIMESTAMP` and `ARRAY` are stored as VARCHAR. 
+
+### Databricks
+
+To connect Exasol to Databricks, configure the Databricks JDBC driver in Exasol with the driver name `DATABRICKS`, then create a connection for your Databricks SQL warehouse. The JDBC URL requires your server hostname and HTTP path. See the [Databricks JDBC driver documentation](https://docs.databricks.com/aws/en/integrations/jdbc-oss/configure) for current connection details.
+
+Example connection:
+
+```sql
+CREATE OR REPLACE CONNECTION DATABRICKS_CONNECTION TO
+  'jdbc:databricks://<server-hostname>:443/default;httpPath=<http-path>;AuthMech=3;UseNativeQuery=1'
+  USER 'token'
+  IDENTIFIED BY '<personal-access-token>';
+```
+
+Create the script [databricks_to_exasol.sql](databricks_to_exasol.sql), then generate migration SQL:
+
+```sql
+EXECUTE SCRIPT DATABASE_MIGRATION.DATABRICKS_TO_EXASOL(
+    'DATABRICKS_CONNECTION', -- CONNECTION_NAME
+    TRUE,                    -- CATALOG2SCHEMA: catalog.schema.table -> catalog.schema_table
+    '%',                     -- CATALOG_FILTER
+    '%',                     -- SCHEMA_FILTER
+    NULL,                    -- TARGET_SCHEMA
+    '%',                     -- TABLE_FILTER
+    TRUE                     -- IDENTIFIER_CASE_INSENSITIVE
+);
+```
+
+The script uses Databricks `INFORMATION_SCHEMA` metadata to generate `CREATE SCHEMA`, `CREATE TABLE`, and `IMPORT FROM JDBC DRIVER = 'DATABRICKS'` statements for managed and external tables. `CATALOG2SCHEMA` helps avoid name collisions when multiple Databricks catalogs contain the same schema and table names.
+
+S3 loading is intentionally not part of this adapter. Use [s3_to_exasol.sql](s3_to_exasol.sql) for S3 parallel loading.
 
 
 ### MariaDB
