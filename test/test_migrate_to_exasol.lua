@@ -268,6 +268,35 @@ test("DEBUG false runs Snowflake generated statements", function()
     assert_eq(result.rows[2][2], "TRUE")
 end)
 
+test("DEBUG false reports no executable generated statements", function()
+    local result = run_migrate({
+        source_type = "MYSQL",
+        debug = false,
+        adapter_rows = {
+            {SQL_TEXT = "-- ### SCHEMAS ###"},
+            {SQL_TEXT = "-- ### TABLES ###"},
+        },
+    })
+
+    assert_eq(#result.calls, 1)
+    assert_eq(result.rows[1][1], "-- No executable SQL statements were generated.")
+    assert_eq(result.rows[2][2], "SKIPPED")
+    assert_eq(result.rows[3][2], "SKIPPED")
+end)
+
+test("DEBUG false reports empty adapter output", function()
+    local result = run_migrate({
+        source_type = "MYSQL",
+        debug = false,
+        adapter_rows = {},
+    })
+
+    assert_eq(#result.calls, 1)
+    assert_eq(#result.rows, 1)
+    assert_eq(result.rows[1][1], "-- No executable SQL statements were generated.")
+    assert_eq(result.rows[1][2], "SKIPPED")
+end)
+
 print("")
 print("=== Error Handling Tests ===")
 

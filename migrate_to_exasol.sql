@@ -193,10 +193,12 @@ end
 function execute_generated_sql(res)
     local summary = {}
     local fail_count = 0
+    local executed_count = 0
 
     for i = 1, #res do
         local sql_text = first_sql_text(res[i])
         if is_executable_statement(sql_text) then
+            executed_count = executed_count + 1
             local success, info = pquery(sql_text)
             if success then
                 summary[#summary + 1] = {sql_text, 'TRUE', NULL}
@@ -209,7 +211,9 @@ function execute_generated_sql(res)
         end
     end
 
-    if fail_count == 0 then
+    if executed_count == 0 then
+        table.insert(summary, 1, {'-- No executable SQL statements were generated.', 'SKIPPED', NULL})
+    elseif fail_count == 0 then
         table.insert(summary, 1, {'-- The following statements were executed successfully.', 'SKIPPED', NULL})
     else
         table.insert(summary, 1, {'-- Execution completed with ' .. fail_count .. ' error(s). See ERROR_MESSAGE column for details.', 'SKIPPED', NULL})
