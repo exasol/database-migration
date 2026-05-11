@@ -23,7 +23,7 @@ suc, res = pquery([[
 
 with vv_vertica_columns as (
 
-	select ]]..exa_upper_begin..[[table_schema]]..exa_upper_end..[[ as "exa_table_schema", ]]..exa_upper_begin..[[table_name]]..exa_upper_end..[[ as "exa_table_name", ]]..exa_upper_begin..[[column_name]]..exa_upper_end..[[ as "exa_column_name", vertica.* from  
+	select ]]..exa_upper_begin..[[table_schema]]..exa_upper_end..[[ as "exa_table_schema", ]]..exa_upper_begin..[[table_name]]..exa_upper_end..[[ as "exa_table_name", ]]..exa_upper_begin..[[column_name]]..exa_upper_end..[[ as "exa_column_name", '"' || replace(table_schema, '"', '""') || '"' as "source_table_schema", '"' || replace(table_name, '"', '""') || '"' as "source_table_name", '"' || replace(column_name, '"', '""') || '"' as "source_column_name", vertica.* from
 		(
 
 import  into 
@@ -92,23 +92,23 @@ AND table_name ilike '']]..TABLE_FILTER..[[''
     when upper(data_type) like 'FLOAT%' then 'FLOAT'
     when upper(data_type) = 'DOUBLE PRECISION' then 'DOUBLE'   
 	when upper(data_type) = 'REAL' then 'FLOAT'   
-    when upper(data_type) in ('DECIMAL','NUMERIC','NUMBER') then case when numeric_precision is null or numeric_precision > 36 then 'DOUBLE' else 'decimal(' || numeric_precision || ',' || case when (numeric_scale > numeric_precision) then numeric_precision else  case when numeric_scale < 0 then 0 else numeric_scale end end || ')' end 
+    when upper(data_type) LIKE 'DECIMAL%' or upper(data_type) LIKE 'NUMERIC%' or upper(data_type) LIKE 'NUMBER%' then case when numeric_precision is null or numeric_precision > 36 then 'DOUBLE' else 'decimal(' || numeric_precision || ',' || case when (numeric_scale > numeric_precision) then numeric_precision else  case when numeric_scale < 0 then 0 else numeric_scale end end || ')' end
     when upper(data_type) = 'BOOLEAN' then 'BOOLEAN'
     -- ### date and time types ###
     when upper(data_type) = 'DATE' then 'DATE'
     when upper(data_type) = 'DATETIME' then 'TIMESTAMP'
 	when upper(data_type) = 'SMALLDATETIME' then 'TIMESTAMP'
-    when upper(data_type) = 'TIMESTAMP' then 'varchar(14)'
+    when upper(data_type) = 'TIMESTAMP' then 'TIMESTAMP'
     when upper(data_type) = 'TIME' then 'varchar(8)'
     when upper(data_type) = 'YEAR' then 'varchar(4)'
     -- ### string types ###
     when upper(data_type) LIKE 'CHAR%' then upper(data_type)
     when upper(data_type) LIKE 'VARCHAR%' then upper(data_type)
 	when upper(data_type) LIKE 'LONG VARCHAR%' then upper(data_type)
-    when upper(data_type) = 'BINARY' then 'char('||character_maximum_length||')'
-	when upper(data_type) = 'BYTEA' then 'char('||character_maximum_length||')'
-	when upper(data_type) = 'RAW' then 'char('||character_maximum_length||')'
-    when upper(data_type) = 'VARBINARY' then 'varchar('||character_maximum_length||')'
+    when upper(data_type) LIKE 'BINARY%' then 'char('||(coalesce(character_maximum_length, data_type_length) * 2)||')'
+	when upper(data_type) LIKE 'BYTEA%' then 'char('||(coalesce(character_maximum_length, data_type_length) * 2)||')'
+	when upper(data_type) LIKE 'RAW%' then 'char('||(coalesce(character_maximum_length, data_type_length) * 2)||')'
+    when upper(data_type) LIKE 'VARBINARY%' then 'varchar('||(coalesce(character_maximum_length, data_type_length) * 2)||')'
     when upper(data_type) = 'LONG VARBINARY' then 'varchar(2000000)'
 
     -- ### fallback for unknown types ###
@@ -121,13 +121,13 @@ AND table_name ilike '']]..TABLE_FILTER..[[''
 	select 'import into "' || "exa_table_schema" || '"."' || "exa_table_name" || '" from jdbc at ]]..CONNECTION_NAME..[[ statement ''select ' 
            || group_concat(
                            case 
-	                       when upper(data_type) = 'BINARY' then 'cast('||column_name||' as char('||character_maximum_length||'))'
-                           when upper(data_type) = 'VARBINARY' then 'cast('||column_name||' as char('||character_maximum_length||'))'
-                           when upper(data_type) = 'BLOB' then 'cast('||column_name||' as char(2000000))'
-                           else column_name end order by ordinal_position) 
-           || ' from ' || table_schema|| '.' || table_name|| ''';' as sql_text
-	from vv_vertica_columns group by "exa_table_schema","exa_table_name", table_schema,table_name
-	order by  "exa_table_schema","exa_table_name", table_schema,table_name
+	                       when upper(data_type) LIKE 'BINARY%' then 'TO_HEX('||"source_column_name"||')'
+                           when upper(data_type) LIKE 'VARBINARY%' then 'TO_HEX('||"source_column_name"||')'
+                           when upper(data_type) = 'BLOB' then 'cast('||"source_column_name"||' as char(2000000))'
+                           else "source_column_name" end order by ordinal_position)
+           || ' from ' || "source_table_schema"|| '.' || "source_table_name"|| ''';' as sql_text
+	from vv_vertica_columns group by "exa_table_schema","exa_table_name", "source_table_schema","source_table_name"
+	order by  "exa_table_schema","exa_table_name", "source_table_schema","source_table_name"
 )
 select cast('-- ### SCHEMAS ###' as varchar(2000000)) SQL_TEXT
 union all 

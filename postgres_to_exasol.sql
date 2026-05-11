@@ -27,7 +27,7 @@ else
 end
 res = query([[
 with vv_pg_columns as (
-	select ]]..exa_upper_begin..[["table_catalog"]]..exa_upper_end..[[ as "exa_table_catalog", ]]..exa_table_schema_clause..[[ as "exa_table_schema", ]]..exa_upper_begin..[["table_name"]]..exa_upper_end..[[ as "exa_table_name", ]]..exa_upper_begin..[["column_name"]]..exa_upper_end..[[ as "exa_column_name", pg.* from  
+	select ]]..exa_upper_begin..[["table_catalog"]]..exa_upper_end..[[ as "exa_table_catalog", ]]..exa_table_schema_clause..[[ as "exa_table_schema", ]]..exa_upper_begin..[["table_name"]]..exa_upper_end..[[ as "exa_table_name", ]]..exa_upper_begin..[["column_name"]]..exa_upper_end..[[ as "exa_column_name", '"' || replace("table_schema", '"', '""') || '"' as "source_table_schema", '"' || replace("table_name", '"', '""') || '"' as "source_table_name", '"' || replace("column_name", '"', '""') || '"' as "source_column_name", pg.* from
 		(import from jdbc at ]]..CONNECTION_NAME..[[ statement 
 			'select table_catalog, table_schema, table_name, column_name, ordinal_position, case when is_nullable=''NO'' then ''NOT NULL'' else ''NULL'' end as not_null_constraint, data_type, character_maximum_length, numeric_precision, numeric_scale, datetime_precision  
 				from information_schema.columns join information_schema.tables using (table_catalog, table_schema, table_name) 
@@ -105,40 +105,40 @@ with vv_pg_columns as (
 , vv_imports as (
 	select 'import into "' || "exa_table_schema" || '"."' || "exa_table_name" || '" from jdbc at ]]..CONNECTION_NAME..[[ statement ''select ' || group_concat( 
 	case 
-	when "data_type" = 'ARRAY' then "column_name" ||'::text'
-	when "data_type" = 'USER-DEFINED' then "column_name" ||'::text' 
-	when "data_type" = 'bit' then "column_name" ||'::text'
-	when "data_type" = 'bit varying' then "column_name" ||'::text'
-	when "data_type" = 'box' then "column_name" ||'::text'
-	when "data_type" = 'bytea' then "column_name" ||'::text'
-	when "data_type" = 'cidr' then "column_name" ||'::text' 
-	when "data_type" = 'circle' then "column_name" ||'::text' 
-	when "data_type" = 'inet' then "column_name" ||'::text'
-	when "data_type" = 'interval' then "column_name" ||'::text' 
-	when "data_type" = 'json' then "column_name" ||'::text'
-	when "data_type" = 'jsonb' then "column_name" ||'::text'
-	when "data_type" = 'line' then "column_name" ||'::text'
-	when "data_type" = 'lseg' then "column_name" ||'::text'
-	when "data_type" = 'name' then "column_name" ||'::text'
-	when "data_type" = 'macaddr' then "column_name" ||'::text'
-	when "data_type" = 'money' then "column_name" ||'::text'
-	when "data_type" = 'point' then "column_name" ||'::text'
-	when "data_type" = 'path' then "column_name" ||'::text'
-	when "data_type" = 'pg_lsn' then "column_name" ||'::text'
-	when "data_type" = 'polygon' then "column_name" ||'::text'
-	when "data_type" = 'timestamp with time zone' then 'case when  '||"column_name"||' > ''''9999-12-31 23:59:59.999'''' then ''''9999-12-31 23:59:59.999'''' when '||"column_name" ||' < ''''0001-01-01'''' then ''''0001-01-01'''' else '||"column_name" ||' end'
-	when "data_type" = 'timestamp without time zone' then 'case when  '||"column_name"||' > ''''9999-12-31 23:59:59.999'''' then ''''9999-12-31 23:59:59.999'''' when '||"column_name" ||' < ''''0001-01-01'''' then ''''0001-01-01'''' else '||"column_name" ||' end'
-	when "data_type" = 'tsquery' then "column_name" ||'::text'
-	when "data_type" = 'tsvector' then "column_name" ||'::text'
-	when "data_type" = 'txid_snapshot' then "column_name" ||'::text'
-	when "data_type" = 'uuid' then "column_name" ||'::text'
-	when "data_type" = 'xml' then "column_name" ||'::text'
+	when "data_type" = 'ARRAY' then "source_column_name" ||'::text'
+	when "data_type" = 'USER-DEFINED' then "source_column_name" ||'::text'
+	when "data_type" = 'bit' then "source_column_name" ||'::text'
+	when "data_type" = 'bit varying' then "source_column_name" ||'::text'
+	when "data_type" = 'box' then "source_column_name" ||'::text'
+	when "data_type" = 'bytea' then "source_column_name" ||'::text'
+	when "data_type" = 'cidr' then "source_column_name" ||'::text'
+	when "data_type" = 'circle' then "source_column_name" ||'::text'
+	when "data_type" = 'inet' then "source_column_name" ||'::text'
+	when "data_type" = 'interval' then "source_column_name" ||'::text'
+	when "data_type" = 'json' then "source_column_name" ||'::text'
+	when "data_type" = 'jsonb' then "source_column_name" ||'::text'
+	when "data_type" = 'line' then "source_column_name" ||'::text'
+	when "data_type" = 'lseg' then "source_column_name" ||'::text'
+	when "data_type" = 'name' then "source_column_name" ||'::text'
+	when "data_type" = 'macaddr' then "source_column_name" ||'::text'
+	when "data_type" = 'money' then "source_column_name" ||'::text'
+	when "data_type" = 'point' then "source_column_name" ||'::text'
+	when "data_type" = 'path' then "source_column_name" ||'::text'
+	when "data_type" = 'pg_lsn' then "source_column_name" ||'::text'
+	when "data_type" = 'polygon' then "source_column_name" ||'::text'
+	when "data_type" = 'timestamp with time zone' then 'case when  '||"source_column_name"||' > ''''9999-12-31 23:59:59.999'''' then ''''9999-12-31 23:59:59.999'''' when '||"source_column_name" ||' < ''''0001-01-01'''' then ''''0001-01-01'''' else '||"source_column_name" ||' end'
+	when "data_type" = 'timestamp without time zone' then 'case when  '||"source_column_name"||' > ''''9999-12-31 23:59:59.999'''' then ''''9999-12-31 23:59:59.999'''' when '||"source_column_name" ||' < ''''0001-01-01'''' then ''''0001-01-01'''' else '||"source_column_name" ||' end'
+	when "data_type" = 'tsquery' then "source_column_name" ||'::text'
+	when "data_type" = 'tsvector' then "source_column_name" ||'::text'
+	when "data_type" = 'txid_snapshot' then "source_column_name" ||'::text'
+	when "data_type" = 'uuid' then "source_column_name" ||'::text'
+	when "data_type" = 'xml' then "source_column_name" ||'::text'
 	when "data_type" in ('bigint', 'boolean', 'character', 'character varying', 'date', 'double precision', 'integer', 'numeric', 'oid', 'real', 'smallint', 'text', 'time with time zone', 'time without time zone')
-	then "column_name"
+	then "source_column_name"
 	end
-	order by "ordinal_position") || ' from ' || "table_schema"|| '.' || "table_name"|| ''';' as sql_text
-	from vv_pg_columns group by "exa_table_catalog","exa_table_schema","exa_table_name", "table_schema","table_name"
-	order by "exa_table_catalog", "exa_table_schema","exa_table_name", "table_schema","table_name"
+	order by "ordinal_position") || ' from ' || "source_table_schema"|| '.' || "source_table_name"|| ''';' as sql_text
+	from vv_pg_columns group by "exa_table_catalog","exa_table_schema","exa_table_name", "source_table_schema","source_table_name"
+	order by "exa_table_catalog", "exa_table_schema","exa_table_name", "source_table_schema","source_table_name"
 )
 select SQL_TEXT from (
 select 1 as ord, a.* from vv_create_schemas a

@@ -26,12 +26,12 @@ res = query([[
 with vv_db2_columns as (
   select ]]..exa_upper_begin..[[table_catalog]]..exa_upper_end..[[ as "exa_table_catalog", ]]..exa_upper_begin..[[table_schema]]..exa_upper_end..[[ as "exa_table_schema", ]]..exa_upper_begin..[[table_name]]..exa_upper_end..[[ as "exa_table_name", ]]..exa_upper_begin..[[column_name]]..exa_upper_end..[[ as "exa_column_name", db2.* from  
     (import from jdbc at ]]..CONNECTION_NAME..[[ statement 
-      'select t.table_catalog, rtrim(t.table_schema) table_schema, t.table_name, column_name, ordinal_position, data_type, character_maximum_length, numeric_precision, numeric_scale, datetime_precision  
+      'select t.table_catalog, rtrim(t.table_schema) table_schema, rtrim(t.table_name) table_name, column_name, ordinal_position, data_type, character_maximum_length, numeric_precision, numeric_scale, datetime_precision
         from sysibm.columns c join sysibm.tables t on t.table_catalog = c.table_catalog and t.table_schema = c.table_schema and t.table_name = c.table_name
         where t.table_type = ''BASE TABLE'' 
-        AND t.table_schema not in (''SYSCAT'',''SYSIBM'', ''SYSIBMADM'', ''SYSPUBLIC'', ''SYSSTAT'', ''SYSTOOLS'')
-        AND t.table_schema like '']]..SCHEMA_FILTER..[[''
-        AND t.table_name like '']]..TABLE_FILTER..[[''
+        AND rtrim(t.table_schema) not in (''SYSCAT'',''SYSIBM'', ''SYSIBMADM'', ''SYSPUBLIC'', ''SYSSTAT'', ''SYSTOOLS'')
+        AND rtrim(t.table_schema) like '']]..SCHEMA_FILTER..[[''
+        AND rtrim(t.table_name) like '']]..TABLE_FILTER..[[''
     ') as db2 order by false
 )
 ,vv_create_schemas as(
@@ -75,7 +75,7 @@ with vv_db2_columns as (
                          when upper(data_type) in ('BIGINT', 'DECIMAL', 'INTEGER', 'SMALLINT', 'DOUBLE PRECISION', 'REAL', 'DATE', 'TIME', 'TIMESTAMP', 'CHARACTER', 'GRAPHIC', 'CHARACTER VARYING', 'GRAPHIC VARYING')
                          then column_name 
                          end order by ordinal_position) 
-           || ' from ' || table_schema|| '.' || table_name|| ''';' as sql_text
+           || ' from ' || rtrim(table_schema)|| '.' || rtrim(table_name)|| ''';' as sql_text
   from vv_db2_columns group by "exa_table_catalog","exa_table_schema","exa_table_name", table_schema,table_name
   order by "exa_table_catalog", "exa_table_schema","exa_table_name", table_schema,table_name
 ), base as
