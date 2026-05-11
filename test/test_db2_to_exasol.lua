@@ -81,18 +81,22 @@ end)
 print("")
 print("=== Generation Tests ===")
 
-test("trims DB2 catalog schema and table filters", function()
+test("trims DB2 catalog schema/table filters case-insensitively", function()
     local result = run_db2()
 
-    assert_contains(result.sql, "rtrim(t.table_schema) like ''DB2DT''")
-    assert_contains(result.sql, "rtrim(t.table_name) like ''CORE_CASE''")
+    assert_contains(result.sql, "upper(rtrim(t.table_schema)) like upper(''DB2DT'')")
+    assert_contains(result.sql, "upper(rtrim(t.table_name)) like upper(''CORE_CASE'')")
     assert_contains(result.sql, "rtrim(t.table_schema) not in")
 end)
 
-test("trims DB2 source table in generated import", function()
+test("quotes DB2 source identifiers in generated import", function()
     local result = run_db2()
 
-    assert_contains(result.sql, "from ' || rtrim(table_schema)|| '.' || rtrim(table_name)")
+    assert_contains(result.sql, [['"' || replace(table_schema, '"', '""') || '"' as "source_table_schema"]])
+    assert_contains(result.sql, [['"' || replace(table_name, '"', '""') || '"' as "source_table_name"]])
+    assert_contains(result.sql, [['"' || replace(column_name, '"', '""') || '"' as "source_column_name"]])
+    assert_contains(result.sql, "then \"source_column_name\"")
+    assert_contains(result.sql, "' from ' || \"source_table_schema\"|| '.' || \"source_table_name\"")
 end)
 
 print("")

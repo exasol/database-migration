@@ -16,22 +16,26 @@ RETURNS TABLE
 AS
 exa_upper_begin=''
 exa_upper_end=''
+db2_filter_begin=''
+db2_filter_end=''
 if IDENTIFIER_CASE_INSENSITIVE == true then
   exa_upper_begin='upper('
   exa_upper_end=')'
+  db2_filter_begin='upper('
+  db2_filter_end=')'
 end
 summary = {}
 
 res = query([[
 with vv_db2_columns as (
-  select ]]..exa_upper_begin..[[table_catalog]]..exa_upper_end..[[ as "exa_table_catalog", ]]..exa_upper_begin..[[table_schema]]..exa_upper_end..[[ as "exa_table_schema", ]]..exa_upper_begin..[[table_name]]..exa_upper_end..[[ as "exa_table_name", ]]..exa_upper_begin..[[column_name]]..exa_upper_end..[[ as "exa_column_name", db2.* from  
+  select ]]..exa_upper_begin..[[table_catalog]]..exa_upper_end..[[ as "exa_table_catalog", ]]..exa_upper_begin..[[table_schema]]..exa_upper_end..[[ as "exa_table_schema", ]]..exa_upper_begin..[[table_name]]..exa_upper_end..[[ as "exa_table_name", ]]..exa_upper_begin..[[column_name]]..exa_upper_end..[[ as "exa_column_name", '"' || replace(table_schema, '"', '""') || '"' as "source_table_schema", '"' || replace(table_name, '"', '""') || '"' as "source_table_name", '"' || replace(column_name, '"', '""') || '"' as "source_column_name", db2.* from
     (import from jdbc at ]]..CONNECTION_NAME..[[ statement 
       'select t.table_catalog, rtrim(t.table_schema) table_schema, rtrim(t.table_name) table_name, column_name, ordinal_position, data_type, character_maximum_length, numeric_precision, numeric_scale, datetime_precision
         from sysibm.columns c join sysibm.tables t on t.table_catalog = c.table_catalog and t.table_schema = c.table_schema and t.table_name = c.table_name
         where t.table_type = ''BASE TABLE'' 
         AND rtrim(t.table_schema) not in (''SYSCAT'',''SYSIBM'', ''SYSIBMADM'', ''SYSPUBLIC'', ''SYSSTAT'', ''SYSTOOLS'')
-        AND rtrim(t.table_schema) like '']]..SCHEMA_FILTER..[[''
-        AND rtrim(t.table_name) like '']]..TABLE_FILTER..[[''
+        AND ]]..db2_filter_begin..[[rtrim(t.table_schema)]]..db2_filter_end..[[ like ]]..db2_filter_begin..[['']]..SCHEMA_FILTER..[['']]..db2_filter_end..[[
+        AND ]]..db2_filter_begin..[[rtrim(t.table_name)]]..db2_filter_end..[[ like ]]..db2_filter_begin..[['']]..TABLE_FILTER..[['']]..db2_filter_end..[[
     ') as db2 order by false
 )
 ,vv_create_schemas as(
@@ -69,15 +73,15 @@ with vv_db2_columns as (
   select 'import into "' || "exa_table_schema" || '"."' || "exa_table_name" || '" from jdbc at ]]..CONNECTION_NAME..[[ statement ''select ' 
            || group_concat(
                          case 
-                         when upper(data_type) = 'BINARY' then 'cast('||column_name||' as char('||character_maximum_length||'))'                           
-                         when upper(data_type) = 'DECFLOAT' then 'cast('||column_name||' as double)'                           
-                         when upper(data_type) in ('CHARACTER LARGE OBJECT', 'DOUBLE-BYTE CHARACTER LARGE OBJECT') then 'cast('||column_name||' as varchar(32500))'                           
+                         when upper(data_type) = 'BINARY' then 'cast('||"source_column_name"||' as char('||character_maximum_length||'))'
+                         when upper(data_type) = 'DECFLOAT' then 'cast('||"source_column_name"||' as double)'
+                         when upper(data_type) in ('CHARACTER LARGE OBJECT', 'DOUBLE-BYTE CHARACTER LARGE OBJECT') then 'cast('||"source_column_name"||' as varchar(32500))'
                          when upper(data_type) in ('BIGINT', 'DECIMAL', 'INTEGER', 'SMALLINT', 'DOUBLE PRECISION', 'REAL', 'DATE', 'TIME', 'TIMESTAMP', 'CHARACTER', 'GRAPHIC', 'CHARACTER VARYING', 'GRAPHIC VARYING')
-                         then column_name 
+                         then "source_column_name"
                          end order by ordinal_position) 
-           || ' from ' || rtrim(table_schema)|| '.' || rtrim(table_name)|| ''';' as sql_text
-  from vv_db2_columns group by "exa_table_catalog","exa_table_schema","exa_table_name", table_schema,table_name
-  order by "exa_table_catalog", "exa_table_schema","exa_table_name", table_schema,table_name
+           || ' from ' || "source_table_schema"|| '.' || "source_table_name"|| ''';' as sql_text
+  from vv_db2_columns group by "exa_table_catalog","exa_table_schema","exa_table_name", "source_table_schema","source_table_name"
+  order by "exa_table_catalog", "exa_table_schema","exa_table_name", "source_table_schema","source_table_name"
 ), base as
 (
 select 1 id, cast('-- ### SCHEMAS ###' as varchar(2000000)) SQL_TEXT
