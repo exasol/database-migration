@@ -25,7 +25,7 @@ create or replace script database_migration.MIGRATE_TO_EXASOL(
 ) RETURNS TABLE
 AS
 
-local OUT_COLUMNS = "SQL_TEXT VARCHAR(2000000), SUCCESS VARCHAR(10), ERROR_MESSAGE VARCHAR(20000)"
+local OUT_COLUMNS = "STEP_KIND VARCHAR(40), TARGET_OBJ VARCHAR(2000), ROWS_AFFECTED DECIMAL(18,0), ELAPSED_MS DECIMAL(18,0), RESULT_FLAG VARCHAR(20), SQL_TEXT VARCHAR(2000000), ERROR_MESSAGE VARCHAR(20000)"
 
 function is_null(value)
     return value == nil or value == null or value == NULL
@@ -170,16 +170,45 @@ function first_sql_text(row)
     return tostring(row)
 end
 
-function normalize_rows(res)
-    local summary = {}
-    for i = 1, #res do
-        local row = res[i]
-        local sql_text = first_sql_text(row)
-        local success = row.SUCCESS or row[2] or 'PREVIEW'
-        local error_message = row.ERROR_MESSAGE or row[3] or NULL
-        summary[#summary + 1] = {sql_text, success, error_message}
+function classify_step(sql_text)
+    local text = blank_to_nil(sql_text)
+    if text == nil then
+        return 'INFO'
     end
-    return summary
+    if string.sub(text, 1, 2) == '--' then
+        return 'INFO'
+    end
+    local lower = string.lower(text)
+    if string.find(lower, '^%s*create%s+schema') then
+        return 'CREATE_SCHEMA'
+    elseif string.find(lower, '^%s*create%s+or%s+replace%s+table')
+        or string.find(lower, '^%s*create%s+table') then
+        return 'CREATE_TABLE'
+    elseif string.find(lower, '^%s*alter%s+table') then
+        return 'ALTER_TABLE'
+    elseif string.find(lower, '^%s*import%s+into') then
+        return 'IMPORT'
+    elseif string.find(lower, '^%s*insert%s+into') then
+        return 'IMPORT'
+    end
+    return 'OTHER'
+end
+
+function extract_target_obj(sql_text, step_kind)
+    local text = blank_to_nil(sql_text)
+    if text == nil then
+        return NULL
+    end
+    if step_kind == 'CREATE_SCHEMA' then
+        local schema = text:match('[Cc][Rr][Ee][Aa][Tt][Ee]%s+[Ss][Cc][Hh][Ee][Mm][Aa]%s+[Ii][Ff]%s+[Nn][Oo][Tt]%s+[Ee][Xx][Ii][Ss][Tt][Ss]%s+"([^"]+)"')
+            or text:match('[Cc][Rr][Ee][Aa][Tt][Ee]%s+[Ss][Cc][Hh][Ee][Mm][Aa]%s+"([^"]+)"')
+            or text:match('[Cc][Rr][Ee][Aa][Tt][Ee]%s+[Ss][Cc][Hh][Ee][Mm][Aa]%s+([%w_]+)')
+        if schema then return schema end
+    elseif step_kind == 'CREATE_TABLE' or step_kind == 'ALTER_TABLE' or step_kind == 'IMPORT' then
+        local schema, table_name = text:match('"([^"]+)"%."([^"]+)"')
+        if schema and table_name then return schema .. '.' .. table_name end
+    end
+    return NULL
 end
 
 function is_executable_statement(sql_text)
@@ -190,34 +219,81 @@ function is_executable_statement(sql_text)
     return string.sub(text, 1, 2) ~= '--'
 end
 
+function build_row(step_kind, target_obj, rows_affected, elapsed_ms, result_flag, sql_text, error_message)
+    return {step_kind, target_obj, rows_affected, elapsed_ms, result_flag, sql_text, error_message}
+end
+
+function normalize_rows(res)
+    local summary = {}
+    local tables_count = 0
+    for i = 1, #res do
+        local row = res[i]
+        local sql_text = first_sql_text(row)
+        local kind = classify_step(sql_text)
+        local target = extract_target_obj(sql_text, kind)
+        if kind == 'CREATE_TABLE' then
+            tables_count = tables_count + 1
+        end
+        local flag = row.RESULT_FLAG or row.SUCCESS or row[5] or row[2] or 'PREVIEW'
+        local err = row.ERROR_MESSAGE or row[7] or row[3] or NULL
+        summary[#summary + 1] = build_row(kind, target, NULL, NULL, flag, sql_text, err)
+    end
+    summary[#summary + 1] = build_row('SUMMARY', 'Plan: ' .. tables_count .. ' table(s) to create', NULL, NULL, 'PREVIEW', NULL, NULL)
+    return summary
+end
+
 function execute_generated_sql(res)
     local summary = {}
     local fail_count = 0
     local executed_count = 0
+    local tables_created = 0
+    local total_rows = 0
+    local total_elapsed = 0
 
     for i = 1, #res do
         local sql_text = first_sql_text(res[i])
+        local kind = classify_step(sql_text)
+        local target = extract_target_obj(sql_text, kind)
         if is_executable_statement(sql_text) then
             executed_count = executed_count + 1
+            local t0 = os.clock()
             local success, info = pquery(sql_text)
+            local elapsed = math.floor((os.clock() - t0) * 1000)
+            total_elapsed = total_elapsed + elapsed
             if success then
-                summary[#summary + 1] = {sql_text, 'TRUE', NULL}
+                local rows_affected = NULL
+                if info ~= nil and info.rows_affected ~= nil then
+                    rows_affected = tonumber(info.rows_affected) or NULL
+                    if kind == 'IMPORT' and type(rows_affected) == 'number' then
+                        total_rows = total_rows + rows_affected
+                    end
+                end
+                if kind == 'CREATE_TABLE' then
+                    tables_created = tables_created + 1
+                end
+                summary[#summary + 1] = build_row(kind, target, rows_affected, elapsed, 'OK', sql_text, NULL)
             else
                 fail_count = fail_count + 1
-                summary[#summary + 1] = {sql_text, 'FALSE', info.error_message}
+                summary[#summary + 1] = build_row(kind, target, NULL, elapsed, 'ERROR', sql_text, info.error_message)
             end
         else
-            summary[#summary + 1] = {sql_text, 'SKIPPED', 'Comment or empty'}
+            summary[#summary + 1] = build_row(kind, target, NULL, NULL, 'SKIPPED', sql_text, NULL)
         end
     end
 
+    local summary_obj
+    local summary_flag
     if executed_count == 0 then
-        table.insert(summary, 1, {'-- No executable SQL statements were generated.', 'SKIPPED', NULL})
+        summary_obj = 'No executable SQL generated'
+        summary_flag = 'SKIPPED'
     elseif fail_count == 0 then
-        table.insert(summary, 1, {'-- The following statements were executed successfully.', 'SKIPPED', NULL})
+        summary_obj = 'Completed: ' .. tables_created .. ' table(s), ' .. total_rows .. ' row(s) loaded'
+        summary_flag = 'OK'
     else
-        table.insert(summary, 1, {'-- Execution completed with ' .. fail_count .. ' error(s). See ERROR_MESSAGE column for details.', 'SKIPPED', NULL})
+        summary_obj = 'Completed with ' .. fail_count .. ' error(s); ' .. tables_created .. ' table(s) created, ' .. total_rows .. ' row(s) loaded'
+        summary_flag = 'ERROR'
     end
+    summary[#summary + 1] = build_row('SUMMARY', summary_obj, total_rows, total_elapsed, summary_flag, NULL, NULL)
 
     return summary
 end

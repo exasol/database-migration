@@ -61,8 +61,20 @@ EXECUTE SCRIPT DATABASE_MIGRATION.MIGRATE_TO_EXASOL(
 
 Common parameters:
 - `SOURCE_TYPE`: `MYSQL`, `MARIADB`, `POSTGRES`, `REDSHIFT`, `DB2`, `VERTICA`, `HANA`, `AZURE_SQL`, `BIGQUERY`, `DATABRICKS`, `SQLSERVER`, `SNOWFLAKE`, `ORACLE`, `TERADATA`, `EXASOL`, `NETEZZA`, or `VECTORWISE`.
-- `DEBUG`: `TRUE` returns generated SQL. `FALSE` executes generated SQL and returns status rows.
+- `DEBUG`: `TRUE` returns generated SQL with `RESULT_FLAG = PREVIEW`. `FALSE` executes generated SQL and returns one row per statement plus a trailing `SUMMARY` row.
 - `OPTIONS`: source-specific `KEY=VALUE` pairs separated by semicolons.
+
+The script returns a 7-column audit table:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `STEP_KIND` | `VARCHAR(40)` | `CREATE_SCHEMA`, `CREATE_TABLE`, `ALTER_TABLE`, `IMPORT`, `INFO`, `OTHER`, or `SUMMARY` |
+| `TARGET_OBJ` | `VARCHAR(2000)` | `"SCHEMA"."TABLE"` for table-level steps; schema name for `CREATE_SCHEMA`; `NULL` for `INFO`; rollup text for `SUMMARY` |
+| `ROWS_AFFECTED` | `DECIMAL(18,0)` | rows imported per `IMPORT`; total in `SUMMARY` |
+| `ELAPSED_MS` | `DECIMAL(18,0)` | wall-clock ms per executed statement; total in `SUMMARY` |
+| `RESULT_FLAG` | `VARCHAR(20)` | `PREVIEW`, `OK`, `ERROR`, or `SKIPPED` |
+| `SQL_TEXT` | `VARCHAR(2000000)` | the generated/executed statement (or comment); `NULL` on `SUMMARY` |
+| `ERROR_MESSAGE` | `VARCHAR(20000)` | Exasol error text when `RESULT_FLAG = ERROR` |
 
 Useful `OPTIONS` keys:
 - `PROJECT_ID`: required for `BIGQUERY` unless `DB_FILTER` contains the project ID.
@@ -71,7 +83,7 @@ Useful `OPTIONS` keys:
 - `PARALLEL_STATEMENTS`, `CREATE_PK`, `CREATE_FK`, `CHECK_MIGRATION`: Oracle/Teradata options.
 - `GENERATE_VIEWS`, `VIEW_FILTER`, `PK_SETTING`: Exasol-to-Exasol options.
 
-The S3 parallel loader keeps its direct script interface because it uses a different parameter shape.
+The S3 parallel loader keeps its direct script interface because it uses a different parameter shape; calling `MIGRATE_TO_EXASOL` with `SOURCE_TYPE = 'S3'` raises an explicit error pointing at `DATABASE_MIGRATION.S3_PARALLEL_READ`.
 
 ## Migration source
 

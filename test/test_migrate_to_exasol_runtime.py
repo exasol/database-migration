@@ -124,23 +124,33 @@ def main() -> int:
     for source, (script_name, _) in ADAPTERS.items():
         rows = conn.execute(wrapper_call(source, debug=True)).fetchall()
         assert rows, f"{source} preview returned no rows"
-        assert_contains(rows[0][0], f"MOCK {script_name}")
+        if rows[0][0] != "INFO":
+            raise AssertionError(f"{source} first row STEP_KIND expected INFO, got {rows[0][0]}")
+        assert_contains(rows[0][5], f"MOCK {script_name}")
+        if rows[-1][0] != "SUMMARY" or rows[-1][4] != "PREVIEW":
+            raise AssertionError(f"{source} missing SUMMARY/PREVIEW tail row: {rows[-1]}")
     print(f"preview_dispatch={len(ADAPTERS)}")
 
     for source in ("MYSQL", "SNOWFLAKE", "DATABRICKS", "ORACLE"):
         rows = conn.execute(wrapper_call(source, debug=False)).fetchall()
-        if rows[0][1] != "SKIPPED" or "executed successfully" not in rows[0][0]:
-            raise AssertionError(f"{source} did not report successful execution: {rows[0]}")
+        summary = rows[-1]
+        if summary[0] != "SUMMARY" or summary[4] != "OK":
+            raise AssertionError(f"{source} did not report SUMMARY/OK: {summary}")
         script_name = ADAPTERS[source][0]
         table_name = script_name.replace("_TO_EXASOL", "")
         count = conn.execute(f'select count(*) from "{target_schema}"."{table_name}"').fetchval()
         if count != 1:
             raise AssertionError(f"{source} expected 1 loaded row, got {count}")
+        kinds = {row[0] for row in rows}
+        for required in ("CREATE_SCHEMA", "CREATE_TABLE", "IMPORT", "SUMMARY"):
+            if required not in kinds:
+                raise AssertionError(f"{source} missing STEP_KIND={required}; got {kinds}")
     print("execute_representative=4")
 
     rows = conn.execute(wrapper_call("MYSQL", debug=False, table_filter="EMPTY")).fetchall()
-    if rows[0][0] != "-- No executable SQL statements were generated.":
-        raise AssertionError(f"Expected no-op summary, got {rows[0]}")
+    summary = rows[-1]
+    if summary[0] != "SUMMARY" or summary[1] != "No executable SQL generated" or summary[4] != "SKIPPED":
+        raise AssertionError(f"Expected no-op SUMMARY row, got {summary}")
     print("empty_execution=pass")
 
     try:
@@ -160,7 +170,9 @@ def main() -> int:
     print("s3_rejection=pass")
 
     rows = conn.execute(wrapper_call("DATABRICKS_SQL", debug=True)).fetchall()
-    assert_contains(rows[0][0], "MOCK DATABRICKS_TO_EXASOL")
+    assert_contains(rows[0][5], "MOCK DATABRICKS_TO_EXASOL")
+    if rows[-1][0] != "SUMMARY":
+        raise AssertionError(f"Alias dispatch missing SUMMARY: {rows[-1]}")
     print("alias_dispatch=pass")
     return 0
 

@@ -66,10 +66,13 @@ local function run_migrate(params)
         string = string,
         table = table,
         math = math,
+        os = os,
         tostring = tostring,
         tonumber = tonumber,
         type = type,
         error = error,
+        ipairs = ipairs,
+        pairs = pairs,
     }
 
     env.pquery = function(sql)
@@ -88,7 +91,8 @@ local function run_migrate(params)
         if result and result.success == false then
             return false, {error_message = result.error_message or "execution failed"}
         end
-        return true, {rows_affected = 0}
+        local affected = (result and result.rows_affected) or 0
+        return true, {rows_affected = affected}
     end
 
     local fn, err = load(migrate_lua, "migrate_to_exasol.lua", "t", env)
@@ -102,6 +106,8 @@ local function run_migrate(params)
         adapter_sql = calls[1],
     }
 end
+
+local AUDIT_COLUMNS = "STEP_KIND VARCHAR(40), TARGET_OBJ VARCHAR(2000), ROWS_AFFECTED DECIMAL(18,0), ELAPSED_MS DECIMAL(18,0), RESULT_FLAG VARCHAR(20), SQL_TEXT VARCHAR(2000000), ERROR_MESSAGE VARCHAR(20000)"
 
 local function default_case(source_type, expected_sql)
     test("dispatches " .. source_type, function()
@@ -117,9 +123,12 @@ local function default_case(source_type, expected_sql)
             options = "",
         })
         assert_eq(result.adapter_sql, expected_sql)
-        assert_eq(result.rows[1][1], "select 1")
-        assert_eq(result.rows[1][2], "PREVIEW")
-        assert_eq(result.columns, "SQL_TEXT VARCHAR(2000000), SUCCESS VARCHAR(10), ERROR_MESSAGE VARCHAR(20000)")
+        assert_eq(result.rows[1][1], "OTHER")
+        assert_eq(result.rows[1][5], "PREVIEW")
+        assert_eq(result.rows[1][6], "select 1")
+        assert_eq(result.rows[2][1], "SUMMARY")
+        assert_eq(result.rows[2][5], "PREVIEW")
+        assert_eq(result.columns, AUDIT_COLUMNS)
     end)
 end
 
@@ -248,9 +257,12 @@ test("DEBUG false runs generated statements for non-native adapters", function()
 
     assert_eq(#result.calls, 2)
     assert_eq(result.calls[2], "create table t(c int)")
-    assert_eq(result.rows[1][1], "-- The following statements were executed successfully.")
-    assert_eq(result.rows[2][2], "SKIPPED")
-    assert_eq(result.rows[3][2], "TRUE")
+    assert_eq(result.rows[1][1], "INFO")
+    assert_eq(result.rows[1][5], "SKIPPED")
+    assert_eq(result.rows[2][1], "CREATE_TABLE")
+    assert_eq(result.rows[2][5], "OK")
+    assert_eq(result.rows[3][1], "SUMMARY")
+    assert_eq(result.rows[3][5], "OK")
 end)
 
 test("DEBUG false runs Snowflake generated statements", function()
@@ -264,8 +276,10 @@ test("DEBUG false runs Snowflake generated statements", function()
 
     assert_eq(#result.calls, 2)
     assert_eq(result.calls[2], "create table t(c int)")
-    assert_eq(result.rows[1][1], "-- The following statements were executed successfully.")
-    assert_eq(result.rows[2][2], "TRUE")
+    assert_eq(result.rows[1][1], "CREATE_TABLE")
+    assert_eq(result.rows[1][5], "OK")
+    assert_eq(result.rows[2][1], "SUMMARY")
+    assert_eq(result.rows[2][5], "OK")
 end)
 
 test("DEBUG false reports no executable generated statements", function()
@@ -279,9 +293,13 @@ test("DEBUG false reports no executable generated statements", function()
     })
 
     assert_eq(#result.calls, 1)
-    assert_eq(result.rows[1][1], "-- No executable SQL statements were generated.")
-    assert_eq(result.rows[2][2], "SKIPPED")
-    assert_eq(result.rows[3][2], "SKIPPED")
+    assert_eq(result.rows[1][1], "INFO")
+    assert_eq(result.rows[1][5], "SKIPPED")
+    assert_eq(result.rows[2][1], "INFO")
+    assert_eq(result.rows[2][5], "SKIPPED")
+    assert_eq(result.rows[3][1], "SUMMARY")
+    assert_eq(result.rows[3][2], "No executable SQL generated")
+    assert_eq(result.rows[3][5], "SKIPPED")
 end)
 
 test("DEBUG false reports empty adapter output", function()
@@ -293,8 +311,61 @@ test("DEBUG false reports empty adapter output", function()
 
     assert_eq(#result.calls, 1)
     assert_eq(#result.rows, 1)
-    assert_eq(result.rows[1][1], "-- No executable SQL statements were generated.")
-    assert_eq(result.rows[1][2], "SKIPPED")
+    assert_eq(result.rows[1][1], "SUMMARY")
+    assert_eq(result.rows[1][2], "No executable SQL generated")
+    assert_eq(result.rows[1][5], "SKIPPED")
+end)
+
+test("STEP_KIND classifies CREATE_SCHEMA / CREATE_TABLE / IMPORT", function()
+    local result = run_migrate({
+        source_type = "MYSQL",
+        debug = false,
+        adapter_rows = {
+            {SQL_TEXT = 'create schema if not exists "MART"'},
+            {SQL_TEXT = 'create or replace table "MART"."ORDERS" ("ID" DECIMAL(18,0))'},
+            {SQL_TEXT = 'import into "MART"."ORDERS" from jdbc at SRC_CONN statement \'select id from orders\''},
+        },
+    })
+
+    assert_eq(result.rows[1][1], "CREATE_SCHEMA")
+    assert_eq(result.rows[1][2], "MART")
+    assert_eq(result.rows[2][1], "CREATE_TABLE")
+    assert_eq(result.rows[2][2], "MART.ORDERS")
+    assert_eq(result.rows[3][1], "IMPORT")
+    assert_eq(result.rows[3][2], "MART.ORDERS")
+    assert_eq(result.rows[4][1], "SUMMARY")
+end)
+
+test("ROWS_AFFECTED captured for IMPORT in execute mode", function()
+    local result = run_migrate({
+        source_type = "MYSQL",
+        debug = false,
+        adapter_rows = {
+            {SQL_TEXT = 'import into "M"."T" from jdbc at SRC statement \'select 1\''},
+        },
+        execute_results = {[1] = {success = true, rows_affected = 42}},
+    })
+
+    assert_eq(result.rows[1][1], "IMPORT")
+    assert_eq(result.rows[1][3], 42)
+    assert_eq(result.rows[2][1], "SUMMARY")
+    assert_eq(result.rows[2][3], 42)
+end)
+
+test("Errors mark RESULT_FLAG ERROR and SUMMARY ERROR", function()
+    local result = run_migrate({
+        source_type = "MYSQL",
+        debug = false,
+        adapter_rows = {
+            {SQL_TEXT = 'create table "T" ("c" INT)'},
+        },
+        execute_results = {[1] = {success = false, error_message = "boom"}},
+    })
+
+    assert_eq(result.rows[1][5], "ERROR")
+    assert_eq(result.rows[1][7], "boom")
+    assert_eq(result.rows[2][1], "SUMMARY")
+    assert_eq(result.rows[2][5], "ERROR")
 end)
 
 print("")
