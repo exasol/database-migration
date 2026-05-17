@@ -90,6 +90,50 @@ test("quotes Postgres source identifiers in generated import", function()
     assert_contains(result.sql, "replace(\"table_name\", '\"', '\"\"')")
 end)
 
+local function run_postgres_with_dest_schema(dest_value, null_sentinel)
+    local calls = {}
+    local env = {
+        CONNECTION_NAME = "POSTGRES_CONNECTION",
+        IDENTIFIER_CASE_INSENSITIVE = true,
+        SCHEMA_FILTER = "%",
+        TABLE_FILTER = "smoke",
+        DEST_SCHEMA = dest_value,
+        null = null_sentinel,
+        string = string,
+        table = table,
+        tostring = tostring,
+        type = type,
+        error = error,
+    }
+    env.query = function(sql)
+        calls[#calls + 1] = sql
+        return {{SQL_TEXT = "-- ### SCHEMAS ###"}}
+    end
+    local fn, err = load(postgres_lua, "postgres_to_exasol.lua", "t", env)
+    assert(fn, "Lua load failed: " .. tostring(err))
+    local ok, perr = pcall(fn)
+    return {ok = ok, err = perr, sql = calls[1]}
+end
+
+test("treats Exasol null sentinel DEST_SCHEMA as no override", function()
+    local null_sentinel = {}  -- stand-in for Exasol null userdata
+    local r = run_postgres_with_dest_schema(null_sentinel, null_sentinel)
+    assert(r.ok, "adapter errored on null DEST_SCHEMA: " .. tostring(r.err))
+    assert_contains(r.sql, 'upper("table_schema")')
+end)
+
+test("treats nil DEST_SCHEMA as no override", function()
+    local r = run_postgres_with_dest_schema(nil, nil)
+    assert(r.ok, "adapter errored on nil DEST_SCHEMA: " .. tostring(r.err))
+    assert_contains(r.sql, 'upper("table_schema")')
+end)
+
+test("uses DEST_SCHEMA literal when provided", function()
+    local r = run_postgres_with_dest_schema("MY_DST", nil)
+    assert(r.ok, "adapter errored on valid DEST_SCHEMA: " .. tostring(r.err))
+    assert_contains(r.sql, "'MY_DST'")
+end)
+
 print("")
 print(string.format("=== Results: %d passed, %d failed ===", passed, failed))
 

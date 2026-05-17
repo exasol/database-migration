@@ -20,7 +20,7 @@ if IDENTIFIER_CASE_INSENSITIVE == true then
 	exa_upper_begin='upper('
 	exa_upper_end=')'
 end
-if DEST_SCHEMA then
+if DEST_SCHEMA ~= nil and DEST_SCHEMA ~= null then
 	exa_table_schema_clause=[[']]..DEST_SCHEMA..[[']]
 else
 	exa_table_schema_clause=exa_upper_begin..[["table_schema"]]..exa_upper_end
