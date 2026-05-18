@@ -73,6 +73,8 @@ local function run_migrate(params)
         error = error,
         ipairs = ipairs,
         pairs = pairs,
+        pcall = pcall,
+        select = select,
     }
 
     local execute_call_index = 0
@@ -499,14 +501,14 @@ test("gate keeps multi-statement IMPORT at or above threshold", function()
     assert_eq(count, 4, "expected all four STATEMENT clauses preserved, got " .. count)
 end)
 
-test("gate leaves single-statement IMPORT untouched", function()
+test("gate + splitter off leaves single-statement IMPORT untouched", function()
     local sql = single_stmt_import("DST", "MED_T", "SMOKE", "MED_T")
     local result = run_migrate({
         source_type = "ORACLE",
-        options = "PARALLEL_ROW_THRESHOLD=1000000",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=1;PARALLEL_SPLIT=OFF",
         adapter_rows = {{SQL_TEXT = sql}},
     })
-    assert_eq(#result.calls, 1, "no row-count lookup should fire for single-statement IMPORT")
+    assert_eq(#result.calls, 1, "no metadata lookup should fire when splitter and gate are both inactive on single-stmt IMPORTs")
     local row = find_import_row(result.rows, "DST.MED_T")
     assert(row, "IMPORT row missing")
     assert_eq(row[6], sql)
@@ -667,6 +669,209 @@ test("gate applies per-table within one migration with one lookup", function()
     assert_eq(small_count, 1, "SMALL_T should be rewritten to 1 statement")
     assert_eq(big_count, 4, "BIG_T should retain 4 statements")
     assert_eq(med_count, 1, "MED_T single-stmt unchanged")
+end)
+
+print("")
+print("=== PARALLEL_SPLIT Dispatcher Tests ===")
+
+local function count_clauses(sql)
+    local _, n = string.gsub(sql, "STATEMENT '", "STATEMENT '")
+    return n
+end
+
+test("splitter expands single-statement IMPORT on numeric PK (PK_RANGE)", function()
+    local sql = single_stmt_import("DST", "ORDERS", "PUBLIC", "orders")
+    local result = run_migrate({
+        source_type = "POSTGRES",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=4;PARALLEL_SPLIT=AUTO",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "PUBLIC", SRC_TABLE = "orders", SRC_ROWS = 20000000, SRC_PK_COL = "ORDER_ID", SRC_PK_TYPE = "int8"}},
+    })
+    local row = find_import_row(result.rows, "DST.ORDERS")
+    assert(row, "IMPORT row missing")
+    assert_eq(count_clauses(row[6]), 4, "expected 4 STATEMENT clauses; got " .. count_clauses(row[6]))
+    assert_contains(row[6], 'MOD("ORDER_ID", 4) = 0')
+    assert_contains(row[6], 'MOD("ORDER_ID", 4) = 3')
+    assert_contains(row[6], '"PUBLIC"."orders"')
+    assert_contains(row[6], '"DST"."ORDERS"')
+end)
+
+test("splitter expands single-statement IMPORT on date column (DATE_BUCKET, quarter)", function()
+    local sql = single_stmt_import("DST", "EVENTS", "SMOKE", "EVENTS")
+    local result = run_migrate({
+        source_type = "POSTGRES",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=4;PARALLEL_SPLIT=AUTO",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "SMOKE", SRC_TABLE = "EVENTS", SRC_ROWS = 20000000, SRC_DATE_COL = "EVENT_DT"}},
+    })
+    local row = find_import_row(result.rows, "DST.EVENTS")
+    assert(row, "IMPORT row missing")
+    assert_eq(count_clauses(row[6]), 4)
+    assert_contains(row[6], 'EXTRACT(MONTH FROM "EVENT_DT") IN (1, 2, 3)')
+    assert_contains(row[6], 'EXTRACT(MONTH FROM "EVENT_DT") IN (10, 11, 12)')
+    assert_contains(row[6], '"EVENT_DT" IS NULL')
+end)
+
+test("splitter falls through to HASH_NUM when no PK + no date col", function()
+    local sql = single_stmt_import("DST", "SESSIONS", "SMOKE", "SESSIONS")
+    local result = run_migrate({
+        source_type = "POSTGRES",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=4;PARALLEL_SPLIT=AUTO",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "SMOKE", SRC_TABLE = "SESSIONS", SRC_ROWS = 20000000, SRC_NUM_COL = "CUSTOMER_ID"}},
+    })
+    local row = find_import_row(result.rows, "DST.SESSIONS")
+    assert_eq(count_clauses(row[6]), 4)
+    assert_contains(row[6], 'HASHTEXT("CUSTOMER_ID"')
+end)
+
+test("splitter picks ROWID when no PK/date/num and source supports it", function()
+    local sql = single_stmt_import("DST", "HEAP_T", "SMOKE", "HEAP_T")
+    local result = run_migrate({
+        source_type = "POSTGRES",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=4;PARALLEL_SPLIT=AUTO",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "SMOKE", SRC_TABLE = "HEAP_T", SRC_ROWS = 20000000}},
+    })
+    local row = find_import_row(result.rows, "DST.HEAP_T")
+    assert_eq(count_clauses(row[6]), 4)
+    assert_contains(row[6], 'HASHTEXT(ctid::text)')
+end)
+
+test("splitter falls back to SINGLE + INFO row when no usable column (no ROWID support)", function()
+    local sql = single_stmt_import("DST", "MYSTERY_T", "SMOKE", "MYSTERY_T")
+    local result = run_migrate({
+        source_type = "SNOWFLAKE",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=4;PARALLEL_SPLIT=AUTO",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "SMOKE", SRC_TABLE = "MYSTERY_T", SRC_ROWS = 20000000}},
+    })
+    local row = find_import_row(result.rows, "DST.MYSTERY_T")
+    assert_eq(count_clauses(row[6]), 1, "IMPORT must remain single-statement when no split column")
+    assert_eq(row[6], sql)
+    local info_found = false
+    for i = 1, #result.rows do
+        if result.rows[i][1] == "INFO" and tostring(result.rows[i][6]):find("SMOKE.MYSTERY_T", 1, true) then
+            info_found = true
+            break
+        end
+    end
+    assert(info_found, "expected INFO row noting splitter SINGLE fallback")
+end)
+
+test("splitter ignores single-stmt IMPORT below threshold", function()
+    local sql = single_stmt_import("DST", "SMALL_T", "SMOKE", "SMALL_T")
+    local result = run_migrate({
+        source_type = "POSTGRES",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=4;PARALLEL_SPLIT=AUTO",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "SMOKE", SRC_TABLE = "SMALL_T", SRC_ROWS = 500000, SRC_PK_COL = "ID", SRC_PK_TYPE = "int8"}},
+    })
+    local row = find_import_row(result.rows, "DST.SMALL_T")
+    assert_eq(count_clauses(row[6]), 1, "below-threshold IMPORT must stay single-statement")
+    assert_eq(row[6], sql)
+end)
+
+test("splitter leaves multi-statement IMPORTs unchanged (pass-through)", function()
+    local sql = multi_stmt_import("DST", "BIG_T", "SMOKE", "BIG_T", 4)
+    local result = run_migrate({
+        source_type = "ORACLE",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=4;PARALLEL_SPLIT=AUTO",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "SMOKE", SRC_TABLE = "BIG_T", SRC_ROWS = 20000000, SRC_PK_COL = "ID", SRC_PK_TYPE = "NUMBER"}},
+    })
+    local row = find_import_row(result.rows, "DST.BIG_T")
+    assert_eq(count_clauses(row[6]), 4, "multi-stmt IMPORT must retain its 4 STATEMENT clauses")
+end)
+
+test("PARALLEL_SPLIT=OFF disables splitter despite usable metadata", function()
+    local sql = single_stmt_import("DST", "ORDERS", "PUBLIC", "orders")
+    local result = run_migrate({
+        source_type = "POSTGRES",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=4;PARALLEL_SPLIT=OFF",
+        adapter_rows = {{SQL_TEXT = sql}},
+    })
+    assert_eq(#result.calls, 1, "no metadata lookup should fire when PARALLEL_SPLIT=OFF and no multi-stmt IMPORTs")
+    local row = find_import_row(result.rows, "DST.ORDERS")
+    assert_eq(row[6], sql)
+end)
+
+test("PARALLEL_SPLIT=DATE:col:grain forces named column and grain", function()
+    local sql = single_stmt_import("DST", "EVENTS", "SMOKE", "EVENTS")
+    local result = run_migrate({
+        source_type = "POSTGRES",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=4;PARALLEL_SPLIT=DATE:CREATED_AT:QUARTER",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "SMOKE", SRC_TABLE = "EVENTS", SRC_ROWS = 20000000, SRC_PK_COL = "EVENT_ID", SRC_PK_TYPE = "int8", SRC_DATE_COL = "EVENT_DT"}},
+    })
+    local row = find_import_row(result.rows, "DST.EVENTS")
+    assert_eq(count_clauses(row[6]), 4)
+    assert_contains(row[6], 'EXTRACT(MONTH FROM "CREATED_AT")')
+    assert(not row[6]:find('EVENT_DT'), "named override must not consult cache.src_date_col")
+    assert(not row[6]:find('EVENT_ID'), "named override must not consult cache.src_pk_col")
+end)
+
+test("PARALLEL_SPLIT=HASH:col forces named column", function()
+    local sql = single_stmt_import("DST", "SESSIONS", "SMOKE", "SESSIONS")
+    local result = run_migrate({
+        source_type = "POSTGRES",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=4;PARALLEL_SPLIT=HASH:CUSTOMER_ID",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "SMOKE", SRC_TABLE = "SESSIONS", SRC_ROWS = 20000000, SRC_PK_COL = "SESSION_ID", SRC_PK_TYPE = "int8"}},
+    })
+    local row = find_import_row(result.rows, "DST.SESSIONS")
+    assert_eq(count_clauses(row[6]), 4)
+    assert_contains(row[6], 'HASHTEXT("CUSTOMER_ID"')
+end)
+
+test("splitter preserves IMPORT target + column list during rewrite", function()
+    local sql = 'IMPORT INTO "DST"."ORDERS" ("A","B","C") FROM JDBC AT SRC_CONN STATEMENT \'select "A","B","C" from "PUBLIC"."orders"\''
+    local result = run_migrate({
+        source_type = "POSTGRES",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=2;PARALLEL_SPLIT=AUTO",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "PUBLIC", SRC_TABLE = "orders", SRC_ROWS = 5000000, SRC_PK_COL = "A", SRC_PK_TYPE = "int8"}},
+    })
+    local row = find_import_row(result.rows, "DST.ORDERS")
+    assert_contains(row[6], 'IMPORT INTO "DST"."ORDERS" ("A","B","C")')
+    assert_contains(row[6], 'select "A","B","C" from "PUBLIC"."orders"')
+    assert_eq(count_clauses(row[6]), 2)
+end)
+
+test("metadata round-trip fires once for mixed single/multi-stmt IMPORTs", function()
+    local sql_multi = multi_stmt_import("DST", "BIG_T", "SMOKE", "BIG_T", 4)
+    local sql_single = single_stmt_import("DST", "ORDERS", "PUBLIC", "orders")
+    local result = run_migrate({
+        source_type = "POSTGRES",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=4;PARALLEL_SPLIT=AUTO",
+        adapter_rows = {{SQL_TEXT = sql_multi}, {SQL_TEXT = sql_single}},
+        gate_lookup_rows = {
+            {SRC_SCHEMA = "SMOKE", SRC_TABLE = "BIG_T", SRC_ROWS = 500},
+            {SRC_SCHEMA = "PUBLIC", SRC_TABLE = "orders", SRC_ROWS = 20000000, SRC_PK_COL = "ID", SRC_PK_TYPE = "int8"},
+        },
+    })
+    local lookup_count = 0
+    for i = 1, #result.calls do
+        if tostring(result.calls[i]):find("import into (src_schema", 1, true) then
+            lookup_count = lookup_count + 1
+        end
+    end
+    assert_eq(lookup_count, 1, "exactly one metadata round-trip across gate + splitter")
+    local multi_row = find_import_row(result.rows, "DST.BIG_T")
+    local single_row = find_import_row(result.rows, "DST.ORDERS")
+    assert_eq(count_clauses(multi_row[6]), 1, "below-threshold multi-stmt collapsed by gate")
+    assert_eq(count_clauses(single_row[6]), 4, "above-threshold single-stmt expanded by splitter")
 end)
 
 print("")
