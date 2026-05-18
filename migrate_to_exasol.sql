@@ -516,8 +516,22 @@ end
 
 function extract_source_ref_from_import(sql)
     if sql == nil then return nil, nil end
+    -- Postgres / Oracle / MySQL / Snowflake adapters quote source identifiers
+    -- with double quotes. Match those first.
     local schema, table_name = sql:match('[Ff][Rr][Oo][Mm]%s+"([^"]+)"%."([^"]+)"')
-    return schema, table_name
+    if schema and table_name then return schema, table_name end
+    -- SQL Server / Azure SQL adapter uses [bracket] quoting and may emit a
+    -- three-part name `[db].[schema].[table]`. Reduce to (schema, table).
+    local db, sch, tab = sql:match('[Ff][Rr][Oo][Mm]%s+%[([^%]]+)%]%.%[([^%]]+)%]%.%[([^%]]+)%]')
+    if db and sch and tab then return sch, tab end
+    schema, table_name = sql:match('[Ff][Rr][Oo][Mm]%s+%[([^%]]+)%]%.%[([^%]]+)%]')
+    if schema and table_name then return schema, table_name end
+    -- Databricks adapter uses backticks (`db`.`schema`.`table` or `schema`.`table`).
+    local db_b, sch_b, tab_b = sql:match('[Ff][Rr][Oo][Mm]%s+`([^`]+)`%.`([^`]+)`%.`([^`]+)`')
+    if db_b and sch_b and tab_b then return sch_b, tab_b end
+    schema, table_name = sql:match('[Ff][Rr][Oo][Mm]%s+`([^`]+)`%.`([^`]+)`')
+    if schema and table_name then return schema, table_name end
+    return nil, nil
 end
 
 function rewrite_to_first_statement(sql)
