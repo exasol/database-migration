@@ -424,6 +424,7 @@ SOURCE_METADATA_BY_SOURCE.AZURE_SQL = SOURCE_METADATA_BY_SOURCE.SQLSERVER
 -- entry fall through to SINGLE in the split hierarchy.
 DIALECT_BY_SOURCE = {
     POSTGRES = {
+        pk_where = function(col, n, k) return 'MOD("' .. col .. '", ' .. n .. ') = ' .. k end,
         month_fn = function(col) return 'EXTRACT(MONTH FROM "' .. col .. '")' end,
         day_fn = function(col) return 'EXTRACT(DAY FROM "' .. col .. '")' end,
         year_month_fn = function(col) return '(EXTRACT(YEAR FROM "' .. col .. '") * 12 + EXTRACT(MONTH FROM "' .. col .. '"))' end,
@@ -433,6 +434,8 @@ DIALECT_BY_SOURCE = {
         rowid_where = function(n, k) return 'MOD(ABS(HASHTEXT(ctid::text)), ' .. n .. ') = ' .. k end,
     },
     SQLSERVER = {
+        -- T-SQL has no MOD() function; the modulo operator is `%`.
+        pk_where = function(col, n, k) return '("' .. col .. '" % ' .. n .. ') = ' .. k end,
         month_fn = function(col) return 'MONTH("' .. col .. '")' end,
         day_fn = function(col) return 'DAY("' .. col .. '")' end,
         year_month_fn = function(col) return '(YEAR("' .. col .. '") * 12 + MONTH("' .. col .. '"))' end,
@@ -442,13 +445,18 @@ DIALECT_BY_SOURCE = {
         rowid_where = function(n, k) return '(ABS(CHECKSUM(%%physloc%%)) % ' .. n .. ') = ' .. k end,
     },
     MYSQL = {
-        month_fn = function(col) return 'MONTH("' .. col .. '")' end,
-        day_fn = function(col) return 'DAY("' .. col .. '")' end,
-        year_month_fn = function(col) return '(YEAR("' .. col .. '") * 12 + MONTH("' .. col .. '"))' end,
-        hash_where = function(col, n, k) return '(CONV(SUBSTRING(MD5(CAST("' .. col .. '" AS CHAR)), 1, 8), 16, 10) MOD ' .. n .. ') = ' .. k end,
+        -- MySQL's default sql_mode rejects double-quoted identifiers (treats
+        -- them as string literals). Adapters consistently emit backticks for
+        -- source-side identifiers, so the WHERE we AND in must match.
+        pk_where = function(col, n, k) return '(`' .. col .. '` MOD ' .. n .. ') = ' .. k end,
+        month_fn = function(col) return 'MONTH(`' .. col .. '`)' end,
+        day_fn = function(col) return 'DAY(`' .. col .. '`)' end,
+        year_month_fn = function(col) return '(YEAR(`' .. col .. '`) * 12 + MONTH(`' .. col .. '`))' end,
+        hash_where = function(col, n, k) return '(CONV(SUBSTRING(MD5(CAST(`' .. col .. '` AS CHAR)), 1, 8), 16, 10) MOD ' .. n .. ') = ' .. k end,
         rowid_supported = false,
     },
     SNOWFLAKE = {
+        pk_where = function(col, n, k) return 'MOD("' .. col .. '", ' .. n .. ') = ' .. k end,
         month_fn = function(col) return 'MONTH("' .. col .. '")' end,
         day_fn = function(col) return 'DAY("' .. col .. '")' end,
         year_month_fn = function(col) return '(YEAR("' .. col .. '") * 12 + MONTH("' .. col .. '"))' end,
@@ -456,6 +464,7 @@ DIALECT_BY_SOURCE = {
         rowid_supported = false,
     },
     ORACLE = {
+        pk_where = function(col, n, k) return 'MOD("' .. col .. '", ' .. n .. ') = ' .. k end,
         month_fn = function(col) return 'EXTRACT(MONTH FROM "' .. col .. '")' end,
         day_fn = function(col) return 'EXTRACT(DAY FROM "' .. col .. '")' end,
         year_month_fn = function(col) return '(EXTRACT(YEAR FROM "' .. col .. '") * 12 + EXTRACT(MONTH FROM "' .. col .. '"))' end,
@@ -465,6 +474,7 @@ DIALECT_BY_SOURCE = {
         rowid_where = function(n, k) return 'MOD(ORA_HASH(ROWID), ' .. n .. ') = ' .. k end,
     },
     DB2 = {
+        pk_where = function(col, n, k) return 'MOD("' .. col .. '", ' .. n .. ') = ' .. k end,
         month_fn = function(col) return 'MONTH("' .. col .. '")' end,
         day_fn = function(col) return 'DAY("' .. col .. '")' end,
         year_month_fn = function(col) return '(YEAR("' .. col .. '") * 12 + MONTH("' .. col .. '"))' end,
@@ -474,6 +484,7 @@ DIALECT_BY_SOURCE = {
         rowid_where = function(n, k) return 'MOD(HASH4(RID_BIT(t)), ' .. n .. ') = ' .. k end,
     },
     VERTICA = {
+        pk_where = function(col, n, k) return 'MOD("' .. col .. '", ' .. n .. ') = ' .. k end,
         month_fn = function(col) return 'MONTH("' .. col .. '")' end,
         day_fn = function(col) return 'DAY("' .. col .. '")' end,
         year_month_fn = function(col) return '(YEAR("' .. col .. '") * 12 + MONTH("' .. col .. '"))' end,
@@ -481,6 +492,7 @@ DIALECT_BY_SOURCE = {
         rowid_supported = false,
     },
     HANA = {
+        pk_where = function(col, n, k) return 'MOD("' .. col .. '", ' .. n .. ') = ' .. k end,
         month_fn = function(col) return 'MONTH("' .. col .. '")' end,
         day_fn = function(col) return 'DAYOFMONTH("' .. col .. '")' end,
         year_month_fn = function(col) return '(YEAR("' .. col .. '") * 12 + MONTH("' .. col .. '"))' end,
@@ -488,6 +500,8 @@ DIALECT_BY_SOURCE = {
         rowid_supported = false,
     },
     REDSHIFT = {
+        -- Redshift inherits Postgres modulo semantics.
+        pk_where = function(col, n, k) return '("' .. col .. '" % ' .. n .. ') = ' .. k end,
         month_fn = function(col) return 'EXTRACT(MONTH FROM "' .. col .. '")' end,
         day_fn = function(col) return 'EXTRACT(DAY FROM "' .. col .. '")' end,
         year_month_fn = function(col) return '(EXTRACT(YEAR FROM "' .. col .. '") * 12 + EXTRACT(MONTH FROM "' .. col .. '"))' end,
@@ -495,6 +509,7 @@ DIALECT_BY_SOURCE = {
         rowid_supported = false,
     },
     DATABRICKS = {
+        pk_where = function(col, n, k) return 'PMOD(`' .. col .. '`, ' .. n .. ') = ' .. k end,
         month_fn = function(col) return 'MONTH(`' .. col .. '`)' end,
         day_fn = function(col) return 'DAY(`' .. col .. '`)' end,
         year_month_fn = function(col) return '(YEAR(`' .. col .. '`) * 12 + MONTH(`' .. col .. '`))' end,
@@ -530,6 +545,10 @@ function extract_source_ref_from_import(sql)
     local db_b, sch_b, tab_b = sql:match('[Ff][Rr][Oo][Mm]%s+`([^`]+)`%.`([^`]+)`%.`([^`]+)`')
     if db_b and sch_b and tab_b then return sch_b, tab_b end
     schema, table_name = sql:match('[Ff][Rr][Oo][Mm]%s+`([^`]+)`%.`([^`]+)`')
+    if schema and table_name then return schema, table_name end
+    -- MySQL adapter emits unquoted `from <db>.<table>` (case-insensitive by default).
+    -- This branch runs last so quoted variants always win when present.
+    schema, table_name = sql:match('[Ff][Rr][Oo][Mm]%s+([%w_]+)%.([%w_]+)')
     if schema and table_name then return schema, table_name end
     return nil, nil
 end
@@ -987,6 +1006,10 @@ end
 function build_where_for_split(decision, dialect, n, k)
     if decision == nil then return nil end
     if decision.strategy == 'PK_RANGE' or decision.strategy == 'UNIQUE_NUM' then
+        if dialect and dialect.pk_where then
+            return dialect.pk_where(decision.key, n, k)
+        end
+        -- Conservative fallback for sources without a dialect entry.
         return 'MOD("' .. decision.key .. '", ' .. n .. ') = ' .. k
     end
     if decision.strategy == 'DATE_BUCKET' then
