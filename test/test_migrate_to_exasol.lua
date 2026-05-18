@@ -1077,6 +1077,207 @@ test("per-IMPORT AUTO resolution differs across one migration", function()
 end)
 
 print("")
+print("=== Phase 4 spec-coverage tests ===")
+
+test("PARALLEL_SPLIT=ROWID on unsupported source falls back to SINGLE + INFO", function()
+    local sql = single_stmt_import("DST", "HEAP_T", "SMOKE", "HEAP_T")
+    local result = run_migrate({
+        source_type = "SNOWFLAKE",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=4;PARALLEL_SPLIT=ROWID",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "SMOKE", SRC_TABLE = "HEAP_T", SRC_ROWS = 20000000}},
+    })
+    local row = find_import_row(result.rows, "DST.HEAP_T")
+    assert_eq(row[6], sql, "forced ROWID on Snowflake must leave IMPORT untouched")
+    assert_eq(row[8], "SINGLE")
+    assert_eq(row[11], 1)
+    local info_found = false
+    for i = 1, #result.rows do
+        if result.rows[i][1] == "INFO" and tostring(result.rows[i][6]):find("ROWID unsupported", 1, true) then
+            info_found = true
+            break
+        end
+    end
+    assert(info_found, "expected INFO row noting ROWID unsupported for SNOWFLAKE")
+end)
+
+test("duplicate source tables collapse to one cache lookup pair", function()
+    local sql1 = single_stmt_import("DST", "ORDERS_A", "PUBLIC", "orders")
+    local sql2 = single_stmt_import("DST", "ORDERS_B", "PUBLIC", "orders")
+    local lookup_sql_seen = nil
+    local result = run_migrate({
+        source_type = "POSTGRES",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=4;PARALLEL_SPLIT=AUTO",
+        adapter_rows = {{SQL_TEXT = sql1}, {SQL_TEXT = sql2}},
+        gate_lookup_rows = {{SRC_SCHEMA = "PUBLIC", SRC_TABLE = "orders", SRC_ROWS = 20000000, SRC_PK_COL = "id", SRC_PK_TYPE = "int8"}},
+    })
+    for i = 1, #result.calls do
+        if tostring(result.calls[i]):find("import into (src_schema", 1, true) then
+            lookup_sql_seen = result.calls[i]
+        end
+    end
+    assert(lookup_sql_seen, "metadata lookup must fire")
+    -- The outer IMPORT-FROM-JDBC SQL wraps the inner metadata SQL in a single-
+    -- quoted literal, so every `'PUBLIC'` becomes `''PUBLIC''`. Count occurrences.
+    local _, pair_count = string.gsub(lookup_sql_seen, "c%.relname = ''orders''", "")
+    assert_eq(pair_count, 1, "duplicate source tables must appear exactly once in WHERE; got " .. pair_count)
+end)
+
+test("Databricks-style NULL src_rows leaves IMPORT single-stmt without raising", function()
+    local sql = single_stmt_import("DST", "EVENTS", "MAIN_DEFAULT", "EVENTS")
+    local result = run_migrate({
+        source_type = "DATABRICKS",
+        db_filter = "CAT",
+        schema_filter = "MAIN_DEFAULT",
+        table_filter = "EVENTS",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=AUTO",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "MAIN_DEFAULT", SRC_TABLE = "EVENTS", SRC_ROWS = nil}},
+    })
+    local row = find_import_row(result.rows, "DST.EVENTS")
+    assert_eq(row[6], sql)
+    assert_eq(row[8], "SINGLE")
+    assert_eq(row[11], 1)
+end)
+
+test("per-source metadata SQL switches by SOURCE_TYPE", function()
+    local pg_sql = single_stmt_import("DST", "ORDERS", "PUBLIC", "orders")
+    local pg_result = run_migrate({
+        source_type = "POSTGRES",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=4;PARALLEL_SPLIT=AUTO",
+        adapter_rows = {{SQL_TEXT = pg_sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "PUBLIC", SRC_TABLE = "orders", SRC_ROWS = 20000000, SRC_PK_COL = "id", SRC_PK_TYPE = "int8"}},
+    })
+    local pg_lookup = nil
+    for i = 1, #pg_result.calls do
+        if tostring(pg_result.calls[i]):find("import into (src_schema", 1, true) then
+            pg_lookup = pg_result.calls[i]
+        end
+    end
+    assert(pg_lookup, "PG lookup SQL not seen")
+    assert_contains(pg_lookup, "pg_class")
+    assert_contains(pg_lookup, "pg_namespace")
+
+    local my_sql = single_stmt_import("DST", "ORDERS", "MYDB", "orders")
+    local my_result = run_migrate({
+        source_type = "MYSQL",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=4;PARALLEL_SPLIT=AUTO",
+        adapter_rows = {{SQL_TEXT = my_sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "MYDB", SRC_TABLE = "orders", SRC_ROWS = 20000000, SRC_PK_COL = "id", SRC_PK_TYPE = "bigint"}},
+    })
+    local my_lookup = nil
+    for i = 1, #my_result.calls do
+        if tostring(my_result.calls[i]):find("import into (src_schema", 1, true) then
+            my_lookup = my_result.calls[i]
+        end
+    end
+    assert(my_lookup, "MySQL lookup SQL not seen")
+    assert_contains(my_lookup, "information_schema.tables")
+end)
+
+test("gate-collapsed multi-stmt IMPORT below threshold records SINGLE audit", function()
+    local sql = multi_stmt_import("DST", "SMALL_T", "SMOKE", "SMALL_T", 4)
+    local result = run_migrate({
+        source_type = "ORACLE",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=AUTO",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "SMOKE", SRC_TABLE = "SMALL_T", SRC_ROWS = 500}},
+    })
+    local row = find_import_row(result.rows, "DST.SMALL_T")
+    assert_eq(row[8], "SINGLE", "gate-collapsed must record SINGLE strategy")
+    assert_eq(row[9], NULL)
+    assert_eq(row[10], "AUTO")
+    assert_eq(row[11], 1)
+end)
+
+test("INFO rows carry NULL audit columns", function()
+    local sql = multi_stmt_import("DST", "T", "SMOKE", "T", 4)
+    local result = run_migrate({
+        source_type = "ORACLE",
+        options = "PARALLEL_ROW_THRESHOLD=1000000",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_error = "ORA-00942",
+    })
+    local info_count = 0
+    for i = 1, #result.rows do
+        if result.rows[i][1] == "INFO" then
+            info_count = info_count + 1
+            assert_eq(result.rows[i][8], NULL, "INFO row strategy must be NULL")
+            assert_eq(result.rows[i][9], NULL, "INFO row key must be NULL")
+            assert_eq(result.rows[i][10], NULL, "INFO row requested must be NULL")
+            assert_eq(result.rows[i][11], NULL, "INFO row effective must be NULL")
+        end
+    end
+    assert(info_count >= 1, "expected at least one INFO row from soft-fail")
+end)
+
+test("SUMMARY row carries NULL audit columns", function()
+    local result = run_migrate({
+        source_type = "MYSQL",
+        debug = true,
+        adapter_rows = {{SQL_TEXT = "select 1"}},
+    })
+    local summary = result.rows[#result.rows]
+    assert_eq(summary[1], "SUMMARY")
+    assert_eq(summary[8], NULL)
+    assert_eq(summary[9], NULL)
+    assert_eq(summary[10], NULL)
+    assert_eq(summary[11], NULL)
+end)
+
+test("every output row exposes 11 positional slots matching OUT_COLUMNS shape", function()
+    -- Lua's `#` is undefined for tables with trailing nil holes, so the
+    -- 11-tuple guarantee is instead asserted by reading slot 11 on every row
+    -- (must be either NULL or a non-nil audit value -- never index out of range).
+    local result = run_migrate({
+        source_type = "MYSQL",
+        debug = true,
+        adapter_rows = {
+            {SQL_TEXT = 'create schema if not exists "DST"'},
+            {SQL_TEXT = 'create or replace table "DST"."T" ("c" INT)'},
+            {SQL_TEXT = 'IMPORT INTO "DST"."T" ("c") FROM JDBC AT SRC STATEMENT \'select "c" from "S"."T"\''},
+        },
+    })
+    for i = 1, #result.rows do
+        local r = result.rows[i]
+        -- Slots 1..7 are always populated (STEP_KIND, TARGET_OBJ, etc.).
+        assert(r[1] ~= nil, "row " .. i .. " STEP_KIND slot must exist")
+        -- Slots 8..11 are NULL for non-IMPORT rows; for any row, accessing
+        -- slot 11 must not error and must equal NULL or a number.
+        local v11 = r[11]
+        if r[1] == "IMPORT" then
+            assert(v11 ~= nil, "IMPORT row " .. i .. " PARALLEL_EFFECTIVE must be populated")
+        else
+            assert_eq(v11, NULL, "non-IMPORT row " .. i .. " PARALLEL_EFFECTIVE must be NULL")
+        end
+    end
+    assert_contains(result.columns, "SPLIT_STRATEGY VARCHAR(32)")
+    assert_contains(result.columns, "SPLIT_KEY VARCHAR(256)")
+    assert_contains(result.columns, "PARALLEL_REQUESTED VARCHAR(16)")
+    assert_contains(result.columns, "PARALLEL_EFFECTIVE DECIMAL(4,0)")
+end)
+
+test("PARALLEL_REQUESTED records explicit integer literally", function()
+    local sql = single_stmt_import("DST", "BIG_T", "SMOKE", "BIG_T")
+    local result = run_migrate({
+        source_type = "POSTGRES",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=8",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "SMOKE", SRC_TABLE = "BIG_T", SRC_ROWS = 20000000, SRC_PK_COL = "id", SRC_PK_TYPE = "int8"}},
+    })
+    local row = find_import_row(result.rows, "DST.BIG_T")
+    assert_eq(row[10], "8", "PARALLEL_REQUESTED must be raw literal '8'")
+    assert_eq(row[11], 8)
+    assert_eq(count_clauses(row[6]), 8)
+end)
+
+print("")
 print(string.format("=== Results: %d passed, %d failed ===", passed, failed))
 
 if failed > 0 then
