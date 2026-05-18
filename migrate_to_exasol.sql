@@ -648,19 +648,26 @@ function transform_for_metadata(res, source_type, connection_name, options)
         }
     end
 
+    -- Exasol's IMPORT-FROM-JDBC layer returns SQL NULLs as a userdata sentinel,
+    -- not Lua nil. Coerce here so downstream truthiness checks work as written.
+    local function nullify(v)
+        if is_null(v) then return nil end
+        return v
+    end
+
     local rows = {}
     for i = 1, #lookup_res do
         local r = lookup_res[i]
-        local s = r.SRC_SCHEMA or r[1]
-        local t = r.SRC_TABLE or r[2]
+        local s = nullify(r.SRC_SCHEMA or r[1])
+        local t = nullify(r.SRC_TABLE or r[2])
         if s ~= nil and t ~= nil then
             rows[tostring(s) .. '\t' .. tostring(t)] = {
-                src_rows = r.SRC_ROWS or r[3],
-                src_pk_col = r.SRC_PK_COL or r[4],
-                src_pk_type = r.SRC_PK_TYPE or r[5],
-                src_date_col = r.SRC_DATE_COL or r[6],
-                src_num_col = r.SRC_NUM_COL or r[7],
-                src_partitioned = r.SRC_PARTITIONED or r[8],
+                src_rows = nullify(r.SRC_ROWS or r[3]),
+                src_pk_col = nullify(r.SRC_PK_COL or r[4]),
+                src_pk_type = nullify(r.SRC_PK_TYPE or r[5]),
+                src_date_col = nullify(r.SRC_DATE_COL or r[6]),
+                src_num_col = nullify(r.SRC_NUM_COL or r[7]),
+                src_partitioned = nullify(r.SRC_PARTITIONED or r[8]),
             }
         end
     end
