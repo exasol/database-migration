@@ -298,30 +298,35 @@ function execute_generated_sql(res)
     return summary
 end
 
-ROW_COUNT_SQL_BY_SOURCE = {
+-- Per-source metadata SQL. Each template returns 8 columns in this order:
+--   src_schema, src_table, src_rows,
+--   src_pk_col, src_pk_type, src_date_col, src_num_col, src_partitioned
+-- Phase 1 emits only src_rows; remaining columns are NULL placeholders.
+-- Phase 2+ enriches per-source SQL with PK / date / numeric / partition detection.
+SOURCE_METADATA_BY_SOURCE = {
     ORACLE = {
         mode = 'sql',
-        template = "select owner, table_name, num_rows from all_tables where (<PREDICATE>)",
+        template = "select owner, table_name, num_rows, NULL, NULL, NULL, NULL, NULL from all_tables where (<PREDICATE>)",
         pair = "(owner = '%s' and table_name = '%s')",
     },
     POSTGRES = {
         mode = 'sql',
-        template = "select n.nspname, c.relname, c.reltuples::bigint from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relkind in ('r','p') and (<PREDICATE>)",
+        template = "select n.nspname, c.relname, c.reltuples::bigint, NULL, NULL, NULL, NULL, NULL from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relkind in ('r','p') and (<PREDICATE>)",
         pair = "(n.nspname = '%s' and c.relname = '%s')",
     },
     MYSQL = {
         mode = 'sql',
-        template = "select table_schema, table_name, table_rows from information_schema.tables where (<PREDICATE>)",
+        template = "select table_schema, table_name, table_rows, NULL, NULL, NULL, NULL, NULL from information_schema.tables where (<PREDICATE>)",
         pair = "(table_schema = '%s' and table_name = '%s')",
     },
     SQLSERVER = {
         mode = 'sql',
-        template = "select s.name as schema_name, t.name as table_name, sum(ps.row_count) as row_count from sys.tables t join sys.schemas s on s.schema_id = t.schema_id join sys.dm_db_partition_stats ps on ps.object_id = t.object_id and ps.index_id in (0,1) where (<PREDICATE>) group by s.name, t.name",
+        template = "select s.name as schema_name, t.name as table_name, sum(ps.row_count) as row_count, NULL, NULL, NULL, NULL, NULL from sys.tables t join sys.schemas s on s.schema_id = t.schema_id join sys.dm_db_partition_stats ps on ps.object_id = t.object_id and ps.index_id in (0,1) where (<PREDICATE>) group by s.name, t.name",
         pair = "(s.name = '%s' and t.name = '%s')",
     },
     SNOWFLAKE = {
         mode = 'sql',
-        template = "select table_schema, table_name, row_count from information_schema.tables where (<PREDICATE>)",
+        template = "select table_schema, table_name, row_count, NULL, NULL, NULL, NULL, NULL from information_schema.tables where (<PREDICATE>)",
         pair = "(table_schema = '%s' and table_name = '%s')",
     },
     BIGQUERY = {
@@ -330,42 +335,42 @@ ROW_COUNT_SQL_BY_SOURCE = {
     },
     REDSHIFT = {
         mode = 'sql',
-        template = [[select "schema", "table", tbl_rows from svv_table_info where (<PREDICATE>)]],
+        template = [[select "schema", "table", tbl_rows, NULL, NULL, NULL, NULL, NULL from svv_table_info where (<PREDICATE>)]],
         pair = [[("schema" = '%s' and "table" = '%s')]],
     },
     VERTICA = {
         mode = 'sql',
-        template = "select projection_schema, anchor_table_name, row_count from projection_storage where (<PREDICATE>)",
+        template = "select projection_schema, anchor_table_name, row_count, NULL, NULL, NULL, NULL, NULL from projection_storage where (<PREDICATE>)",
         pair = "(projection_schema = '%s' and anchor_table_name = '%s')",
     },
     DB2 = {
         mode = 'sql',
-        template = "select tabschema, tabname, card from syscat.tables where (<PREDICATE>)",
+        template = "select tabschema, tabname, card, NULL, NULL, NULL, NULL, NULL from syscat.tables where (<PREDICATE>)",
         pair = "(tabschema = '%s' and tabname = '%s')",
     },
     HANA = {
         mode = 'sql',
-        template = "select schema_name, table_name, record_count from sys.m_tables where (<PREDICATE>)",
+        template = "select schema_name, table_name, record_count, NULL, NULL, NULL, NULL, NULL from sys.m_tables where (<PREDICATE>)",
         pair = "(schema_name = '%s' and table_name = '%s')",
     },
     NETEZZA = {
         mode = 'sql',
-        template = [[select schema, tablename, reltuples from _v_table where (<PREDICATE>)]],
+        template = [[select schema, tablename, reltuples, NULL, NULL, NULL, NULL, NULL from _v_table where (<PREDICATE>)]],
         pair = [[(schema = '%s' and tablename = '%s')]],
     },
     TERADATA = {
         mode = 'sql',
-        template = "select databasename, tablename, currentpermspace from dbc.tablesizev where (<PREDICATE>)",
+        template = "select databasename, tablename, currentpermspace, NULL, NULL, NULL, NULL, NULL from dbc.tablesizev where (<PREDICATE>)",
         pair = "(databasename = '%s' and tablename = '%s')",
     },
     DATABRICKS = {
         mode = 'sql',
-        template = "select table_schema, table_name, cast(null as bigint) as row_count from information_schema.tables where (<PREDICATE>)",
+        template = "select table_schema, table_name, cast(null as bigint) as row_count, NULL, NULL, NULL, NULL, NULL from information_schema.tables where (<PREDICATE>)",
         pair = "(table_schema = '%s' and table_name = '%s')",
     },
 }
-ROW_COUNT_SQL_BY_SOURCE.MARIADB = ROW_COUNT_SQL_BY_SOURCE.MYSQL
-ROW_COUNT_SQL_BY_SOURCE.AZURE_SQL = ROW_COUNT_SQL_BY_SOURCE.SQLSERVER
+SOURCE_METADATA_BY_SOURCE.MARIADB = SOURCE_METADATA_BY_SOURCE.MYSQL
+SOURCE_METADATA_BY_SOURCE.AZURE_SQL = SOURCE_METADATA_BY_SOURCE.SQLSERVER
 
 function count_statement_clauses(sql)
     if sql == nil then return 0 end
@@ -408,126 +413,165 @@ function replace_row_sql(row, new_sql)
     return { SQL_TEXT = new_sql, [1] = new_sql }
 end
 
-function transform_for_gate(res, source_type, connection_name, options)
-    if res == nil or #res == 0 then return res end
-
-    local threshold_raw = opt(options, 'PARALLEL_ROW_THRESHOLD', '1000000')
-    local threshold = tonumber(threshold_raw)
-    if threshold == nil then
-        error('Invalid numeric option PARALLEL_ROW_THRESHOLD: ' .. tostring(threshold_raw))
+function parse_threshold(options)
+    local raw = opt(options, 'PARALLEL_ROW_THRESHOLD', '1000000')
+    local n = tonumber(raw)
+    if n == nil then
+        error('Invalid numeric option PARALLEL_ROW_THRESHOLD: ' .. tostring(raw))
     end
-    if threshold <= 0 then
-        return res
-    end
+    return n
+end
 
-    local imports = {}
+-- Collects unique source (schema, table) pairs the metadata round-trip needs.
+-- Phase 1: gate is the only consumer, so only multi-statement IMPORTs require a lookup.
+-- Phase 2 will broaden this when the splitter goes live.
+function collect_metadata_pairs(res, options)
     local pair_list = {}
     local pairs_seen = {}
-    local needs_lookup = false
+    if res == nil then return pair_list end
+
+    local threshold = parse_threshold(options)
+    if threshold <= 0 then return pair_list end
+
     for i = 1, #res do
         local sql_text = first_sql_text(res[i])
-        if classify_step(sql_text) == 'IMPORT' then
-            local n = count_statement_clauses(sql_text)
-            if n > 1 then
-                local src_schema, src_table = extract_source_ref_from_import(sql_text)
-                imports[#imports + 1] = {
-                    idx = i,
-                    sql = sql_text,
-                    schema = src_schema,
-                    table_name = src_table,
-                }
-                if src_schema ~= nil and src_table ~= nil then
-                    local key = src_schema .. '\t' .. src_table
-                    if not pairs_seen[key] then
-                        pairs_seen[key] = true
-                        pair_list[#pair_list + 1] = { schema = src_schema, table_name = src_table }
-                    end
-                    needs_lookup = true
+        if classify_step(sql_text) == 'IMPORT' and count_statement_clauses(sql_text) > 1 then
+            local src_schema, src_table = extract_source_ref_from_import(sql_text)
+            if src_schema ~= nil and src_table ~= nil then
+                local key = src_schema .. '\t' .. src_table
+                if not pairs_seen[key] then
+                    pairs_seen[key] = true
+                    pair_list[#pair_list + 1] = { schema = src_schema, table_name = src_table }
                 end
             end
         end
     end
+    return pair_list
+end
 
-    if not needs_lookup then
-        return res
-    end
+-- Returns a metadata cache describing every source table referenced by IMPORTs in `res`.
+-- Shape:
+--   { available = bool, rows = { ["schema\ttable"] = {src_rows, src_pk_col, ...} },
+--     info_rows = { "-- ..." } }
+-- `available = false` means downstream consumers MUST pass IMPORTs through unchanged
+-- (Speq 2's soft-fail invariant for the splitter; matches Speq 1's gate behavior for
+-- lookup failure / unsupported source type).
+function transform_for_metadata(res, source_type, connection_name, options)
+    local empty = { available = false, rows = {}, info_rows = {} }
+    if res == nil or #res == 0 then return empty end
 
-    local function append_info(out, message)
-        out[#out + 1] = { SQL_TEXT = '-- ' .. message }
-        return out
-    end
+    local pair_list = collect_metadata_pairs(res, options)
+    if #pair_list == 0 then return empty end
 
-    local dispatch = ROW_COUNT_SQL_BY_SOURCE[source_type]
+    local dispatch = SOURCE_METADATA_BY_SOURCE[source_type]
     if dispatch == nil or dispatch.mode == 'skip_with_info' then
         local reason
         if dispatch == nil then
             reason = 'no row-count SQL configured for source type ' .. tostring(source_type)
         else
-            reason = dispatch.reason or 'gate skipped'
+            reason = dispatch.reason or 'metadata skipped'
         end
-        local out = {}
-        for j = 1, #res do out[j] = res[j] end
-        append_info(out, 'PARALLEL_ROW_THRESHOLD gate skipped: ' .. reason)
-        return out
+        return {
+            available = false,
+            rows = {},
+            info_rows = { '-- PARALLEL_ROW_THRESHOLD gate skipped: ' .. reason },
+        }
     end
 
     local pair_clauses = {}
     for _, p in ipairs(pair_list) do
-        local esc_schema = escape_sql_literal(p.schema)
-        local esc_table = escape_sql_literal(p.table_name)
-        pair_clauses[#pair_clauses + 1] = string.format(dispatch.pair, esc_schema, esc_table)
+        pair_clauses[#pair_clauses + 1] = string.format(dispatch.pair,
+            escape_sql_literal(p.schema), escape_sql_literal(p.table_name))
     end
     local predicate = table.concat(pair_clauses, ' or ')
-    local row_count_sql = (dispatch.template:gsub('<PREDICATE>', function() return predicate end))
+    local metadata_sql = (dispatch.template:gsub('<PREDICATE>', function() return predicate end))
 
-    local outer_sql = "select * from (import into (src_schema varchar(2000), src_table varchar(2000), src_rows decimal(36,0)) from jdbc at "
+    local outer_sql = "select * from (import into (src_schema varchar(2000), src_table varchar(2000), src_rows decimal(36,0), src_pk_col varchar(2000), src_pk_type varchar(200), src_date_col varchar(2000), src_num_col varchar(2000), src_partitioned boolean) from jdbc at "
         .. connection_name
         .. " statement '"
-        .. escape_sql_literal(row_count_sql)
+        .. escape_sql_literal(metadata_sql)
         .. "')"
 
     local success, lookup_res = pquery(outer_sql)
     if not success then
-        local out = {}
-        for j = 1, #res do out[j] = res[j] end
         local err = (lookup_res and lookup_res.error_message) or 'unknown error'
-        append_info(out, 'PARALLEL_ROW_THRESHOLD gate skipped: row-count lookup failed (' .. tostring(err) .. ')')
-        return out
+        return {
+            available = false,
+            rows = {},
+            info_rows = { '-- PARALLEL_ROW_THRESHOLD gate skipped: row-count lookup failed (' .. tostring(err) .. ')' },
+        }
     end
 
-    local lookup = {}
+    local rows = {}
     for i = 1, #lookup_res do
         local r = lookup_res[i]
         local s = r.SRC_SCHEMA or r[1]
         local t = r.SRC_TABLE or r[2]
-        local n = r.SRC_ROWS or r[3]
         if s ~= nil and t ~= nil then
-            lookup[tostring(s) .. '\t' .. tostring(t)] = n
+            rows[tostring(s) .. '\t' .. tostring(t)] = {
+                src_rows = r.SRC_ROWS or r[3],
+                src_pk_col = r.SRC_PK_COL or r[4],
+                src_pk_type = r.SRC_PK_TYPE or r[5],
+                src_date_col = r.SRC_DATE_COL or r[6],
+                src_num_col = r.SRC_NUM_COL or r[7],
+                src_partitioned = r.SRC_PARTITIONED or r[8],
+            }
         end
     end
 
+    return { available = true, rows = rows, info_rows = {} }
+end
+
+-- Speq 1 gate: collapses multi-statement IMPORTs whose source row count is below
+-- `PARALLEL_ROW_THRESHOLD` to a single statement. Consumes the shared metadata cache
+-- populated by `transform_for_metadata`; never issues its own source-side query.
+function transform_for_gate(res, options, cache)
+    if res == nil or #res == 0 then return res end
+
+    local threshold = parse_threshold(options)
+
     local out = {}
     for j = 1, #res do out[j] = res[j] end
-    for _, im in ipairs(imports) do
-        if im.schema ~= nil and im.table_name ~= nil then
-            local rowcount = lookup[im.schema .. '\t' .. im.table_name]
-            local effective = tonumber(rowcount) or 0
-            if effective < threshold then
-                out[im.idx] = replace_row_sql(out[im.idx], rewrite_to_first_statement(im.sql))
+
+    if cache ~= nil then
+        for _, info_text in ipairs(cache.info_rows) do
+            out[#out + 1] = { SQL_TEXT = info_text }
+        end
+    end
+
+    if threshold <= 0 then
+        return out
+    end
+    if cache == nil or not cache.available then
+        return out
+    end
+
+    for i = 1, #res do
+        local sql_text = first_sql_text(res[i])
+        if classify_step(sql_text) == 'IMPORT' and count_statement_clauses(sql_text) > 1 then
+            local src_schema, src_table = extract_source_ref_from_import(sql_text)
+            if src_schema ~= nil and src_table ~= nil then
+                local meta = cache.rows[src_schema .. '\t' .. src_table]
+                local rowcount = meta and meta.src_rows
+                local effective = tonumber(rowcount) or 0
+                if effective < threshold then
+                    out[i] = replace_row_sql(out[i], rewrite_to_first_statement(sql_text))
+                end
             end
         end
     end
     return out
 end
 
-function execute_adapter(adapter_sql, debug, gate_ctx)
+function execute_adapter(adapter_sql, debug, ctx)
     local success, res = pquery(adapter_sql)
     if not success then
         error('"' .. res.error_message .. '" Caught while executing: "' .. res.statement_text .. '"')
     end
 
-    if gate_ctx ~= nil then
-        res = transform_for_gate(res, gate_ctx.source_type, gate_ctx.connection_name, gate_ctx.options)
+    if ctx ~= nil then
+        local cache = transform_for_metadata(res, ctx.source_type, ctx.connection_name, ctx.options)
+        res = transform_for_gate(res, ctx.options, cache)
     end
 
     if not debug then
@@ -702,13 +746,13 @@ else
     error('Unsupported SOURCE_TYPE: ' .. tostring(SOURCE_TYPE))
 end
 
-local gate_ctx = {
+local ctx = {
     source_type = source,
     connection_name = connection_name,
     options = options,
 }
 
-return execute_adapter(adapter_sql, debug, gate_ctx)
+return execute_adapter(adapter_sql, debug, ctx)
 /
 
 /*
