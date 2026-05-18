@@ -118,7 +118,7 @@ local function run_migrate(params)
     }
 end
 
-local AUDIT_COLUMNS = "STEP_KIND VARCHAR(40), TARGET_OBJ VARCHAR(2000), ROWS_AFFECTED DECIMAL(18,0), ELAPSED_MS DECIMAL(18,0), RESULT_FLAG VARCHAR(20), SQL_TEXT VARCHAR(2000000), ERROR_MESSAGE VARCHAR(20000)"
+local AUDIT_COLUMNS = "STEP_KIND VARCHAR(40), TARGET_OBJ VARCHAR(2000), ROWS_AFFECTED DECIMAL(18,0), ELAPSED_MS DECIMAL(18,0), RESULT_FLAG VARCHAR(20), SQL_TEXT VARCHAR(2000000), ERROR_MESSAGE VARCHAR(20000), SPLIT_STRATEGY VARCHAR(32), SPLIT_KEY VARCHAR(256), PARALLEL_REQUESTED VARCHAR(16), PARALLEL_EFFECTIVE DECIMAL(4,0)"
 
 local function default_case(source_type, expected_sql)
     test("dispatches " .. source_type, function()
@@ -872,6 +872,208 @@ test("metadata round-trip fires once for mixed single/multi-stmt IMPORTs", funct
     local single_row = find_import_row(result.rows, "DST.ORDERS")
     assert_eq(count_clauses(multi_row[6]), 1, "below-threshold multi-stmt collapsed by gate")
     assert_eq(count_clauses(single_row[6]), 4, "above-threshold single-stmt expanded by splitter")
+end)
+
+print("")
+print("=== PARALLEL_AUTO_CEILING + Audit Tests ===")
+
+test("AUTO resolves to ceil(rows/5M) under default ceiling 12", function()
+    local sql = single_stmt_import("DST", "MID_T", "SMOKE", "MID_T")
+    local result = run_migrate({
+        source_type = "POSTGRES",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=AUTO",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "SMOKE", SRC_TABLE = "MID_T", SRC_ROWS = 20000000, SRC_PK_COL = "ID", SRC_PK_TYPE = "int8"}},
+    })
+    local row = find_import_row(result.rows, "DST.MID_T")
+    assert_eq(count_clauses(row[6]), 4, "20M rows / 5M = 4 stmts")
+    assert_eq(row[8], "PK_RANGE")
+    assert_eq(row[9], "ID")
+    assert_eq(row[10], "AUTO")
+    assert_eq(row[11], 4)
+end)
+
+test("AUTO caps at default ceiling 12 for large tables", function()
+    local sql = single_stmt_import("DST", "HUGE_T", "SMOKE", "HUGE_T")
+    local result = run_migrate({
+        source_type = "POSTGRES",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=AUTO",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "SMOKE", SRC_TABLE = "HUGE_T", SRC_ROWS = 100000000, SRC_PK_COL = "ID", SRC_PK_TYPE = "int8"}},
+    })
+    local row = find_import_row(result.rows, "DST.HUGE_T")
+    assert_eq(count_clauses(row[6]), 12, "100M rows -> capped at 12 stmts")
+    assert_eq(row[11], 12)
+end)
+
+test("PARALLEL_AUTO_CEILING=24 raises the AUTO cap", function()
+    local sql = single_stmt_import("DST", "HUGE_T", "SMOKE", "HUGE_T")
+    local result = run_migrate({
+        source_type = "POSTGRES",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=AUTO;PARALLEL_AUTO_CEILING=24",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "SMOKE", SRC_TABLE = "HUGE_T", SRC_ROWS = 100000000, SRC_PK_COL = "ID", SRC_PK_TYPE = "int8"}},
+    })
+    local row = find_import_row(result.rows, "DST.HUGE_T")
+    assert_eq(count_clauses(row[6]), 20, "100M / 5M = 20 stmts, under raised cap 24")
+    assert_eq(row[11], 20)
+end)
+
+test("explicit PARALLEL_STATEMENTS bypasses ceiling", function()
+    local sql = single_stmt_import("DST", "HUGE_T", "SMOKE", "HUGE_T")
+    local result = run_migrate({
+        source_type = "POSTGRES",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=24",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "SMOKE", SRC_TABLE = "HUGE_T", SRC_ROWS = 100000000, SRC_PK_COL = "ID", SRC_PK_TYPE = "int8"}},
+    })
+    local row = find_import_row(result.rows, "DST.HUGE_T")
+    assert_eq(count_clauses(row[6]), 24)
+    assert_eq(row[10], "24")
+    assert_eq(row[11], 24)
+end)
+
+test("AUTO with NULL src_rows resolves to 1", function()
+    local sql = single_stmt_import("DST", "UNK_T", "SMOKE", "UNK_T")
+    local result = run_migrate({
+        source_type = "POSTGRES",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=AUTO",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "SMOKE", SRC_TABLE = "UNK_T", SRC_ROWS = nil, SRC_PK_COL = "ID", SRC_PK_TYPE = "int8"}},
+    })
+    local row = find_import_row(result.rows, "DST.UNK_T")
+    assert_eq(row[6], sql, "NULL src_rows must leave IMPORT single-stmt")
+    assert_eq(row[8], "SINGLE")
+    assert_eq(row[11], 1)
+end)
+
+test("AUTO below threshold resolves to 1 and marks SINGLE", function()
+    local sql = single_stmt_import("DST", "SMALL_T", "SMOKE", "SMALL_T")
+    local result = run_migrate({
+        source_type = "POSTGRES",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=AUTO",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "SMOKE", SRC_TABLE = "SMALL_T", SRC_ROWS = 500000, SRC_PK_COL = "ID", SRC_PK_TYPE = "int8"}},
+    })
+    local row = find_import_row(result.rows, "DST.SMALL_T")
+    assert_eq(row[6], sql)
+    assert_eq(row[8], "SINGLE")
+    assert_eq(row[10], "AUTO")
+    assert_eq(row[11], 1)
+end)
+
+test("audit cols populated MULTI_PASSTHROUGH on adapter multi-stmt above threshold", function()
+    local sql = multi_stmt_import("DST", "BIG_T", "SMOKE", "BIG_T", 4)
+    local result = run_migrate({
+        source_type = "ORACLE",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=AUTO",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "SMOKE", SRC_TABLE = "BIG_T", SRC_ROWS = 20000000, SRC_PK_COL = "ID", SRC_PK_TYPE = "NUMBER"}},
+    })
+    local row = find_import_row(result.rows, "DST.BIG_T")
+    assert_eq(row[8], "MULTI_PASSTHROUGH")
+    assert_eq(row[11], 4)
+end)
+
+test("audit cols NULL for non-IMPORT rows", function()
+    local result = run_migrate({
+        source_type = "MYSQL",
+        debug = false,
+        adapter_rows = {
+            {SQL_TEXT = 'create schema if not exists "DST"'},
+            {SQL_TEXT = 'create or replace table "DST"."T" ("c" INT)'},
+        },
+    })
+    for i = 1, #result.rows do
+        local r = result.rows[i]
+        if r[1] ~= "IMPORT" then
+            assert_eq(r[8], NULL, "non-IMPORT row " .. r[1] .. " audit strategy must be NULL")
+            assert_eq(r[9], NULL, "non-IMPORT row " .. r[1] .. " audit key must be NULL")
+            assert_eq(r[10], NULL, "non-IMPORT row " .. r[1] .. " audit requested must be NULL")
+            assert_eq(r[11], NULL, "non-IMPORT row " .. r[1] .. " audit effective must be NULL")
+        end
+    end
+end)
+
+test("invalid PARALLEL_STATEMENTS raises before adapter SQL", function()
+    local ok, err = pcall(run_migrate, {
+        source_type = "MYSQL",
+        options = "PARALLEL_STATEMENTS=banana",
+    })
+    assert_eq(ok, false)
+    assert_contains(err, "Invalid PARALLEL_STATEMENTS")
+end)
+
+test("PARALLEL_STATEMENTS=0 raises", function()
+    local ok, err = pcall(run_migrate, {
+        source_type = "MYSQL",
+        options = "PARALLEL_STATEMENTS=0",
+    })
+    assert_eq(ok, false)
+    assert_contains(err, "Invalid PARALLEL_STATEMENTS")
+end)
+
+test("invalid PARALLEL_AUTO_CEILING raises", function()
+    local ok, err = pcall(run_migrate, {
+        source_type = "MYSQL",
+        options = "PARALLEL_AUTO_CEILING=many",
+    })
+    assert_eq(ok, false)
+    assert_contains(err, "Invalid PARALLEL_AUTO_CEILING")
+end)
+
+test("PARALLEL_AUTO_CEILING=0 raises", function()
+    local ok, err = pcall(run_migrate, {
+        source_type = "MYSQL",
+        options = "PARALLEL_AUTO_CEILING=0",
+    })
+    assert_eq(ok, false)
+    assert_contains(err, "Invalid PARALLEL_AUTO_CEILING")
+end)
+
+test("invalid PARALLEL_SPLIT raises", function()
+    local ok, err = pcall(run_migrate, {
+        source_type = "MYSQL",
+        options = "PARALLEL_SPLIT=NONSENSE",
+    })
+    assert_eq(ok, false)
+    assert_contains(err, "Invalid PARALLEL_SPLIT")
+end)
+
+test("per-IMPORT AUTO resolution differs across one migration", function()
+    local sql_small = single_stmt_import("DST", "SMALL_T", "SMOKE", "SMALL_T")
+    local sql_mid = single_stmt_import("DST", "MID_T", "SMOKE", "MID_T")
+    local sql_huge = single_stmt_import("DST", "HUGE_T", "SMOKE", "HUGE_T")
+    local result = run_migrate({
+        source_type = "POSTGRES",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000;PARALLEL_STATEMENTS=AUTO",
+        adapter_rows = {
+            {SQL_TEXT = sql_small},
+            {SQL_TEXT = sql_mid},
+            {SQL_TEXT = sql_huge},
+        },
+        gate_lookup_rows = {
+            {SRC_SCHEMA = "SMOKE", SRC_TABLE = "SMALL_T", SRC_ROWS = 500000, SRC_PK_COL = "ID", SRC_PK_TYPE = "int8"},
+            {SRC_SCHEMA = "SMOKE", SRC_TABLE = "MID_T", SRC_ROWS = 20000000, SRC_PK_COL = "ID", SRC_PK_TYPE = "int8"},
+            {SRC_SCHEMA = "SMOKE", SRC_TABLE = "HUGE_T", SRC_ROWS = 100000000, SRC_PK_COL = "ID", SRC_PK_TYPE = "int8"},
+        },
+    })
+    local small = find_import_row(result.rows, "DST.SMALL_T")
+    local mid = find_import_row(result.rows, "DST.MID_T")
+    local huge = find_import_row(result.rows, "DST.HUGE_T")
+    assert_eq(small[11], 1)
+    assert_eq(mid[11], 4)
+    assert_eq(huge[11], 12)
+    assert_eq(small[10], "AUTO")
+    assert_eq(mid[10], "AUTO")
+    assert_eq(huge[10], "AUTO")
 end)
 
 print("")

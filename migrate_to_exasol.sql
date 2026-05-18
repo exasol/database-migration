@@ -25,7 +25,7 @@ create or replace script database_migration.MIGRATE_TO_EXASOL(
 ) RETURNS TABLE
 AS
 
-local OUT_COLUMNS = "STEP_KIND VARCHAR(40), TARGET_OBJ VARCHAR(2000), ROWS_AFFECTED DECIMAL(18,0), ELAPSED_MS DECIMAL(18,0), RESULT_FLAG VARCHAR(20), SQL_TEXT VARCHAR(2000000), ERROR_MESSAGE VARCHAR(20000)"
+local OUT_COLUMNS = "STEP_KIND VARCHAR(40), TARGET_OBJ VARCHAR(2000), ROWS_AFFECTED DECIMAL(18,0), ELAPSED_MS DECIMAL(18,0), RESULT_FLAG VARCHAR(20), SQL_TEXT VARCHAR(2000000), ERROR_MESSAGE VARCHAR(20000), SPLIT_STRATEGY VARCHAR(32), SPLIT_KEY VARCHAR(256), PARALLEL_REQUESTED VARCHAR(16), PARALLEL_EFFECTIVE DECIMAL(4,0)"
 
 function is_null(value)
     return value == nil or value == null or value == NULL
@@ -219,11 +219,28 @@ function is_executable_statement(sql_text)
     return string.sub(text, 1, 2) ~= '--'
 end
 
-function build_row(step_kind, target_obj, rows_affected, elapsed_ms, result_flag, sql_text, error_message)
-    return {step_kind, target_obj, rows_affected, elapsed_ms, result_flag, sql_text, error_message}
+function audit_or_nulls(audit)
+    if audit == nil then
+        return NULL, NULL, NULL, NULL
+    end
+    local strategy = audit.strategy
+    if strategy == nil then strategy = NULL end
+    local key = audit.key
+    if key == nil then key = NULL end
+    local requested = audit.requested
+    if requested == nil then requested = NULL end
+    local effective = audit.effective
+    if effective == nil then effective = NULL end
+    return strategy, key, requested, effective
 end
 
-function normalize_rows(res)
+function build_row(step_kind, target_obj, rows_affected, elapsed_ms, result_flag, sql_text, error_message, audit)
+    local strategy, key, requested, effective = audit_or_nulls(audit)
+    return {step_kind, target_obj, rows_affected, elapsed_ms, result_flag, sql_text, error_message, strategy, key, requested, effective}
+end
+
+function normalize_rows(res, decisions)
+    decisions = decisions or {}
     local summary = {}
     local tables_count = 0
     for i = 1, #res do
@@ -236,13 +253,14 @@ function normalize_rows(res)
         end
         local flag = row.RESULT_FLAG or row.SUCCESS or row[5] or row[2] or 'PREVIEW'
         local err = row.ERROR_MESSAGE or row[7] or row[3] or NULL
-        summary[#summary + 1] = build_row(kind, target, NULL, NULL, flag, sql_text, err)
+        summary[#summary + 1] = build_row(kind, target, NULL, NULL, flag, sql_text, err, decisions[i])
     end
     summary[#summary + 1] = build_row('SUMMARY', 'Plan: ' .. tables_count .. ' table(s) to create', NULL, NULL, 'PREVIEW', NULL, NULL)
     return summary
 end
 
-function execute_generated_sql(res)
+function execute_generated_sql(res, decisions)
+    decisions = decisions or {}
     local summary = {}
     local fail_count = 0
     local executed_count = 0
@@ -254,6 +272,7 @@ function execute_generated_sql(res)
         local sql_text = first_sql_text(res[i])
         local kind = classify_step(sql_text)
         local target = extract_target_obj(sql_text, kind)
+        local audit = decisions[i]
         if is_executable_statement(sql_text) then
             executed_count = executed_count + 1
             local t0 = os.clock()
@@ -271,13 +290,13 @@ function execute_generated_sql(res)
                 if kind == 'CREATE_TABLE' then
                     tables_created = tables_created + 1
                 end
-                summary[#summary + 1] = build_row(kind, target, rows_affected, elapsed, 'OK', sql_text, NULL)
+                summary[#summary + 1] = build_row(kind, target, rows_affected, elapsed, 'OK', sql_text, NULL, audit)
             else
                 fail_count = fail_count + 1
-                summary[#summary + 1] = build_row(kind, target, NULL, elapsed, 'ERROR', sql_text, info.error_message)
+                summary[#summary + 1] = build_row(kind, target, NULL, elapsed, 'ERROR', sql_text, info.error_message, audit)
             end
         else
-            summary[#summary + 1] = build_row(kind, target, NULL, NULL, 'SKIPPED', sql_text, NULL)
+            summary[#summary + 1] = build_row(kind, target, NULL, NULL, 'SKIPPED', sql_text, NULL, audit)
         end
     end
 
@@ -547,12 +566,9 @@ function collect_metadata_pairs(res, options)
     if res == nil then return pair_list end
 
     local threshold = parse_threshold(options)
-    local split_directive_ok, split_directive = pcall(parse_split_directive, options)
-    local split_off = split_directive_ok and split_directive.mode == 'OFF'
-    local resolved_n = resolve_split_n(options, nil)
-    local splitter_disabled = split_off or resolved_n < 2
+    local splitter_active = splitter_potentially_active(options)
 
-    if threshold <= 0 and splitter_disabled then return pair_list end
+    if threshold <= 0 and not splitter_active then return pair_list end
 
     for i = 1, #res do
         local sql_text = first_sql_text(res[i])
@@ -561,7 +577,7 @@ function collect_metadata_pairs(res, options)
             local relevant = false
             if clauses > 1 and threshold > 0 then
                 relevant = true
-            elseif clauses == 1 and not splitter_disabled and threshold > 0 then
+            elseif clauses == 1 and splitter_active and threshold > 0 then
                 relevant = true
             end
             if relevant then
@@ -652,13 +668,24 @@ function transform_for_metadata(res, source_type, connection_name, options)
     return { available = true, rows = rows, info_rows = {} }
 end
 
+function raw_parallel_requested(options)
+    local raw = blank_to_nil(opt(options, 'PARALLEL_STATEMENTS', 'AUTO')) or 'AUTO'
+    local up = string.upper(raw)
+    if up == 'AUTO' then return 'AUTO' end
+    return tostring(raw)
+end
+
 -- Speq 1 gate: collapses multi-statement IMPORTs whose source row count is below
 -- `PARALLEL_ROW_THRESHOLD` to a single statement. Consumes the shared metadata cache
 -- populated by `transform_for_metadata`; never issues its own source-side query.
-function transform_for_gate(res, options, cache)
+-- Writes a decision record per multi-statement IMPORT row it touches so the
+-- audit transform can later populate SPLIT_STRATEGY / PARALLEL_EFFECTIVE.
+function transform_for_gate(res, options, cache, decisions)
     if res == nil or #res == 0 then return res end
+    decisions = decisions or {}
 
     local threshold = parse_threshold(options)
+    local requested = raw_parallel_requested(options)
 
     local out = {}
     for j = 1, #res do out[j] = res[j] end
@@ -678,14 +705,20 @@ function transform_for_gate(res, options, cache)
 
     for i = 1, #res do
         local sql_text = first_sql_text(res[i])
-        if classify_step(sql_text) == 'IMPORT' and count_statement_clauses(sql_text) > 1 then
-            local src_schema, src_table = extract_source_ref_from_import(sql_text)
-            if src_schema ~= nil and src_table ~= nil then
-                local meta = cache.rows[src_schema .. '\t' .. src_table]
-                local rowcount = meta and meta.src_rows
-                local effective = tonumber(rowcount) or 0
-                if effective < threshold then
-                    out[i] = replace_row_sql(out[i], rewrite_to_first_statement(sql_text))
+        if classify_step(sql_text) == 'IMPORT' then
+            local clause_count = count_statement_clauses(sql_text)
+            if clause_count > 1 then
+                local src_schema, src_table = extract_source_ref_from_import(sql_text)
+                if src_schema ~= nil and src_table ~= nil then
+                    local meta = cache.rows[src_schema .. '\t' .. src_table]
+                    local rowcount = meta and meta.src_rows
+                    local effective = tonumber(rowcount) or 0
+                    if effective < threshold then
+                        out[i] = replace_row_sql(out[i], rewrite_to_first_statement(sql_text))
+                        decisions[i] = { strategy = 'SINGLE', key = nil, requested = requested, effective = 1 }
+                    else
+                        decisions[i] = { strategy = 'MULTI_PASSTHROUGH', key = nil, requested = requested, effective = clause_count }
+                    end
                 end
             end
         end
@@ -715,18 +748,89 @@ function parse_split_directive(options)
     error('Invalid PARALLEL_SPLIT value: ' .. tostring(raw))
 end
 
--- Phase 2 N-resolver: explicit positive integer in PARALLEL_STATEMENTS yields N.
--- AUTO is a Phase-3 feature; it currently short-circuits to 1 (= no split). The
--- splitter is still wired so that Phase 3 only needs to swap this function out
--- for the row-count heuristic specified in parallel-auto-ceiling.
-function resolve_split_n(options, src_rows)
-    local raw = blank_to_nil(opt(options, 'PARALLEL_STATEMENTS', 'AUTO')) or 'AUTO'
-    if string.upper(raw) == 'AUTO' then return 1 end
+function parse_auto_ceiling(options)
+    local raw = blank_to_nil(opt(options, 'PARALLEL_AUTO_CEILING', '12')) or '12'
     local n = tonumber(raw)
-    if n == nil then return 1 end
-    n = math.floor(n)
-    if n < 1 then return 1 end
-    return n
+    if n == nil or n < 1 or math.floor(n) ~= n then
+        error('Invalid PARALLEL_AUTO_CEILING (must be positive integer): ' .. tostring(raw))
+    end
+    return math.floor(n)
+end
+
+-- Resolves PARALLEL_STATEMENTS to a per-table (effective_n, requested) pair.
+-- AUTO heuristic: min(ceiling, max(1, ceil(src_rows / 5_000_000))).
+-- AUTO with NULL or non-positive src_rows -> effective_n = 1 (gate-collapse semantics).
+-- Explicit positive integer bypasses the ceiling.
+-- Invalid values raise.
+function resolve_parallel_statements(options, src_rows)
+    local raw = blank_to_nil(opt(options, 'PARALLEL_STATEMENTS', 'AUTO')) or 'AUTO'
+    local up = string.upper(raw)
+    if up == 'AUTO' then
+        local rows = tonumber(src_rows)
+        if rows == nil or rows <= 0 then
+            return { effective = 1, requested = 'AUTO' }
+        end
+        local ceiling = parse_auto_ceiling(options)
+        local heuristic = math.ceil(rows / 5000000)
+        if heuristic < 1 then heuristic = 1 end
+        if heuristic > ceiling then heuristic = ceiling end
+        return { effective = heuristic, requested = 'AUTO' }
+    end
+    local n = tonumber(raw)
+    if n == nil or n < 1 or math.floor(n) ~= n then
+        error('Invalid PARALLEL_STATEMENTS (must be AUTO or positive integer): ' .. tostring(raw))
+    end
+    return { effective = math.floor(n), requested = tostring(math.floor(n)) }
+end
+
+-- Adapter-call helper: Oracle (and any future adapter that takes an integer
+-- PARALLEL_STATEMENTS) consumes its OPTIONS value directly. AUTO is a master-
+-- script concept; downstream adapters receive `default_n` instead. Invalid
+-- explicit values raise here so adapter SQL is never constructed.
+function resolve_parallel_statements_for_adapter(options, default_n)
+    local raw = blank_to_nil(opt(options, 'PARALLEL_STATEMENTS', nil))
+    if raw == nil then return tostring(default_n) end
+    if string.upper(raw) == 'AUTO' then return tostring(default_n) end
+    local n = tonumber(raw)
+    if n == nil or n < 1 or math.floor(n) ~= n then
+        error('Invalid PARALLEL_STATEMENTS (must be AUTO or positive integer): ' .. tostring(raw))
+    end
+    return tostring(math.floor(n))
+end
+
+-- Validates every PARALLEL_* OPTIONS key before any adapter SQL is constructed
+-- or any source-side query fires. Raises on invalid values per spec contract
+-- (parallel-auto-ceiling: "MUST NOT execute any adapter SQL nor any source-side
+-- query" on validation failure).
+function validate_parallel_options(options)
+    local ps_raw = blank_to_nil(opt(options, 'PARALLEL_STATEMENTS', nil))
+    if ps_raw ~= nil and string.upper(ps_raw) ~= 'AUTO' then
+        local n = tonumber(ps_raw)
+        if n == nil or n < 1 or math.floor(n) ~= n then
+            error('Invalid PARALLEL_STATEMENTS (must be AUTO or positive integer): ' .. tostring(ps_raw))
+        end
+    end
+    local ac_raw = blank_to_nil(opt(options, 'PARALLEL_AUTO_CEILING', nil))
+    if ac_raw ~= nil then
+        local n = tonumber(ac_raw)
+        if n == nil or n < 1 or math.floor(n) ~= n then
+            error('Invalid PARALLEL_AUTO_CEILING (must be positive integer): ' .. tostring(ac_raw))
+        end
+    end
+    parse_split_directive(options)
+end
+
+-- Returns true when the splitter MIGHT fire for at least one IMPORT in this
+-- migration; used by collect_metadata_pairs to decide whether to fetch metadata
+-- for single-statement IMPORTs.
+function splitter_potentially_active(options)
+    local split_raw = string.upper(blank_to_nil(opt(options, 'PARALLEL_SPLIT', 'AUTO')) or 'AUTO')
+    if split_raw == 'OFF' then return false end
+    local ps_raw = string.upper(blank_to_nil(opt(options, 'PARALLEL_STATEMENTS', 'AUTO')) or 'AUTO')
+    if ps_raw == 'AUTO' then return true end
+    local n = tonumber(ps_raw)
+    if n and n >= 2 then return true end
+    return false
 end
 
 function is_numeric_pk_type(type_str)
@@ -965,8 +1069,9 @@ end
 -- IMPORTs are left untouched (the adapter already chose its split). Any failure
 -- inside the splitter logs an INFO row and leaves the IMPORT unchanged - the
 -- splitter is an optimization and MUST NOT break a migration.
-function transform_for_split(res, options, cache, source_type)
+function transform_for_split(res, options, cache, source_type, decisions)
     if res == nil or #res == 0 then return res end
+    decisions = decisions or {}
 
     local directive_ok, directive = pcall(parse_split_directive, options)
     if not directive_ok then return res end
@@ -977,6 +1082,7 @@ function transform_for_split(res, options, cache, source_type)
     if threshold <= 0 then return res end
 
     local dialect = DIALECT_BY_SOURCE[source_type]
+    local requested = raw_parallel_requested(options)
 
     local out = {}
     for j = 1, #res do out[j] = res[j] end
@@ -991,7 +1097,8 @@ function transform_for_split(res, options, cache, source_type)
                 local meta = cache.rows[src_schema .. '\t' .. src_table]
                 local rowcount = meta and tonumber(meta.src_rows) or 0
                 if rowcount >= threshold then
-                    local n = resolve_split_n(options, rowcount)
+                    local resolved = resolve_parallel_statements(options, rowcount)
+                    local n = resolved.effective
                     if n >= 2 then
                         local decision, reason = pick_split_strategy(meta, options, dialect, source_type)
                         if decision ~= nil then
@@ -1006,16 +1113,26 @@ function transform_for_split(res, options, cache, source_type)
                                 local rewritten = rewrite_import_to_multi_stmt(sql_text, where_per_k, n)
                                 if rewritten ~= nil then
                                     out[i] = replace_row_sql(out[i], rewritten)
+                                    decisions[i] = { strategy = decision.strategy, key = decision.key, requested = resolved.requested, effective = n }
                                 else
                                     info_rows[#info_rows + 1] = '-- PARALLEL_SPLIT: rewrite failed for ' .. src_schema .. '.' .. src_table .. ' -- IMPORT left unchanged'
+                                    decisions[i] = { strategy = 'SINGLE', key = nil, requested = resolved.requested, effective = 1 }
                                 end
                             else
                                 info_rows[#info_rows + 1] = '-- PARALLEL_SPLIT: WHERE-builder failed for ' .. src_schema .. '.' .. src_table .. ' -- IMPORT left unchanged'
+                                decisions[i] = { strategy = 'SINGLE', key = nil, requested = resolved.requested, effective = 1 }
                             end
-                        elseif reason ~= nil then
-                            info_rows[#info_rows + 1] = '-- PARALLEL_SPLIT: ' .. src_schema .. '.' .. src_table .. ' -> SINGLE (' .. reason .. ')'
+                        else
+                            if reason ~= nil then
+                                info_rows[#info_rows + 1] = '-- PARALLEL_SPLIT: ' .. src_schema .. '.' .. src_table .. ' -> SINGLE (' .. reason .. ')'
+                            end
+                            decisions[i] = { strategy = 'SINGLE', key = nil, requested = resolved.requested, effective = 1 }
                         end
+                    else
+                        decisions[i] = { strategy = 'SINGLE', key = nil, requested = resolved.requested, effective = 1 }
                     end
+                else
+                    decisions[i] = { strategy = 'SINGLE', key = nil, requested = requested, effective = 1 }
                 end
             end
         end
@@ -1027,23 +1144,47 @@ function transform_for_split(res, options, cache, source_type)
     return out
 end
 
+-- Fills default SINGLE decisions for any IMPORT row neither gate nor splitter
+-- touched (e.g. when the metadata round-trip was skipped or the cache returned
+-- unavailable). Non-IMPORT rows are left without a decision so audit cols stay NULL.
+function transform_for_audit(res, options, decisions)
+    if res == nil or #res == 0 then return end
+    decisions = decisions or {}
+    local requested = raw_parallel_requested(options)
+    for i = 1, #res do
+        if decisions[i] == nil then
+            local sql_text = first_sql_text(res[i])
+            if classify_step(sql_text) == 'IMPORT' then
+                local clauses = count_statement_clauses(sql_text)
+                if clauses > 1 then
+                    decisions[i] = { strategy = 'MULTI_PASSTHROUGH', key = nil, requested = requested, effective = clauses }
+                else
+                    decisions[i] = { strategy = 'SINGLE', key = nil, requested = requested, effective = 1 }
+                end
+            end
+        end
+    end
+end
+
 function execute_adapter(adapter_sql, debug, ctx)
     local success, res = pquery(adapter_sql)
     if not success then
         error('"' .. res.error_message .. '" Caught while executing: "' .. res.statement_text .. '"')
     end
 
+    local decisions = {}
     if ctx ~= nil then
         local cache = transform_for_metadata(res, ctx.source_type, ctx.connection_name, ctx.options)
-        res = transform_for_gate(res, ctx.options, cache)
-        res = transform_for_split(res, ctx.options, cache, ctx.source_type)
+        res = transform_for_gate(res, ctx.options, cache, decisions)
+        res = transform_for_split(res, ctx.options, cache, ctx.source_type, decisions)
+        transform_for_audit(res, ctx.options, decisions)
     end
 
     if not debug then
-        return execute_generated_sql(res), OUT_COLUMNS
+        return execute_generated_sql(res, decisions), OUT_COLUMNS
     end
 
-    return normalize_rows(res), OUT_COLUMNS
+    return normalize_rows(res, decisions), OUT_COLUMNS
 end
 
 local source = normalize_source_type(SOURCE_TYPE)
@@ -1056,6 +1197,8 @@ local target_schema = blank_to_nil(TARGET_SCHEMA)
 local identifier_case_insensitive = parse_bool(IDENTIFIER_CASE_INSENSITIVE, true, 'IDENTIFIER_CASE_INSENSITIVE')
 local debug = parse_bool(DEBUG, true, 'DEBUG')
 local options = parse_options(OPTIONS)
+
+validate_parallel_options(options)
 
 local adapter_sql = nil
 
@@ -1166,7 +1309,7 @@ elseif source == 'ORACLE' then
         .. sql_bool(identifier_case_insensitive) .. ','
         .. sql_string(schema_filter) .. ','
         .. sql_string(table_filter) .. ','
-        .. opt_sql_number(options, 'PARALLEL_STATEMENTS', 1) .. ','
+        .. resolve_parallel_statements_for_adapter(options, 1) .. ','
         .. sql_bool(opt_bool(options, 'CREATE_PK', false)) .. ','
         .. sql_bool(opt_bool(options, 'CREATE_FK', false)) .. ','
         .. sql_bool(opt_bool(options, 'CHECK_MIGRATION', false)) .. ')'
