@@ -75,6 +75,7 @@ local function run_migrate(params)
         pairs = pairs,
     }
 
+    local execute_call_index = 0
     env.pquery = function(sql)
         calls[#calls + 1] = sql
         if #calls == 1 then
@@ -87,7 +88,15 @@ local function run_migrate(params)
             return true, adapter_rows
         end
 
-        local result = execute_results[#calls - 1]
+        if sql:find("import into (src_schema", 1, true) then
+            if params.gate_lookup_error then
+                return false, {error_message = params.gate_lookup_error}
+            end
+            return true, params.gate_lookup_rows or {}
+        end
+
+        execute_call_index = execute_call_index + 1
+        local result = execute_results[execute_call_index]
         if result and result.success == false then
             return false, {error_message = result.error_message or "execution failed"}
         end
@@ -427,6 +436,237 @@ test("adapter errors include source statement", function()
     assert_eq(ok, false)
     assert_contains(err, "adapter failed")
     assert_contains(err, "MYSQL_TO_EXASOL")
+end)
+
+print("")
+print("=== PARALLEL_ROW_THRESHOLD Gate Tests ===")
+
+local function multi_stmt_import(target_schema, target_table, src_schema, src_table, n)
+    local s = 'IMPORT INTO "' .. target_schema .. '"."' .. target_table
+        .. '" ("ID") FROM JDBC AT SRC_CONN'
+    for i = 1, n do
+        s = s .. " STATEMENT 'select \"ID\" from \"" .. src_schema .. '"."' .. src_table
+            .. "\" where mod(\"ID\"," .. n .. ")=" .. (i - 1) .. "'"
+    end
+    return s
+end
+
+local function single_stmt_import(target_schema, target_table, src_schema, src_table)
+    return 'IMPORT INTO "' .. target_schema .. '"."' .. target_table
+        .. '" ("ID") FROM JDBC AT SRC_CONN STATEMENT \'select "ID" from "'
+        .. src_schema .. '"."' .. src_table .. '"\''
+end
+
+local function find_import_row(rows, target)
+    for i = 1, #rows do
+        if rows[i][1] == "IMPORT" and rows[i][2] == target then
+            return rows[i]
+        end
+    end
+    return nil
+end
+
+test("gate rewrites multi-statement IMPORT below threshold", function()
+    local sql = multi_stmt_import("DST", "SMALL_T", "SMOKE", "SMALL_T", 4)
+    local result = run_migrate({
+        source_type = "ORACLE",
+        schema_filter = "SMOKE",
+        table_filter = "SMALL_T",
+        options = "PARALLEL_STATEMENTS=4;PARALLEL_ROW_THRESHOLD=1000000",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "SMOKE", SRC_TABLE = "SMALL_T", SRC_ROWS = 500000}},
+    })
+    assert_eq(#result.calls, 2)
+    local row = find_import_row(result.rows, "DST.SMALL_T")
+    assert(row, "IMPORT row missing")
+    local _, count = string.gsub(row[6], "STATEMENT '", "STATEMENT '")
+    assert_eq(count, 1, "expected exactly one STATEMENT clause after rewrite, got " .. count)
+    assert_contains(row[6], '"DST"."SMALL_T"')
+    assert_contains(row[6], '"SMOKE"."SMALL_T"')
+end)
+
+test("gate keeps multi-statement IMPORT at or above threshold", function()
+    local sql = multi_stmt_import("DST", "BIG_T", "SMOKE", "BIG_T", 4)
+    local result = run_migrate({
+        source_type = "ORACLE",
+        options = "PARALLEL_STATEMENTS=4;PARALLEL_ROW_THRESHOLD=1000000",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "SMOKE", SRC_TABLE = "BIG_T", SRC_ROWS = 5000000}},
+    })
+    local row = find_import_row(result.rows, "DST.BIG_T")
+    assert(row, "IMPORT row missing")
+    local _, count = string.gsub(row[6], "STATEMENT '", "STATEMENT '")
+    assert_eq(count, 4, "expected all four STATEMENT clauses preserved, got " .. count)
+end)
+
+test("gate leaves single-statement IMPORT untouched", function()
+    local sql = single_stmt_import("DST", "MED_T", "SMOKE", "MED_T")
+    local result = run_migrate({
+        source_type = "ORACLE",
+        options = "PARALLEL_ROW_THRESHOLD=1000000",
+        adapter_rows = {{SQL_TEXT = sql}},
+    })
+    assert_eq(#result.calls, 1, "no row-count lookup should fire for single-statement IMPORT")
+    local row = find_import_row(result.rows, "DST.MED_T")
+    assert(row, "IMPORT row missing")
+    assert_eq(row[6], sql)
+end)
+
+test("gate treats NULL num_rows as below threshold", function()
+    local sql = multi_stmt_import("DST", "NO_STATS", "SMOKE", "NO_STATS", 4)
+    local result = run_migrate({
+        source_type = "ORACLE",
+        options = "PARALLEL_ROW_THRESHOLD=1000000",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "SMOKE", SRC_TABLE = "NO_STATS", SRC_ROWS = nil}},
+    })
+    local row = find_import_row(result.rows, "DST.NO_STATS")
+    assert(row, "IMPORT row missing")
+    local _, count = string.gsub(row[6], "STATEMENT '", "STATEMENT '")
+    assert_eq(count, 1, "NULL row count should be treated as below threshold; got " .. count)
+end)
+
+test("gate disabled by PARALLEL_ROW_THRESHOLD=0", function()
+    local sql_multi = multi_stmt_import("DST", "SMALL_T", "SMOKE", "SMALL_T", 4)
+    local sql_single = single_stmt_import("DST", "MED_T", "SMOKE", "MED_T")
+    local result = run_migrate({
+        source_type = "ORACLE",
+        options = "PARALLEL_ROW_THRESHOLD=0",
+        adapter_rows = {{SQL_TEXT = sql_multi}, {SQL_TEXT = sql_single}},
+    })
+    assert_eq(#result.calls, 1, "PARALLEL_ROW_THRESHOLD=0 must issue no row-count lookup")
+    local row = find_import_row(result.rows, "DST.SMALL_T")
+    assert(row, "multi-stmt IMPORT row missing")
+    local _, count = string.gsub(row[6], "STATEMENT '", "STATEMENT '")
+    assert_eq(count, 4, "all clauses preserved under threshold=0")
+end)
+
+test("gate default threshold is 1000000", function()
+    local sql = multi_stmt_import("DST", "T", "SMOKE", "T", 4)
+    local result = run_migrate({
+        source_type = "ORACLE",
+        options = "",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "SMOKE", SRC_TABLE = "T", SRC_ROWS = 999999}},
+    })
+    local row = find_import_row(result.rows, "DST.T")
+    local _, count = string.gsub(row[6], "STATEMENT '", "STATEMENT '")
+    assert_eq(count, 1, "default threshold 1000000 should rewrite 999999-row table; got " .. count)
+end)
+
+test("gate soft-fails on row-count lookup error", function()
+    local sql = multi_stmt_import("DST", "T", "SMOKE", "T", 4)
+    local result = run_migrate({
+        source_type = "ORACLE",
+        options = "PARALLEL_ROW_THRESHOLD=1000000",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_error = "ORA-00942: table or view does not exist",
+    })
+    local row = find_import_row(result.rows, "DST.T")
+    local _, count = string.gsub(row[6], "STATEMENT '", "STATEMENT '")
+    assert_eq(count, 4, "soft-fail must leave all statement clauses intact")
+    local info_found = false
+    for i = 1, #result.rows do
+        if result.rows[i][1] == "INFO" and tostring(result.rows[i][6]):find("gate skipped", 1, true) then
+            info_found = true
+            break
+        end
+    end
+    assert(info_found, "expected INFO row noting gate skip on lookup error")
+end)
+
+test("gate skips lookup when adapter emits no IMPORTs", function()
+    local result = run_migrate({
+        source_type = "ORACLE",
+        options = "PARALLEL_ROW_THRESHOLD=1000000",
+        adapter_rows = {
+            {SQL_TEXT = 'create schema if not exists "DST"'},
+            {SQL_TEXT = 'create or replace table "DST"."T" ("ID" DECIMAL(18,0))'},
+        },
+    })
+    assert_eq(#result.calls, 1, "no IMPORTs -> no lookup")
+end)
+
+test("gate skips unsupported source type with INFO row", function()
+    local sql = multi_stmt_import("DST", "T", "SMOKE", "T", 4)
+    local result = run_migrate({
+        source_type = "EXASOL",
+        options = "PARALLEL_ROW_THRESHOLD=1000000",
+        adapter_rows = {{SQL_TEXT = sql}},
+    })
+    assert_eq(#result.calls, 1, "unsupported source must not issue lookup")
+    local row = find_import_row(result.rows, "DST.T")
+    local _, count = string.gsub(row[6], "STATEMENT '", "STATEMENT '")
+    assert_eq(count, 4, "IMPORT preserved when gate not configured")
+    local info_found = false
+    for i = 1, #result.rows do
+        if result.rows[i][1] == "INFO" and tostring(result.rows[i][6]):find("no row-count SQL configured", 1, true) then
+            info_found = true
+            break
+        end
+    end
+    assert(info_found, "expected INFO row noting unconfigured source")
+end)
+
+test("gate keys lookup on source schema parsed from inner SELECT", function()
+    local sql = 'IMPORT INTO "DST"."ORDERS" ("ID") FROM JDBC AT SRC_CONN'
+        .. " STATEMENT 'select \"ID\" from \"PUBLIC\".\"orders\" where mod(\"ID\",2)=0'"
+        .. " STATEMENT 'select \"ID\" from \"PUBLIC\".\"orders\" where mod(\"ID\",2)=1'"
+    local lookup_sql_seen = nil
+    local result = run_migrate({
+        source_type = "POSTGRES",
+        target_schema = "DST",
+        options = "PARALLEL_ROW_THRESHOLD=1000000",
+        adapter_rows = {{SQL_TEXT = sql}},
+        gate_lookup_rows = {{SRC_SCHEMA = "PUBLIC", SRC_TABLE = "orders", SRC_ROWS = 100}},
+    })
+    for i = 1, #result.calls do
+        if tostring(result.calls[i]):find("import into (src_schema", 1, true) then
+            lookup_sql_seen = result.calls[i]
+        end
+    end
+    assert(lookup_sql_seen, "row-count lookup SQL not seen")
+    assert_contains(lookup_sql_seen, "PUBLIC")
+    assert_contains(lookup_sql_seen, "orders")
+    assert(not lookup_sql_seen:find("\"DST\"", 1, true), "lookup must NOT key on target schema DST")
+    local row = find_import_row(result.rows, "DST.ORDERS")
+    local _, count = string.gsub(row[6], "STATEMENT '", "STATEMENT '")
+    assert_eq(count, 1, "below-threshold IMPORT must be rewritten to single statement")
+end)
+
+test("gate applies per-table within one migration with one lookup", function()
+    local sql_small = multi_stmt_import("DST", "SMALL_T", "SMOKE", "SMALL_T", 4)
+    local sql_big = multi_stmt_import("DST", "BIG_T", "SMOKE", "BIG_T", 4)
+    local sql_med = single_stmt_import("DST", "MED_T", "SMOKE", "MED_T")
+    local result = run_migrate({
+        source_type = "ORACLE",
+        options = "PARALLEL_ROW_THRESHOLD=1000000",
+        adapter_rows = {
+            {SQL_TEXT = sql_small},
+            {SQL_TEXT = sql_big},
+            {SQL_TEXT = sql_med},
+        },
+        gate_lookup_rows = {
+            {SRC_SCHEMA = "SMOKE", SRC_TABLE = "SMALL_T", SRC_ROWS = 500},
+            {SRC_SCHEMA = "SMOKE", SRC_TABLE = "BIG_T", SRC_ROWS = 5000000},
+        },
+    })
+    local lookup_count = 0
+    for i = 1, #result.calls do
+        if tostring(result.calls[i]):find("import into (src_schema", 1, true) then
+            lookup_count = lookup_count + 1
+        end
+    end
+    assert_eq(lookup_count, 1, "exactly one row-count lookup per migration")
+    local small = find_import_row(result.rows, "DST.SMALL_T")
+    local big = find_import_row(result.rows, "DST.BIG_T")
+    local med = find_import_row(result.rows, "DST.MED_T")
+    local _, small_count = string.gsub(small[6], "STATEMENT '", "STATEMENT '")
+    local _, big_count = string.gsub(big[6], "STATEMENT '", "STATEMENT '")
+    local _, med_count = string.gsub(med[6], "STATEMENT '", "STATEMENT '")
+    assert_eq(small_count, 1, "SMALL_T should be rewritten to 1 statement")
+    assert_eq(big_count, 4, "BIG_T should retain 4 statements")
+    assert_eq(med_count, 1, "MED_T single-stmt unchanged")
 end)
 
 print("")

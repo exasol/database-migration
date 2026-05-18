@@ -298,10 +298,236 @@ function execute_generated_sql(res)
     return summary
 end
 
-function execute_adapter(adapter_sql, debug)
+ROW_COUNT_SQL_BY_SOURCE = {
+    ORACLE = {
+        mode = 'sql',
+        template = "select owner, table_name, num_rows from all_tables where (<PREDICATE>)",
+        pair = "(owner = '%s' and table_name = '%s')",
+    },
+    POSTGRES = {
+        mode = 'sql',
+        template = "select n.nspname, c.relname, c.reltuples::bigint from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relkind in ('r','p') and (<PREDICATE>)",
+        pair = "(n.nspname = '%s' and c.relname = '%s')",
+    },
+    MYSQL = {
+        mode = 'sql',
+        template = "select table_schema, table_name, table_rows from information_schema.tables where (<PREDICATE>)",
+        pair = "(table_schema = '%s' and table_name = '%s')",
+    },
+    SQLSERVER = {
+        mode = 'sql',
+        template = "select s.name as schema_name, t.name as table_name, sum(ps.row_count) as row_count from sys.tables t join sys.schemas s on s.schema_id = t.schema_id join sys.dm_db_partition_stats ps on ps.object_id = t.object_id and ps.index_id in (0,1) where (<PREDICATE>) group by s.name, t.name",
+        pair = "(s.name = '%s' and t.name = '%s')",
+    },
+    SNOWFLAKE = {
+        mode = 'sql',
+        template = "select table_schema, table_name, row_count from information_schema.tables where (<PREDICATE>)",
+        pair = "(table_schema = '%s' and table_name = '%s')",
+    },
+    BIGQUERY = {
+        mode = 'skip_with_info',
+        reason = 'per-dataset INFORMATION_SCHEMA lookup not yet implemented',
+    },
+    REDSHIFT = {
+        mode = 'sql',
+        template = [[select "schema", "table", tbl_rows from svv_table_info where (<PREDICATE>)]],
+        pair = [[("schema" = '%s' and "table" = '%s')]],
+    },
+    VERTICA = {
+        mode = 'sql',
+        template = "select projection_schema, anchor_table_name, row_count from projection_storage where (<PREDICATE>)",
+        pair = "(projection_schema = '%s' and anchor_table_name = '%s')",
+    },
+    DB2 = {
+        mode = 'sql',
+        template = "select tabschema, tabname, card from syscat.tables where (<PREDICATE>)",
+        pair = "(tabschema = '%s' and tabname = '%s')",
+    },
+    HANA = {
+        mode = 'sql',
+        template = "select schema_name, table_name, record_count from sys.m_tables where (<PREDICATE>)",
+        pair = "(schema_name = '%s' and table_name = '%s')",
+    },
+    NETEZZA = {
+        mode = 'sql',
+        template = [[select schema, tablename, reltuples from _v_table where (<PREDICATE>)]],
+        pair = [[(schema = '%s' and tablename = '%s')]],
+    },
+    TERADATA = {
+        mode = 'sql',
+        template = "select databasename, tablename, currentpermspace from dbc.tablesizev where (<PREDICATE>)",
+        pair = "(databasename = '%s' and tablename = '%s')",
+    },
+    DATABRICKS = {
+        mode = 'sql',
+        template = "select table_schema, table_name, cast(null as bigint) as row_count from information_schema.tables where (<PREDICATE>)",
+        pair = "(table_schema = '%s' and table_name = '%s')",
+    },
+}
+ROW_COUNT_SQL_BY_SOURCE.MARIADB = ROW_COUNT_SQL_BY_SOURCE.MYSQL
+ROW_COUNT_SQL_BY_SOURCE.AZURE_SQL = ROW_COUNT_SQL_BY_SOURCE.SQLSERVER
+
+function count_statement_clauses(sql)
+    if sql == nil then return 0 end
+    local n = 0
+    for _ in string.gmatch(sql, "[Ss][Tt][Aa][Tt][Ee][Mm][Ee][Nn][Tt]%s+'") do
+        n = n + 1
+    end
+    return n
+end
+
+function extract_source_ref_from_import(sql)
+    if sql == nil then return nil, nil end
+    local schema, table_name = sql:match('[Ff][Rr][Oo][Mm]%s+"([^"]+)"%."([^"]+)"')
+    return schema, table_name
+end
+
+function rewrite_to_first_statement(sql)
+    if sql == nil then return sql end
+    local stmt_kw_start = string.find(sql:lower(), "statement%s+'")
+    if not stmt_kw_start then return sql end
+    local quote_open = sql:find("'", stmt_kw_start)
+    if not quote_open then return sql end
+    local i = quote_open + 1
+    while i <= #sql do
+        local c = sql:sub(i, i)
+        if c == "'" then
+            if sql:sub(i + 1, i + 1) == "'" then
+                i = i + 2
+            else
+                return sql:sub(1, i)
+            end
+        else
+            i = i + 1
+        end
+    end
+    return sql
+end
+
+function replace_row_sql(row, new_sql)
+    return { SQL_TEXT = new_sql, [1] = new_sql }
+end
+
+function transform_for_gate(res, source_type, connection_name, options)
+    if res == nil or #res == 0 then return res end
+
+    local threshold_raw = opt(options, 'PARALLEL_ROW_THRESHOLD', '1000000')
+    local threshold = tonumber(threshold_raw)
+    if threshold == nil then
+        error('Invalid numeric option PARALLEL_ROW_THRESHOLD: ' .. tostring(threshold_raw))
+    end
+    if threshold <= 0 then
+        return res
+    end
+
+    local imports = {}
+    local pair_list = {}
+    local pairs_seen = {}
+    local needs_lookup = false
+    for i = 1, #res do
+        local sql_text = first_sql_text(res[i])
+        if classify_step(sql_text) == 'IMPORT' then
+            local n = count_statement_clauses(sql_text)
+            if n > 1 then
+                local src_schema, src_table = extract_source_ref_from_import(sql_text)
+                imports[#imports + 1] = {
+                    idx = i,
+                    sql = sql_text,
+                    schema = src_schema,
+                    table_name = src_table,
+                }
+                if src_schema ~= nil and src_table ~= nil then
+                    local key = src_schema .. '\t' .. src_table
+                    if not pairs_seen[key] then
+                        pairs_seen[key] = true
+                        pair_list[#pair_list + 1] = { schema = src_schema, table_name = src_table }
+                    end
+                    needs_lookup = true
+                end
+            end
+        end
+    end
+
+    if not needs_lookup then
+        return res
+    end
+
+    local function append_info(out, message)
+        out[#out + 1] = { SQL_TEXT = '-- ' .. message }
+        return out
+    end
+
+    local dispatch = ROW_COUNT_SQL_BY_SOURCE[source_type]
+    if dispatch == nil or dispatch.mode == 'skip_with_info' then
+        local reason
+        if dispatch == nil then
+            reason = 'no row-count SQL configured for source type ' .. tostring(source_type)
+        else
+            reason = dispatch.reason or 'gate skipped'
+        end
+        local out = {}
+        for j = 1, #res do out[j] = res[j] end
+        append_info(out, 'PARALLEL_ROW_THRESHOLD gate skipped: ' .. reason)
+        return out
+    end
+
+    local pair_clauses = {}
+    for _, p in ipairs(pair_list) do
+        local esc_schema = escape_sql_literal(p.schema)
+        local esc_table = escape_sql_literal(p.table_name)
+        pair_clauses[#pair_clauses + 1] = string.format(dispatch.pair, esc_schema, esc_table)
+    end
+    local predicate = table.concat(pair_clauses, ' or ')
+    local row_count_sql = (dispatch.template:gsub('<PREDICATE>', function() return predicate end))
+
+    local outer_sql = "select * from (import into (src_schema varchar(2000), src_table varchar(2000), src_rows decimal(36,0)) from jdbc at "
+        .. connection_name
+        .. " statement '"
+        .. escape_sql_literal(row_count_sql)
+        .. "')"
+
+    local success, lookup_res = pquery(outer_sql)
+    if not success then
+        local out = {}
+        for j = 1, #res do out[j] = res[j] end
+        local err = (lookup_res and lookup_res.error_message) or 'unknown error'
+        append_info(out, 'PARALLEL_ROW_THRESHOLD gate skipped: row-count lookup failed (' .. tostring(err) .. ')')
+        return out
+    end
+
+    local lookup = {}
+    for i = 1, #lookup_res do
+        local r = lookup_res[i]
+        local s = r.SRC_SCHEMA or r[1]
+        local t = r.SRC_TABLE or r[2]
+        local n = r.SRC_ROWS or r[3]
+        if s ~= nil and t ~= nil then
+            lookup[tostring(s) .. '\t' .. tostring(t)] = n
+        end
+    end
+
+    local out = {}
+    for j = 1, #res do out[j] = res[j] end
+    for _, im in ipairs(imports) do
+        if im.schema ~= nil and im.table_name ~= nil then
+            local rowcount = lookup[im.schema .. '\t' .. im.table_name]
+            local effective = tonumber(rowcount) or 0
+            if effective < threshold then
+                out[im.idx] = replace_row_sql(out[im.idx], rewrite_to_first_statement(im.sql))
+            end
+        end
+    end
+    return out
+end
+
+function execute_adapter(adapter_sql, debug, gate_ctx)
     local success, res = pquery(adapter_sql)
     if not success then
         error('"' .. res.error_message .. '" Caught while executing: "' .. res.statement_text .. '"')
+    end
+
+    if gate_ctx ~= nil then
+        res = transform_for_gate(res, gate_ctx.source_type, gate_ctx.connection_name, gate_ctx.options)
     end
 
     if not debug then
@@ -476,7 +702,13 @@ else
     error('Unsupported SOURCE_TYPE: ' .. tostring(SOURCE_TYPE))
 end
 
-return execute_adapter(adapter_sql, debug)
+local gate_ctx = {
+    source_type = source,
+    connection_name = connection_name,
+    options = options,
+}
+
+return execute_adapter(adapter_sql, debug, gate_ctx)
 /
 
 /*
