@@ -11,8 +11,7 @@ CREATE OR REPLACE PYTHON3 SCALAR SCRIPT DATABASE_MIGRATION."AZURE_GET_FILENAMES"
 EMITS ("CONTAINER_NAME" VARCHAR(1024) UTF8, "URL" VARCHAR(4096) UTF8, "FILE_LAST_MODIFIED" TIMESTAMP) AS
 import fnmatch
 
-from azure.identity import DefaultAzureCredential
-from azure.storage.blob import BlobServiceClient, ContainerClient, BlobPrefix
+from azure.storage.blob import BlobServiceClient
 
 #####################################################################################
 
@@ -25,7 +24,7 @@ def run(ctx):
     
     blob_service_client = BlobServiceClient(account_url, credential=azure_account_key)
     
-    container_client = blob_service_client.get_container_client(container='temp')
+    container_client = blob_service_client.get_container_client(container=azure_container_name)
     
     blob_list = container_client.list_blobs(name_starts_with=ctx.folder_name)
 
@@ -191,7 +190,8 @@ end
     local pre     = "IMPORT INTO ".. schema_name.. ".".. table_name .. " FROM CSV AT CLOUD AZURE BLOBSTORAGE "..connection_name
 
     for i = 1, #res do
-		local curr_file_name 	      = "'" .. res[i].CONTAINER_NAME .. "/" .. res[i].FILE_NAME .. "'"
+		local curr_file_name 	      = "'" .. res[i].FILE_NAME .. "'"
+		local curr_full_file_name 	      = "'" .. res[i].CONTAINER_NAME .. "/" .. res[i].FILE_NAME .. "'"
 		
         if math.fmod(i,parallel_connections) == 1 or parallel_connections == 1 then
             stmt = pre
@@ -203,7 +203,7 @@ end
 		else
 			file_range = ' (1..'..number_cols..')'
         end
-        stmt = stmt .. "\n\tFILE " .. curr_file_name .. file_range
+        stmt = stmt .. "\n\tFILE " .. curr_full_file_name .. file_range
 		blobs = blobs ..curr_file_name..", "
         if (math.fmod(i,parallel_connections) == 0 or i == #res) then
             stmt = stmt .. "\n\t"..file_opts..";"
@@ -256,7 +256,7 @@ create schema AZURE_LOADER_LOGGING;
 -- USE CONNECTION MY_BLOBSTORAGE
 execute script DATABASE_MIGRATION.azure_parallel_read(
   true				-- execute_statements: if true, statements are executed immediately, if false only statements are generated
-, true				-- force reload: if true, target table and logging table will be truncated, all files will be loaded again
+, false				-- force reload: if true, target table and logging table will be truncated, all files will be loaded again
 , 'AZURE_LOADER_LOGGING'		-- schema you want to use for the logging tables
 , 'TEST'			-- name of the schema that holds the table you want to import into
 , 'AZURE_TARGET' 			-- name of the table you want to import into
