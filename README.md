@@ -6,7 +6,8 @@
 ## Table of Contents
 1. [Overview](#overview)
 2. [Migration source:](#migration-source)
-    * [Azure Sql](#azure-sql)
+    * [Azure Blob Storage](#azure-blob-storage)
+	* [Azure Sql](#azure-sql)
     * [CSV](#csv)
     * [DB2](#db2)
     * [Exasol](#exasol)
@@ -40,12 +41,19 @@ If you want to optimize existing scripts or create new scripts for additional sy
 
 ## Migration source
 
+### Azure Blob Storage
+
+The script [azure_blob_storage_to_exasol.sql](azure_blob_storage_to_exasol.sql) looks different than the other import scripts. It's made to load data from Azure Blob Storage in parallel and needs some preparation before you can use it. See [our documentation](https://docs.exasol.com/loading_data/loading_data_from_amazon_s3_in_parallel.htm) for detailed instructions.
+If you just want to import a single file, see 'Import from [CSV](#csv)'.
+
 ### Azure SQL
+
 Azure SQL is essentially Microsoft SQL Server. You need to specify a DB you are working on in your connection-string.
 See script [azure_sql_to_exasol.sql](azure_sql_to_exasol.sql)
 
 
 ### CSV
+
 The method of importing a CSV file depends on the location of the file.
 - Import a file stored on your **local machine** via EXAplus:
 ```sql
@@ -66,7 +74,8 @@ SKIP = 1 -- skip the header
 
 - Import from **S3**: See [Load Data from Amazon S3 Using IMPORT](https://docs.exasol.com/db/latest/loading_data/load_data_amazon_s3.htm) for single file import, for importing multiple files scroll down to [S3](#s3)
 
-For more details on `IMPORT` see paragraph 2.2.2 in the User Manual. For further help on typical CSV-formatting issues, see
+For more details on `IMPORT` see [IMPORT](https://docs.exasol.com/db/latest/sql/import.htm). For further help on typical CSV-formatting issues, see
+
 * [How to load bad CSV files](https://exasol.my.site.com/s/article/How-to-load-bad-CSV-files?language=en_US)
 * [Proper csv export from MySQL](https://exasol.my.site.com/s/article/Proper-csv-export-from-MySQL?language=en_US)
 * [Proper csv export from IBM DB2](https://exasol.my.site.com/s/article/Proper-csv-export-from-IBM-DB2?language=en_US)
@@ -75,8 +84,11 @@ For more details on `IMPORT` see paragraph 2.2.2 in the User Manual. For further
 * [Proper csv export from Microsoft SQL Server](https://exasol.my.site.com/s/article/Proper-csv-export-from-Microsoft-SQL-Server?language=en_US)
 
 ### DB2
+
 See script [db2_to_exasol.sql](db2_to_exasol.sql)
+
 ### Exasol
+
 Step by Step guide:
 * create connection to the Exasol database you want to import from
 * create the [exasol_to_exasol.sql](exasol_to_exasol.sql) script
@@ -112,16 +124,13 @@ For the actual data-migration, see script [bigquery_to_exasol.sql](bigquery_to_e
 
 Note: Due to the lack of an alternative datatype, the following Google BigQuery datatypes; `DATE`,`DATETIME`,`TIMESTAMP` and `ARRAY` are stored as VARCHAR. 
 
-
 ### MariaDB
-
 
 **Download Driver**
 
 Download the JDBC driver for MariaDB from the [MariaDB connectors page](https://mariadb.com/downloads/connectors/connectors-data-access/java8-connector/). In the Product dropdown menu select **Java 8+connector**, in the Version dropdown menu select **the newest version**, in the OS dropdown menu select **Platform Independent**.
 
-
-**Configure the Driver in EXAoperation**
+**Configure the Driver in EXAoperation, database versions prior to v8**
 
 Do the following to configure the driver in EXAoperation:
 1.	Log in to EXAoperation user interface as an Administrator user.
@@ -137,6 +146,8 @@ Do the following to configure the driver in EXAoperation:
 5.	Click **Add** to save the settings.
 6.	Select the radio button next to the driver from list of JDBC driver.
 7.	Click **Choose File** to locate the downloaded driver and click **Upload** to upload the JDBC driver.
+
+For Exasol v8 or newer use the values above in [Load data using JDBC (generic)](https://docs.exasol.com/db/latest/loading_data/connect_sources/import_data_using_jdbc.htm).
 
 You can find a detailed information about the MariaDB driver at the following link: https://mariadb.com/kb/en/about-mariadb-connector-j/
 
@@ -189,11 +200,12 @@ STATEMENT 'SELECT 42 FROM DUAL'
 Then you're ready to use the migration script: [mysql_to_exasol.sql](mysql_to_exasol.sql)
 
 ### Netezza
+
 The first thing you need to do is add the IBM Netezza JDBC driver to Exasol. Since Netezza has run out of support in June 2019, the JDBC-driver (`nzjdbc3.jar`) can no longer be found on the official JDBC Download-page of IBM. Anyhow, the driver can be found within your Netezza distribution under following path: 
 
 `nz/kit.version_number/sbin/nzjdbc3.jar   (eg. nz/kit.7.2.1.0/sbin/nzjdbc3.jar)`
 
-In order to add the driver to Exasol log into your EXAOperations, select the 'Software'-, then 'JDBC Drivers'-Tab.
+In database versions prior to v8, in order to add the driver to Exasol log into your EXAoperation, select the 'Software'-, then 'JDBC Drivers'-Tab.
 
 Click Add, then specify the following details:
 
@@ -204,6 +216,8 @@ Click Add, then specify the following details:
 
 After clicking Apply, you will see the newly added driver's details on the top section of the driver list. 
 Select the Netezza driver by locating the nzjdbc3.jar and upload it. When done the .jar file should be listed in the files column for the IBM Netezza driver.
+
+For Exasol v8 or newer use the values above in [Load data using JDBC (generic)](https://docs.exasol.com/db/latest/loading_data/connect_sources/import_data_using_jdbc.htm).
 
 The standard port for Netezza is `5480`.
 
@@ -234,8 +248,9 @@ SELECT *
 For the actual data-migration, see script [netezza_to_exasol.sql](netezza_to_exasol.sql)
 
 ### Oracle
+
 When importing from Oracle, you have two options. You could import via JDBC or the  native Oracle interface (OCI).
-- OCI: Log in to EXAoperation. Go to *Configuration -> Software*. Download the instant client from Oracle and select it at `Software Update File`. Click `Submit` to upload, see [Oracle OCI](https://docs.exasol.com/db/latest/loading_data/connect_sources/oracle.htm#OracleOCI).
+- OCI: Follow [Oracle OCI](https://docs.exasol.com/db/latest/loading_data/connect_sources/oracle.htm#OracleCallInterfaceOCI).
 
   Create a connection:
   ``` SQL
@@ -245,7 +260,7 @@ When importing from Oracle, you have two options. You could import via JDBC or t
     IDENTIFIED BY '<password>';
   ```
 
-- JDBC: If you are using the community edition, you need to upload a JDBC driver in EXAoperation before being able to establish a connection, see [Oracle JDBC](https://docs.exasol.com/db/latest/loading_data/connect_sources/oracle.htm#OracleJDBC).
+- JDBC: Follow [Oracle JDBC](https://docs.exasol.com/db/latest/loading_data/connect_sources/oracle.htm#OracleJDBC).
 
   Create a connection:
   ```SQL
@@ -268,22 +283,26 @@ STATEMENT 'SELECT 42 FROM DUAL'
 Then you're ready to use the migration script: [oracle_to_exasol.sql](oracle_to_exasol.sql)
 
 ### PostgreSQL
+
 See script [postgres_to_exasol.sql](postgres_to_exasol.sql)
 
 ### Redshift
+
 See script [redshift_to_exasol.sql](redshift_to_exasol.sql)
 
 ### S3
+
 The script [s3_to_exasol.sql](s3_to_exasol.sql) looks different than the other import scripts. It's made to load data from S3 in parallel and needs some preparation before you can use it. See [our documentation](https://docs.exasol.com/loading_data/loading_data_from_amazon_s3_in_parallel.htm) for detailed instructions.
 If you just want to import a single file, see 'Import from [CSV](#csv)' above.
 
 ### SAP Hana
+
 The first thing you need to do is add the SAP Hana JDBC driver to Exasol. The JDBC driver is located in your local SAP Hana Installation folder:
 
 * eg: (C:\Program Files\sap\ngdbc.jar) on Microsoft Windows platforms
 * eg: (/usr/sap/ngdbc.jar) on Linux and UNIX platforms
 
-In order to add the driver to Exasol log into your EXAOperations, select the 'Software', then 'JDBC Drivers'-Tab.
+In database versions prior to v8, in order to add the driver to Exasol log into your EXAoperation, select the 'Software', then 'JDBC Drivers'-Tab.
 
 Click Add then specify the following details:
 
@@ -295,6 +314,7 @@ Click Add then specify the following details:
 After clicking Apply, you will see the newly added driver's details on the top section of the driver list. Select the SAP Hana driver by locating the ngdbc.jar and upload it.
 When done the .jar file should be listed in the files column for the SAP Hana driver.
 
+For Exasol v8 or newer use the values above in [Load data using JDBC (generic)](https://docs.exasol.com/db/latest/loading_data/connect_sources/import_data_using_jdbc.htm).
 
 You can find a detailed information about configuring the SAP Hana driver at the following link:
 https://help.sap.com/viewer/52715f71adba4aaeb480d946c742d1f6/2.0.00/en-US/ff15928cf5594d78b841fbbe649f04b4.html
@@ -331,12 +351,11 @@ SELECT *
 ```
 For the actual data-migration, see script [sap_hana_to_exasol.sql](sap_hana_to_exasol.sql)
 
-
-
 ### Snowflake
+
 The first thing you need to do is add the Snowflake JDBC driver to Exasol. The JDBC driver can be downloaded from the [Snowflake website](https://docs.snowflake.com/developer-guide/jdbc/jdbc-download).
 
-In order to add the driver to Exasol log into your EXAOperations, select the 'Software', then 'JDBC Drivers'-Tab.
+In database versions prior to v8, in order to add the driver to Exasol log into your EXAoperation, select the 'Software', then 'JDBC Drivers'-Tab.
 
 Click Add then specify the following details:
 
@@ -346,6 +365,8 @@ Click Add then specify the following details:
 * Disable Security Manager: `Check this box`
 
 After clicking Apply, you will see the newly added driver's details on the top section of the driver list. Select the Snowflake driver by locating the corresponding jar and upload it. When done the .jar file should be listed in the files column for the Snowflake driver.
+
+For Exasol v8 or newer follow [Load data from Snowflake](https://docs.exasol.com/db/latest/loading_data/connect_sources/snowflake.htm).
 
 You can find a detailed information about configuring the Snowflake driver at the following link:
 https://docs.snowflake.com/en/developer-guide/jdbc/jdbc-configure
@@ -374,9 +395,11 @@ For the actual data-migration, see script [snowflake_to_exasol.sql](snowflake_to
 
 
 ### SQL Server
+
 See script [sqlserver_to_exasol.sql](sqlserver_to_exasol.sql)
 
 ### Teradata
+
 The first thing you need to do is add the Teradata JDBC driver to Exasol. The driver can be downloaded from
 [Teradata's Download site](https://downloads.teradata.com/download/connectivity/jdbc-driver). You need to register
 first, it's free. Make sure that you download the right version of the JDBC driver, matching the version of the
@@ -385,17 +408,19 @@ Teradata database.
 The downloaded package contains the file:
 * `terajdbc4.jar` contains the actual Java classes of the driver
 
-This file needs to be uploaded when you add the Teradata JDBC driver for Exasol. To do this, log into
-EXAoperations, then select _Software_, then the _JDBC Drivers_ tab.
+This file needs to be uploaded when you add the Teradata JDBC driver for Exasol. In database versions prior to v8, to do this, log into
+EXAoperation, then select _Software_, then the _JDBC Drivers_ tab.
 
-Click ` Add ` then specify the following details:
+Click `Add` then specify the following details:
 * Driver Name: `Teradata` (or something similar)
 * Main Class: `com.teradata.jdbc.TeraDriver`
 * Prefix: `jdbc:teradata:`
 * Comment: `Version 15.10` (or something similar)
 
-After clicking ` Apply `, you will see the newly added driver's details on the top section of the driver list.
+After clicking `Apply`, you will see the newly added driver's details on the top section of the driver list.
 Select the Teradata driver (the radio button in the first column) and then locate the `terajdbc4.jar` and upload it.
+
+For Exasol v8 or newer follow [Load data from Teradata](https://docs.exasol.com/db/latest/loading_data/connect_sources/teradata.htm).
 
 Next step is to test the connectivity. First, create a connection to the remote Teradata database:
 ```SQL
@@ -419,20 +444,22 @@ Now, test the connectivity with a simple query:
 For the actual data-migration, see script [teradata_to_exasol.sql](teradata_to_exasol.sql)
 
 ### Vectorwise
+
 See script [vectorwise_to_exasol.sql](vectorwise_to_exasol.sql)
 
 ### Vertica
+
 See script [vertica_to_exasol.sql](vertica_to_exasol.sql)
 
-
 ## Post-load optimization
+
 This folder contains scripts that can be used after having imported data from another database via the scripts above.
 What they do:
 - Optimize the column's datatypes to minimize storage space on disk
 - Import primary keys from other databases
 
-
 ## Delta import
+
 This folder contains a script that can be used if you want to import data on a regular basis.
 What it does:
 - Import only data that hasn't been imported yet by performing a delta import based on a given column (further explaination [inside the folder](delta_import))
