@@ -1,7 +1,10 @@
 # Database migration
 [![Build Status](https://travis-ci.org/exasol/database-migration.svg?branch=master)](https://travis-ci.org/exasol/database-migration)
 
-###### Please note that this is an open source project which is *not officially supported* by Exasol. We will try to help you as much as possible, but can't guarantee anything since this is not an official Exasol product.
+> ## ⚠️ Please note
+>
+> This is an **open source project** and is **not officially supported by Exasol**. We are happy to help
+> wherever we can, but — since this is not an official Exasol product — **we cannot give any guarantees**.
 
 ## Table of Contents
 1. [Overview](#overview)
@@ -89,22 +92,61 @@ See script [db2_to_exasol.sql](db2_to_exasol.sql)
 
 ### Exasol
 
-Step by Step guide:
-* create connection to the Exasol database you want to import from
-* create the [exasol_to_exasol.sql](exasol_to_exasol.sql) script
-* adapt the variables for the execute script accordingly to your scenario and run the statement
-  * depending on your system and the amount of tables this might take a few seconds
-* copy the result set to another session and execute the statement in the output order
+The [exasol_to_exasol.sql](exasol_to_exasol.sql) script generates the statements to migrate one Exasol
+database to another. It runs on the **target**, reads the **source** metadata through a connection (EXA or
+JDBC) and **returns** the statements to recreate and load the source. It changes nothing itself — you review
+the output and run it, in the order returned.
 
-This script will generate the following information:
-* create schema
-* create table with primary keys
-* alter table add foreign keys
-* alter table set partion by 
-* alter table set distribution keys
-* import data
+**Step by step**
+* **Install** the script on the **target** database (run [exasol_to_exasol.sql](exasol_to_exasol.sql) once;
+  it creates `DATABASE_MIGRATION.EXASOL_TO_EXASOL`).
+* **Create a connection** on the target pointing at the **source** Exasol database. Both the native **EXA**
+  and the **JDBC** interface are built into Exasol — no driver to install (unlike every other source).
+  **Prefer EXA**: `IMPORT FROM EXA` is always parallelized, so loading directly from another Exasol database
+  is significantly faster. For self-signed certificates add the certificate fingerprint or `nocertcheck` and
+  list all source nodes. Ready-to-edit `CREATE CONNECTION` examples and a connection test are at the bottom
+  of the script (a self-managed Exasol — on-prem or in any cloud, e.g. AWS/GCP/Azure — and Exasol SaaS, which
+  uses a slightly different connection string).
+* **Adapt the `EXECUTE SCRIPT` parameters** to your scenario and run it (a few seconds, depending on the
+  number of tables).
+* **Copy the result set** into another session and execute the statements **in the output order**.
 
-See script [exasol_to_exasol.sql](exasol_to_exasol.sql) for more information!
+```sql
+EXECUTE SCRIPT DATABASE_MIGRATION.EXASOL_TO_EXASOL(
+   'EXASOL_EXA'  -- CONNECTION_NAME: the connection to the SOURCE database
+  ,'EXA'         -- CONNECTION_SETTING: 'EXA' (native, parallel, faster) or 'JDBC'
+  ,false         -- IDENTIFIER_CASE_INSENSITIVE: false = verbatim/quoted, recommended (preserves lower/MixedCase); true = fold ALL identifiers to UPPER
+  ,'%TPCDS_1GB%' -- SCHEMA_FILTER: schema name/filter, '%' = all (SYS, EXA_STATISTICS and virtual schemas are always excluded)
+  ,'%'           -- TABLE_FILTER: table name/filter, '%' = all
+  ,true          -- GENERATE_VIEWS: true/false, include views (emitted as CREATE OR REPLACE FORCE VIEW)
+  ,'%'           -- VIEW_FILTER: view name/filter, '%' = all
+  ,'DISABLE'     -- PK_SETTING: 'DISABLE' (faster load; appends an ENABLE-keys section) or 'ENABLE'
+  ,'8'           -- TARGET_VERSION: '8' (default) or '7' (downgrade: TIMESTAMP(p) -> TIMESTAMP)
+);
+```
+
+This script generates, in this order:
+* `CREATE SCHEMA` and `CREATE TABLE` — columns keep their **exact source type** (so every data type *and* its
+  character set `ASCII`/`UTF8` is reproduced 1:1), plus `NOT NULL`, `IDENTITY` and column `DEFAULT`s
+* primary keys (quoted, in constraint order) and `ALTER TABLE … ADD … FOREIGN KEY`
+* `ALTER TABLE … PARTITION BY` and `ALTER TABLE … DISTRIBUTE BY`
+* table & column `COMMENT`s
+* `IMPORT` of the data (typed transfer — differing source/target NLS does not affect the data; nanosecond
+  `TIMESTAMP(9)` is preserved over both EXA and JDBC)
+* when `PK_SETTING='DISABLE'`: an **ENABLE PRIMARY & FOREIGN KEYS** section to run after the import (loading
+  is much faster with keys disabled; primary keys are enabled before foreign keys)
+* views, including their comment, created `WITH FORCE`
+
+System schemas (`SYS`, `EXA_STATISTICS`) and **virtual** objects are skipped. `7.1 → 8` and `7.1 → 7.1`
+work out of the box; for a downgrade `8 → 7.1` set `TARGET_VERSION='7'`. Not migrated (out of scope):
+functions, scripts/UDFs/adapters, users/roles/privileges, connections.
+
+**Privileges/visibility:** the source metadata is read from the `EXA_ALL_*` system views **through the
+connection's user**, so the script sees — and generates statements for — only the objects that user may
+access on the source; the generated statements run on the target only where you have the matching
+privileges. **To migrate everything, use a user with DBA privileges on both the source and the target.**
+
+See the header of [exasol_to_exasol.sql](exasol_to_exasol.sql) for more information!
 
 ### Google BigQuery
 
