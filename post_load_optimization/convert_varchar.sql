@@ -209,8 +209,8 @@ CREATE OR REPLACE SCRIPT database_migration.convert_varchar(schema_pattern, tabl
     function render_type(t)
         if     t.fam == 'NUM' then
             if t.scale == 0 then return "DECIMAL(" .. adjust_precision(t.idig) .. ", 0)" end
-            local total = t.idig + t.scale
-            if total > 36 then return "DOUBLE PRECISION" else return "DECIMAL(" .. total .. ", " .. t.scale .. ")" end
+            local raw = t.idig + t.scale
+            if raw > 36 then return "DOUBLE PRECISION" else return "DECIMAL(" .. adjust_precision(raw) .. ", " .. t.scale .. ")" end
         elseif t.fam == 'DBL'  then return "DOUBLE PRECISION"
         elseif t.fam == 'DATE' then return "DATE"
         elseif t.fam == 'TS'   then return "TIMESTAMP(" .. t.fp .. ")"
@@ -500,11 +500,13 @@ CREATE OR REPLACE SCRIPT database_migration.convert_varchar(schema_pattern, tabl
                         end
                     end
                 elseif r["ENTRIES"] == r["ITS_INTEGER"] + r["ITS_DECIMAL"] then -- integers and decimals (not scientific)
-                    local total_precision = math.max(r["ITS_INTEGER_PRECISION"], r["ITS_DECIMAL_PRECISION"]) + r["ITS_DECIMAL_SCALE"]
-                    if total_precision > 36 then
-                        conversion = "Keep " .. src_type .. " (decimal precision " .. total_precision .. " > max 36)"
-                        notes      = "Largest decimal precision " .. total_precision .. " exceeds the maximum DECIMAL precision of 36; not convertible."
+                    local raw_total = math.max(r["ITS_INTEGER_PRECISION"], r["ITS_DECIMAL_PRECISION"]) + r["ITS_DECIMAL_SCALE"]
+                    if raw_total > 36 then
+                        conversion = "Keep " .. src_type .. " (decimal precision " .. raw_total .. " > max 36)"
+                        notes      = "Largest decimal precision " .. raw_total .. " exceeds the maximum DECIMAL precision of 36; not convertible."
                     else
+                        -- round the precision up to 9 / 18 / 36, exactly like the integer case (the scale is kept)
+                        local total_precision = adjust_precision(raw_total)
                         conversion = src_type .. " --> DECIMAL(" .. total_precision .. ", " .. r["ITS_DECIMAL_SCALE"] .. ")"
                         query_text = altpfx .. "DECIMAL(" .. total_precision .. ", " .. r["ITS_DECIMAL_SCALE"] .. ");"
                         tgt        = { fam = 'NUM', idig = math.max(r["ITS_INTEGER_PRECISION"], r["ITS_DECIMAL_PRECISION"]), scale = r["ITS_DECIMAL_SCALE"] }
@@ -591,7 +593,7 @@ CREATE OR REPLACE SCRIPT database_migration.convert_varchar(schema_pattern, tabl
                            ucol == "DATE" or ucol == 'DOB' then -- name looks like a date
                         conversion = "Keep " .. src_type .. " (name looks like a date; values do not match " .. nls_date_format .. ")"
                         notes      = "If this is a date, normalize then convert, e.g.: UPDATE " .. sch_q .. "." .. tab_q .. " SET " .. col_q .. " = TO_CHAR(TO_DATE(" .. col_q .. ", '<date_format>'), '" .. nls_date_format .. "'); then " .. altpfx .. "DATE;"
-                    elseif estimate_optimal_varchar_length(r["MAX_LENGTH"]) < curr_col_len then -- shrink width
+                    elseif curr_col_len > 3 and estimate_optimal_varchar_length(r["MAX_LENGTH"]) < curr_col_len then -- shrink width (columns with n <= 3 are left untouched)
                         local new_col_len = estimate_optimal_varchar_length(r["MAX_LENGTH"])
                         conversion = src_type .. " --> VARCHAR(" .. new_col_len .. ") " .. charset .. ", max length: " .. r["MAX_LENGTH"]
                         query_text = altpfx .. "VARCHAR(" .. new_col_len .. ") " .. charset .. ";"
@@ -779,12 +781,13 @@ CREATE OR REPLACE SCRIPT database_migration.convert_varchar(schema_pattern, tabl
     end)
 
     if #drop_rows > 0 then
+        -- section dividers are SQL comments and go into QUERY_TEXT (the runnable column), not CONVERSION
         local out = {}
-        out[#out + 1] = { '', '', '', '-- ### DROP FOREIGN KEYS - run these FIRST (before the column changes) ###', '', '' }
+        out[#out + 1] = { '', '', '', '', '-- ### DROP FOREIGN KEYS - run these FIRST (before the column changes) ###', '' }
         for _, x in ipairs(drop_rows)  do out[#out + 1] = x end
-        out[#out + 1] = { '', '', '', '-- ### COLUMN TYPE CHANGES ###', '', '' }
+        out[#out + 1] = { '', '', '', '', '-- ### COLUMN TYPE CHANGES ###', '' }
         for _, x in ipairs(col_rows)   do out[#out + 1] = x end
-        out[#out + 1] = { '', '', '', '-- ### RE-ADD FOREIGN KEYS - run these LAST (after the column changes) ###', '', '' }
+        out[#out + 1] = { '', '', '', '', '-- ### RE-ADD FOREIGN KEYS - run these LAST (after the column changes) ###', '' }
         for _, x in ipairs(readd_rows) do out[#out + 1] = x end
         size_and_exit(out)
     else
