@@ -20,6 +20,17 @@ CREATE SCHEMA IF NOT EXISTS DATABASE_MIGRATION;
     Only real, local base TABLE columns are inspected (views/synonyms and VIRTUAL SCHEMA columns are
     excluded).
 
+    FOREIGN KEY handling (automatic): in Exasol a type change on a PRIMARY/FOREIGN KEY column fails unless
+    the linked PK and FK columns are changed to the SAME type. So when FOREIGN KEYs touch the analyzed
+    tables, the script (a) harmonizes every referential key group to ONE common target type that fits all
+    of its columns (the optimal common type - never a blanket VARCHAR), and (b) wraps the output in a
+    "DROP FOREIGN KEYS" section (run FIRST) and a "RE-ADD FOREIGN KEYS" section (run LAST), so the whole
+    script runs end to end. Each FK is re-added in its ORIGINAL ENABLE/DISABLE state - the script never
+    changes whether a constraint is enabled or disabled. A key column whose group reaches a table OUTSIDE
+    the current filter is kept
+    unchanged, with a note to re-run including the related table(s). With no FOREIGN KEYs in scope the run
+    is exactly as before (no overhead).
+
     ----------------------------------------------------------------------------------------------------
     REPORT ONLY - this script does NOT change anything. It only RETURNS rows: a "conversion" description,
     the "query_text" you could run, and "notes" (warnings/hints). You execute the statements yourself.
@@ -162,12 +173,9 @@ CREATE OR REPLACE SCRIPT database_migration.convert_varchar(schema_pattern, tabl
 
     -- Sorts the rows (schema, table, column), inserts a friendly message if empty, sizes the output
     -- columns dynamically and exits. log_for_all_columns selects which empty message is shown.
-    function emit_and_exit(rows)
-        table.sort(rows, function(a, b)
-            if a[1] ~= b[1] then return a[1] < b[1] end
-            if a[2] ~= b[2] then return a[2] < b[2] end
-            return a[3] < b[3]
-        end)
+    -- Sizes the six output columns dynamically and exits. Does NOT sort (caller controls the order, so the
+    -- constraint-aware DROP/MODIFY/RE-ADD sections keep their required sequence).
+    function size_and_exit(rows)
         if #rows == 0 then
             local empty_msg
             if log_for_all_columns then
@@ -185,6 +193,60 @@ CREATE OR REPLACE SCRIPT database_migration.convert_varchar(schema_pattern, tabl
         local ln  = getMaxLengthForColumn(rows, 6)
         exit(rows, "schema_name char(" .. ls .. "), table_name char(" .. lt .. "), column_name char(" .. lc
                    .. "), conversion char(" .. lco .. "), query_text char(" .. lq .. "), notes char(" .. ln .. ")")
+    end
+
+    -- Sorts the rows (schema, table, column) and exits (used when there is no constraint-aware sectioning).
+    function emit_and_exit(rows)
+        table.sort(rows, function(a, b)
+            if a[1] ~= b[1] then return a[1] < b[1] end
+            if a[2] ~= b[2] then return a[2] < b[2] end
+            return a[3] < b[3]
+        end)
+        size_and_exit(rows)
+    end
+
+    -- Renders a structured target descriptor into an Exasol type string (nil = keep current type).
+    function render_type(t)
+        if     t.fam == 'NUM' then
+            if t.scale == 0 then return "DECIMAL(" .. adjust_precision(t.idig) .. ", 0)" end
+            local total = t.idig + t.scale
+            if total > 36 then return "DOUBLE PRECISION" else return "DECIMAL(" .. total .. ", " .. t.scale .. ")" end
+        elseif t.fam == 'DBL'  then return "DOUBLE PRECISION"
+        elseif t.fam == 'DATE' then return "DATE"
+        elseif t.fam == 'TS'   then return "TIMESTAMP(" .. t.fp .. ")"
+        elseif t.fam == 'BOOL' then return "BOOLEAN"
+        elseif t.fam == 'DSI'  then return "INTERVAL DAY(" .. t.p .. ") TO SECOND(" .. t.fp .. ")"
+        elseif t.fam == 'YMI'  then return "INTERVAL YEAR(" .. t.p .. ") TO MONTH"
+        elseif t.fam == 'GEO'  then return "GEOMETRY"
+        elseif t.fam == 'VC'   then return "VARCHAR(" .. t.len .. ") " .. (t.ascii and 'ASCII' or 'UTF8')
+        else                        return nil end -- KEEP
+    end
+
+    -- Merges two per-column targets into the tightest COMMON type that fits BOTH (for FK key groups).
+    -- Returns {fam='KEEP'} only when the column types are genuinely unmergeable (e.g. numbers vs dates) or
+    -- when a member is not convertible -- never a blanket VARCHAR.
+    function merge_targets(a, b)
+        if a.fam == 'KEEP' or b.fam == 'KEEP' then return { fam = 'KEEP' } end
+        local na = (a.fam == 'NUM' or a.fam == 'DBL')
+        local nb = (b.fam == 'NUM' or b.fam == 'DBL')
+        if na and nb then
+            if a.fam == 'DBL' or b.fam == 'DBL' then return { fam = 'DBL' } end
+            return { fam = 'NUM', idig = math.max(a.idig, b.idig), scale = math.max(a.scale, b.scale) }
+        end
+        local da = (a.fam == 'DATE' or a.fam == 'TS')
+        local db = (b.fam == 'DATE' or b.fam == 'TS')
+        if da and db then
+            if (a.sess or b.sess) and a.sess ~= b.sess then return { fam = 'KEEP' } end  -- differing explicit formats
+            local fam = (a.fam == 'TS' or b.fam == 'TS') and 'TS' or 'DATE'
+            return { fam = fam, fp = math.max(a.fp or 0, b.fp or 0), sess = (a.sess or b.sess) }
+        end
+        if a.fam ~= b.fam then return { fam = 'KEEP' } end
+        if a.fam == 'BOOL' then return { fam = 'BOOL' } end
+        if a.fam == 'GEO'  then return { fam = 'GEO' } end
+        if a.fam == 'DSI'  then return { fam = 'DSI', p = math.max(a.p, b.p), fp = math.max(a.fp, b.fp) } end
+        if a.fam == 'YMI'  then return { fam = 'YMI', p = math.max(a.p, b.p) } end
+        if a.fam == 'VC'   then return { fam = 'VC', len = math.max(a.len, b.len), ascii = (a.ascii and b.ascii) } end
+        return { fam = 'KEEP' }
     end
 
     -- Check parameters (both schema_pattern AND table_pattern must be non-empty strings)
@@ -268,6 +330,7 @@ CREATE OR REPLACE SCRIPT database_migration.convert_varchar(schema_pattern, tabl
     end
 
     local overall_res = {}
+    local analyzed    = {}   -- every inspected column (for constraint-aware post-processing and output)
     local tab_name    = "-"
     local tab_rows    = 0
     local tab_sample  = 0
@@ -280,6 +343,13 @@ CREATE OR REPLACE SCRIPT database_migration.convert_varchar(schema_pattern, tabl
         local curr_col      = res[i]["COLUMN_NAME"]
         local curr_col_len  = res[i]["COLUMN_MAXSIZE"]
         local curr_col_type = res[i]["COLUMN_TYPE"]
+
+        -- Exact current data type for the CONVERSION field. This script only inspects VARCHAR columns
+        -- (column_type_id = 12), so the source is always "VARCHAR(<length>) <charset>". The character set
+        -- (ASCII/UTF8) is kept for the source-type label, any VARCHAR width shrink, and FK harmonization.
+        local charset = 'UTF8'
+        if string.find(string.upper(curr_col_type), 'ASCII', 1, true) ~= nil then charset = 'ASCII' end
+        local src_type = "VARCHAR(" .. curr_col_len .. ") " .. charset
 
         if tab_name ~= curr_tab then -- New table: one COUNT(*) per table (needed for percentage sampling)
             tab_name   = curr_tab
@@ -309,9 +379,8 @@ CREATE OR REPLACE SCRIPT database_migration.convert_varchar(schema_pattern, tabl
 
         if tab_rows == 0 then
             -- empty table / count failed: nothing to convert; only listed with log_for_all_columns
-            if log_for_all_columns then
-                overall_res[#overall_res + 1] = { curr_sch, curr_tab, curr_col, tab_status, "", "" }
-            end
+            analyzed[#analyzed + 1] = { sch = curr_sch, tab = curr_tab, col = curr_col, src_type = src_type,
+                conversion = tab_status, query_text = "", notes = "", tgt = { fam = 'KEEP' }, has_change = false, altpfx = "" }
         else
             -- ONE lean aggregate query per column. A short-circuiting CASE classifies each sampled value
             -- exactly ONCE: a value that IS_NUMBER is settled without ever evaluating the (far more
@@ -394,21 +463,14 @@ CREATE OR REPLACE SCRIPT database_migration.convert_varchar(schema_pattern, tabl
             local conversion = ""
             local query_text = ""
             local notes      = ""
-
-            -- Exact current data type for the CONVERSION field. This script only inspects VARCHAR columns
-            -- (column_type_id = 12), so the source is always "VARCHAR(<length>) <charset>". The character set
-            -- (ASCII/UTF8) is kept for both the source-type label and any VARCHAR width shrink.
-            local charset = 'UTF8'
-            if string.find(string.upper(curr_col_type), 'ASCII', 1, true) ~= nil then
-                charset = 'ASCII'
-            end
-            local src_type = "VARCHAR(" .. curr_col_len .. ") " .. charset
+            local tgt        = { fam = 'KEEP' }   -- structured target type for FK-group harmonization
 
             if not qsuc then
                 -- Do not abort the whole run because of one problematic column; always surface the error.
                 conversion = "Could not analyze " .. src_type
                 notes      = res2.error_message or 'error'
-                overall_res[#overall_res + 1] = { curr_sch, curr_tab, curr_col, conversion, query_text, notes }
+                analyzed[#analyzed + 1] = { sch = curr_sch, tab = curr_tab, col = curr_col, src_type = src_type,
+                    conversion = conversion, query_text = "", notes = notes, tgt = { fam = 'KEEP' }, has_change = false, altpfx = "" }
             else
                 local r       = res2[1]
                 local ucol    = string.upper(curr_col)
@@ -424,6 +486,7 @@ CREATE OR REPLACE SCRIPT database_migration.convert_varchar(schema_pattern, tabl
                     if r["ENTRIES"] == r["ITS_BOOLEAN_BINARY"] then -- ...but could be a 0/1 boolean
                         conversion = src_type .. " --> BOOLEAN"
                         query_text = altpfx .. "BOOLEAN;"
+                        tgt        = { fam = 'BOOL' }
                         notes      = "NOTE: only 0/1 values. Verify these are real booleans, not flags/bits/codes you compute with."
                     elseif r["ITS_INTEGER_PRECISION"] > 36 then
                         conversion = "Keep " .. src_type .. " (integer precision " .. r["ITS_INTEGER_PRECISION"] .. " > max 36)"
@@ -431,6 +494,7 @@ CREATE OR REPLACE SCRIPT database_migration.convert_varchar(schema_pattern, tabl
                     else
                         conversion = src_type .. " --> DECIMAL(" .. adjust_precision(r["ITS_INTEGER_PRECISION"]) .. ", 0)"
                         query_text = altpfx .. "DECIMAL(" .. adjust_precision(r["ITS_INTEGER_PRECISION"]) .. ", 0);"
+                        tgt        = { fam = 'NUM', idig = r["ITS_INTEGER_PRECISION"], scale = 0 }
                         if r["ITS_NUMERIC_IDLIKE"] > 0 then
                             notes = "WARNING: some values have leading zeros or a '+' sign (looks like an identifier: ID / ZIP / phone / article no.). Converting to DECIMAL LOSES them ('007' -> 7, '+49' -> 49). Review before applying!"
                         end
@@ -443,6 +507,7 @@ CREATE OR REPLACE SCRIPT database_migration.convert_varchar(schema_pattern, tabl
                     else
                         conversion = src_type .. " --> DECIMAL(" .. total_precision .. ", " .. r["ITS_DECIMAL_SCALE"] .. ")"
                         query_text = altpfx .. "DECIMAL(" .. total_precision .. ", " .. r["ITS_DECIMAL_SCALE"] .. ");"
+                        tgt        = { fam = 'NUM', idig = math.max(r["ITS_INTEGER_PRECISION"], r["ITS_DECIMAL_PRECISION"]), scale = r["ITS_DECIMAL_SCALE"] }
                         if r["ITS_NUMERIC_IDLIKE"] > 0 then
                             notes = "WARNING: some values have leading zeros or a '+' sign (looks like an identifier). Converting to DECIMAL LOSES them. Review before applying!"
                         end
@@ -450,13 +515,16 @@ CREATE OR REPLACE SCRIPT database_migration.convert_varchar(schema_pattern, tabl
                 elseif r["ENTRIES"] == r["ITS_INTEGER"] + r["ITS_DECIMAL"] + r["ITS_DOUBLE_PRECISION"] then -- any numeric (incl. scientific)
                     conversion = src_type .. " --> DOUBLE PRECISION"
                     query_text = altpfx .. "DOUBLE PRECISION;"
+                    tgt        = { fam = 'DBL' }
                 elseif r["ENTRIES"] == r["ITS_DATE"] then -- dates only (no time component)
                     conversion = src_type .. " --> DATE"
                     query_text = altpfx .. "DATE;"
+                    tgt        = { fam = 'DATE' }
                 elseif r["ENTRIES"] == r["ITS_DATE"] + r["ITS_TIMESTAMP"] then -- dates and/or timestamps
                     local fp = math.min(r["ITS_TIMESTAMP_FP"], 9)
                     conversion = src_type .. " --> TIMESTAMP(" .. fp .. ")"
                     query_text = altpfx .. "TIMESTAMP(" .. fp .. ");"
+                    tgt        = { fam = 'TS', fp = fp }
                     notes      = "Consider TIMESTAMP(" .. fp .. ") WITH LOCAL TIME ZONE if that fits better."
                     if fp > nls_ff then
                         -- a plain ALTER parses via NLS_TIMESTAMP_FORMAT (FF<nls_ff>) and would truncate the
@@ -469,19 +537,23 @@ CREATE OR REPLACE SCRIPT database_migration.convert_varchar(schema_pattern, tabl
                 elseif r["ENTRIES"] == r["ITS_BOOLEAN"] then -- booleans
                     conversion = src_type .. " --> BOOLEAN"
                     query_text = altpfx .. "BOOLEAN;"
+                    tgt        = { fam = 'BOOL' }
                     notes      = "NOTE: verify the column is really a boolean (not a status text you rely on)."
                 elseif r["ENTRIES"] == r["ITS_DSINTERVAL"] then -- day-to-second intervals
                     local p  = math.min(math.max(r["ITS_DSINTERVAL_P"], 1), 9)
                     local fp = math.min(r["ITS_DSINTERVAL_FP"], 9)
                     conversion = src_type .. " --> INTERVAL DAY(" .. p .. ") TO SECOND(" .. fp .. ")"
                     query_text = altpfx .. "INTERVAL DAY(" .. p .. ") TO SECOND(" .. fp .. ");"
+                    tgt        = { fam = 'DSI', p = p, fp = fp }
                 elseif r["ENTRIES"] == r["ITS_YMINTERVAL"] then -- year-to-month intervals
                     local p = math.min(math.max(r["ITS_YMINTERVAL_P"], 1), 9)
                     conversion = src_type .. " --> INTERVAL YEAR(" .. p .. ") TO MONTH"
                     query_text = altpfx .. "INTERVAL YEAR(" .. p .. ") TO MONTH;"
+                    tgt        = { fam = 'YMI', p = p }
                 elseif r["ENTRIES"] == r["ITS_GEOMETRY"] then -- geospatial data
                     conversion = src_type .. " --> GEOMETRY"
                     query_text = altpfx .. "GEOMETRY;"
+                    tgt        = { fam = 'GEO' }
                     notes      = "Consider specifying an SRID (a reference coordinate system; query EXA_SPATIAL_REF_SYS for possible values)."
                 else
                     -- Not classified above. Try (1) multi-format date/timestamp detection (its own probe
@@ -498,6 +570,7 @@ CREATE OR REPLACE SCRIPT database_migration.convert_varchar(schema_pattern, tabl
                     elseif mf ~= nil and mf.kind == 'DATE' then
                         conversion = src_type .. " --> DATE (format " .. mf.fmt .. ")"
                         query_text = "ALTER SESSION SET NLS_DATE_FORMAT='" .. mf.fmt .. "'; " .. altpfx .. "DATE;"
+                        tgt        = { fam = 'DATE', sess = mf.fmt }
                         notes      = "Values match the date format '" .. mf.fmt .. "' (not the session NLS_DATE_FORMAT). Run BOTH statements in query_text (the ALTER SESSION first)."
                     elseif mf ~= nil and mf.kind == 'TIMESTAMP' then
                         local fp    = mf.frac
@@ -505,6 +578,7 @@ CREATE OR REPLACE SCRIPT database_migration.convert_varchar(schema_pattern, tabl
                         if fp > 0 then tsfmt = tsfmt .. '.FF' .. fp end
                         conversion = src_type .. " --> TIMESTAMP(" .. fp .. ") (format " .. tsfmt .. ")"
                         query_text = "ALTER SESSION SET NLS_TIMESTAMP_FORMAT='" .. tsfmt .. "'; " .. altpfx .. "TIMESTAMP(" .. fp .. ");"
+                        tgt        = { fam = 'TS', fp = fp, sess = tsfmt }
                         notes      = "Values match the timestamp format '" .. tsfmt .. "' (not the session NLS_TIMESTAMP_FORMAT). Run BOTH statements in query_text (the ALTER SESSION first)."
                     elseif string.match(ucol, "_TIMESTAMP") or string.match(ucol, "TIMESTAMP$") or
                            string.match(ucol, "_TS") or string.match(ucol, "TS$") or
@@ -521,22 +595,201 @@ CREATE OR REPLACE SCRIPT database_migration.convert_varchar(schema_pattern, tabl
                         local new_col_len = estimate_optimal_varchar_length(r["MAX_LENGTH"])
                         conversion = src_type .. " --> VARCHAR(" .. new_col_len .. ") " .. charset .. ", max length: " .. r["MAX_LENGTH"]
                         query_text = altpfx .. "VARCHAR(" .. new_col_len .. ") " .. charset .. ";"
+                        tgt        = { fam = 'VC', len = new_col_len, ascii = (charset == 'ASCII') }
                         notes      = "Mixed values; no single type fits. Shrinking the width (actual max length " .. r["MAX_LENGTH"] .. " + ~20% headroom); character set preserved."
                     else
                         conversion = "Keep " .. src_type .. ", max length: " .. r["MAX_LENGTH"]
                     end
                 end
 
-                if query_text ~= "" or log_for_all_columns then
-                    overall_res[#overall_res + 1] = { curr_sch, curr_tab, curr_col, conversion, query_text, notes }
-                end
+                analyzed[#analyzed + 1] = { sch = curr_sch, tab = curr_tab, col = curr_col, src_type = src_type,
+                    conversion = conversion, query_text = query_text, notes = notes, tgt = tgt,
+                    has_change = (query_text ~= ""), altpfx = altpfx }
             end -- qsuc
 
         end -- if tab_rows == 0
 
     end -- for i = 1, #res
 
-    emit_and_exit(overall_res)
+    ----------------------------------------------------------------------------------------------------
+    -- CONSTRAINT-AWARE HANDLING (only activated when FOREIGN KEYs touch the analyzed tables).
+    -- In Exasol an FK column and the referenced PK column must have the SAME type, so a plain MODIFY of a
+    -- key column fails. Therefore: (Stufe 2) for every referential key group that lies fully inside the
+    -- filter, harmonize ALL its columns to one common target type that fits them all (computed from each
+    -- column's own analysis - never a blanket VARCHAR); (Stufe 1) wrap the changes with DROP FOREIGN KEYS
+    -- (first) and RE-ADD FOREIGN KEYS (last). A key column whose group reaches a table OUTSIDE the filter
+    -- is kept unchanged with a warning. Columns not involved in any FK are unaffected.
+    ----------------------------------------------------------------------------------------------------
+    local function nodek(s, t, c) return s .. string.char(1) .. t .. string.char(1) .. c end
+
+    local acol = {}                                   -- analyzed columns indexed by node key
+    for idx = 1, #analyzed do acol[nodek(analyzed[idx].sch, analyzed[idx].tab, analyzed[idx].col)] = analyzed[idx] end
+    local tabset = {}                                 -- (schema,table) actually in the analyzed scope
+    for i = 1, #res do tabset[res[i]["COLUMN_SCHEMA"] .. string.char(1) .. res[i]["COLUMN_TABLE"]] = true end
+
+    -- Performance guard: one cheap catalog read for FKs touching the scope. None -> behave exactly as before.
+    -- CONSTRAINT_ENABLED is read along so the RE-ADD reproduces the FK's ORIGINAL enabled/disabled state
+    -- (a freshly added constraint would otherwise default to ENABLE). The script never changes that state.
+    local fk_suc, fk = pquery([[
+        SELECT cc.constraint_schema, cc.constraint_table, cc.constraint_name, cc.ordinal_position,
+               cc.column_name, cc.referenced_schema, cc.referenced_table, cc.referenced_column,
+               c.constraint_enabled
+        FROM   exa_all_constraint_columns cc
+        JOIN   exa_all_constraints c
+               ON  c.constraint_schema = cc.constraint_schema
+               AND c.constraint_table  = cc.constraint_table
+               AND c.constraint_name   = cc.constraint_name
+        WHERE  cc.constraint_type = 'FOREIGN KEY'
+          AND  (cc.constraint_schema LIKE :schp1 OR cc.referenced_schema LIKE :schp2)
+        ORDER  BY cc.constraint_schema, cc.constraint_table, cc.constraint_name, cc.ordinal_position
+    ]], { schp1 = schema_pattern, schp2 = schema_pattern })
+
+    local drop_rows  = {}
+    local readd_rows = {}
+
+    if fk_suc and #fk > 0 then
+        local parent   = {}                           -- union-find over node keys
+        local nodedisp = {}                           -- node key -> "schema"."table" (for warnings)
+        local function find(x)
+            if parent[x] == nil then parent[x] = x end
+            while parent[x] ~= x do parent[x] = parent[parent[x]]; x = parent[x] end
+            return x
+        end
+        local function union(a, b)
+            local ra, rb = find(a), find(b)
+            if ra ~= rb then parent[ra] = rb end
+        end
+        local fkdef, fkorder = {}, {}
+        for i = 1, #fk do
+            local cs, ct, cn = fk[i]["CONSTRAINT_SCHEMA"], fk[i]["CONSTRAINT_TABLE"], fk[i]["CONSTRAINT_NAME"]
+            local cc         = fk[i]["COLUMN_NAME"]
+            local rs, rt, rc = fk[i]["REFERENCED_SCHEMA"], fk[i]["REFERENCED_TABLE"], fk[i]["REFERENCED_COLUMN"]
+            local cnode, rnode = nodek(cs, ct, cc), nodek(rs, rt, rc)
+            nodedisp[cnode] = '"' .. cs .. '"."' .. ct .. '"'
+            nodedisp[rnode] = '"' .. rs .. '"."' .. rt .. '"'
+            union(cnode, rnode)                       -- this FK position ties the two columns to one type
+            local key = nodek(cs, ct, cn)
+            if fkdef[key] == nil then
+                fkdef[key] = { csch = cs, ctab = ct, cname = cn, cols = {}, rsch = rs, rtab = rt, rcols = {},
+                               enabled = fk[i]["CONSTRAINT_ENABLED"] }   -- preserve original ENABLE/DISABLE state
+                fkorder[#fkorder + 1] = key
+            end
+            fkdef[key].cols[#fkdef[key].cols + 1]   = cc
+            fkdef[key].rcols[#fkdef[key].rcols + 1] = rc
+        end
+
+        local groups = {}                             -- group root -> list of node keys
+        for nkey in pairs(parent) do
+            local root = find(nkey)
+            if groups[root] == nil then groups[root] = {} end
+            groups[root][#groups[root] + 1] = nkey
+        end
+
+        local converting = {}                         -- group root -> true (its FK columns are type-changed)
+        for root, nodes in pairs(groups) do
+            local members, missing = {}, {}
+            for _, nkey in ipairs(nodes) do
+                if acol[nkey] ~= nil then members[#members + 1] = acol[nkey] else missing[#missing + 1] = nkey end
+            end
+            if #members > 0 then
+                for _, a in ipairs(members) do a.is_key = true end
+                if #missing > 0 then
+                    -- a related table is outside the filter -> keep unchanged + warn
+                    local seen, rel = {}, {}
+                    for _, nkey in ipairs(missing) do
+                        local d = nodedisp[nkey] or '(unknown table)'
+                        if not seen[d] then seen[d] = true; rel[#rel + 1] = d end
+                    end
+                    local relstr = table.concat(rel, ', ')
+                    for _, a in ipairs(members) do
+                        a.conversion = "Keep " .. a.src_type .. " (FK key column - related table out of scope)"
+                        a.query_text = ""
+                        a.has_change = false
+                        a.notes      = "This column is part of a FOREIGN KEY relationship with " .. relstr ..
+                            ", which is NOT in the current filter. Converting it alone would break the FK (an FK column and the referenced PK column must have the SAME type). " ..
+                            "Re-run with a TABLE_FILTER that also includes the related table(s) so they are converted together to one common type."
+                    end
+                else
+                    -- fully in scope: harmonize to the optimal common type of ALL member columns
+                    local merged = members[1].tgt
+                    for j = 2, #members do merged = merge_targets(merged, members[j].tgt) end
+                    local ttype = render_type(merged)
+                    if ttype ~= nil then
+                        converting[root] = true
+                        for _, a in ipairs(members) do
+                            local sess = ""
+                            if merged.sess ~= nil then
+                                if merged.fam == 'DATE' then sess = "ALTER SESSION SET NLS_DATE_FORMAT='" .. merged.sess .. "'; "
+                                else                        sess = "ALTER SESSION SET NLS_TIMESTAMP_FORMAT='" .. merged.sess .. "'; " end
+                            end
+                            a.conversion = a.src_type .. " --> " .. ttype .. "  [FK key group - harmonized]"
+                            a.query_text = sess .. a.altpfx .. ttype .. ";"
+                            a.has_change = true
+                            local fknote = "Part of a FOREIGN KEY key group; the type is harmonized across all linked PK/FK columns. Run the DROP FOREIGN KEYS section first and the RE-ADD FOREIGN KEYS section last."
+                            if a.notes ~= nil and a.notes ~= "" then a.notes = a.notes .. "  " .. fknote else a.notes = fknote end
+                        end
+                    else
+                        for _, a in ipairs(members) do
+                            a.conversion = "Keep " .. a.src_type .. " (FK key group: columns have no common convertible type - not changed)"
+                            a.query_text = ""
+                            a.has_change = false
+                            a.notes      = "The PK/FK columns in this key group do not share one convertible target type (or one of them is not convertible), so none is changed - keeping them identical preserves the FK."
+                        end
+                    end
+                end
+            end
+        end
+
+        -- DROP / RE-ADD for every FK that touches a converted column (composite FKs handled per position)
+        local function q(x) return '"' .. x .. '"' end
+        for _, key in ipairs(fkorder) do
+            local d = fkdef[key]
+            local touches = false
+            for _, cc in ipairs(d.cols) do
+                if converting[find(nodek(d.csch, d.ctab, cc))] then touches = true; break end
+            end
+            if touches then
+                local ccols, rcols = {}, {}
+                for _, c in ipairs(d.cols)  do ccols[#ccols + 1]  = q(c) end
+                for _, c in ipairs(d.rcols) do rcols[#rcols + 1] = q(c) end
+                -- reproduce the FK's ORIGINAL state; only an explicit "disabled" maps to DISABLE, else ENABLE
+                local en    = d.enabled
+                local state = (en == false or en == 'FALSE' or en == 'false' or en == 0 or en == '0') and 'DISABLE' or 'ENABLE'
+                drop_rows[#drop_rows + 1] = { d.csch, d.ctab, '', 'drop foreign key ' .. d.cname,
+                    'ALTER TABLE ' .. q(d.csch) .. '.' .. q(d.ctab) .. ' DROP CONSTRAINT ' .. q(d.cname) .. ';', '' }
+                readd_rows[#readd_rows + 1] = { d.csch, d.ctab, '', 're-add foreign key ' .. d.cname .. ' (' .. state .. ')',
+                    'ALTER TABLE ' .. q(d.csch) .. '.' .. q(d.ctab) .. ' ADD CONSTRAINT ' .. q(d.cname) ..
+                    ' FOREIGN KEY (' .. table.concat(ccols, ', ') .. ') REFERENCES ' .. q(d.rsch) .. '.' .. q(d.rtab) ..
+                    ' (' .. table.concat(rcols, ', ') .. ') ' .. state .. ';', '' }
+            end
+        end
+    end
+
+    -- Per-column output rows (sorted), honoring log_for_all_columns
+    local col_rows = {}
+    for _, a in ipairs(analyzed) do
+        if a.has_change or log_for_all_columns then
+            col_rows[#col_rows + 1] = { a.sch, a.tab, a.col, a.conversion, a.query_text, a.notes }
+        end
+    end
+    table.sort(col_rows, function(x, y)
+        if x[1] ~= y[1] then return x[1] < y[1] end
+        if x[2] ~= y[2] then return x[2] < y[2] end
+        return x[3] < y[3]
+    end)
+
+    if #drop_rows > 0 then
+        local out = {}
+        out[#out + 1] = { '', '', '', '-- ### DROP FOREIGN KEYS - run these FIRST (before the column changes) ###', '', '' }
+        for _, x in ipairs(drop_rows)  do out[#out + 1] = x end
+        out[#out + 1] = { '', '', '', '-- ### COLUMN TYPE CHANGES ###', '', '' }
+        for _, x in ipairs(col_rows)   do out[#out + 1] = x end
+        out[#out + 1] = { '', '', '', '-- ### RE-ADD FOREIGN KEYS - run these LAST (after the column changes) ###', '', '' }
+        for _, x in ipairs(readd_rows) do out[#out + 1] = x end
+        size_and_exit(out)
+    else
+        emit_and_exit(col_rows)
+    end
 /
 
 -- ====================================================================================================

@@ -154,6 +154,27 @@ script returns a single informative row instead of an empty result set (in the `
 - `log_for_all_columns = false` → `No columns found that need optimization.`
 - `log_for_all_columns = true`  → `No matching VARCHAR columns found (check the schema/table filter).`
 
+### Foreign keys (handled automatically)
+
+In Exasol a type change on a **primary/foreign key** column fails unless the linked PK and FK columns are
+changed to the **same** type (`constraint violation … wrong types`). When `FOREIGN KEY`s touch the analyzed
+tables, the script handles this for you:
+
+- **DROP/RE-ADD wrapper:** the output gains a **`### DROP FOREIGN KEYS — run FIRST ###`** section and a
+  **`### RE-ADD FOREIGN KEYS — run LAST ###`** section (composite FKs included), so the whole script runs end
+  to end: drop the FKs, change the columns, re-add the FKs. Each FK is re-added in its **original
+  `ENABLE`/`DISABLE` state** — the script never changes whether a constraint is enabled or disabled.
+- **Type harmonization:** every referential key group (a PK column plus all FK columns linked to it,
+  transitively) is converted to **one common target type that fits all of its columns** — the optimal common
+  type (e.g. a 9-digit and a 12-digit key column → `DECIMAL(18,0)`), never a blanket `VARCHAR`. If the group
+  has no common convertible type, it is kept unchanged (the FK stays valid) with a note.
+- **Single table with an FK to another table:** if a key column's group reaches a table **outside the current
+  filter**, the column is kept unchanged with a note to re-run with a `TABLE_FILTER` that also includes the
+  related table(s) (so they are converted together to the same type).
+- With **no** foreign keys in scope the run is exactly as before (one cheap catalog check is the only overhead).
+
+The script remains **report-only** — it returns the statements; you review and run them in the shown order.
+
 ### How it works / notes
 
 - **Type-directed, single scan.** Each column is analyzed with one aggregate query whose inner `CASE`
