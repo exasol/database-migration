@@ -92,7 +92,7 @@ auto-detected.
 | If the sampled values look like … | Suggestion |
 |---|---|
 | integers | `DECIMAL(p)` (precision rounded up to 9 / 18 / 36) |
-| integers + decimals | `DECIMAL(p, s)` |
+| integers + decimals | `DECIMAL(p, s)` (precision **p** rounded up to 9 / 18 / 36; scale **s** kept) |
 | any numeric incl. scientific notation | `DOUBLE PRECISION` |
 | dates only (no time component) | `DATE` |
 | dates and/or timestamps | `TIMESTAMP(p)` with the **detected fractional-seconds precision** `p` (0–9), so micro/nanosecond values are not truncated; + hint to consider `TIMESTAMP WITH LOCAL TIME ZONE` |
@@ -100,7 +100,7 @@ auto-detected.
 | day-to-second intervals | `INTERVAL DAY(p) TO SECOND(fp)` |
 | year-to-month intervals | `INTERVAL YEAR(p) TO MONTH` |
 | WKT geometry (`POINT (…)`, `POLYGON (…)`, …) | `GEOMETRY` (+ hint to specify an SRID) |
-| nothing single fits, but values are shorter than the column | shrink to a smaller `VARCHAR` — actual max length **+ ~20% headroom, rounded up**, **character set preserved** |
+| nothing single fits, but values are shorter than the column | shrink to a smaller `VARCHAR` — actual max length **+ ~20% headroom, rounded up**, **character set preserved**. Columns with **n ≤ 3** are left untouched |
 | the **column name** looks like a date/timestamp but values don't parse | a hint with an example `UPDATE`/`ALTER` |
 | the column is empty (in the sample) | a hint that the column could be dropped |
 
@@ -142,7 +142,7 @@ Example (`log_for_all_columns = true`, session NLS at the ISO default):
 | schema_name | table_name | column_name | conversion | query_text | notes |
 |---|---|---|---|---|---|
 | MY_SCHEMA | CUSTOMERS | ACTIVE | `VARCHAR(10) UTF8 --> BOOLEAN` | `ALTER TABLE "MY_SCHEMA"."CUSTOMERS" MODIFY COLUMN "ACTIVE" BOOLEAN;` | NOTE: only 0/1 values. Verify these are real booleans, not flags/bits/codes you compute with. |
-| MY_SCHEMA | CUSTOMERS | AMOUNT | `VARCHAR(20) UTF8 --> DECIMAL(4, 2)` | `ALTER TABLE "MY_SCHEMA"."CUSTOMERS" MODIFY COLUMN "AMOUNT" DECIMAL(4, 2);` | |
+| MY_SCHEMA | CUSTOMERS | AMOUNT | `VARCHAR(20) UTF8 --> DECIMAL(9, 2)` | `ALTER TABLE "MY_SCHEMA"."CUSTOMERS" MODIFY COLUMN "AMOUNT" DECIMAL(9, 2);` | |
 | MY_SCHEMA | CUSTOMERS | COMMENT | `VARCHAR(2000000) UTF8 --> VARCHAR(20) UTF8, max length: 15` | `ALTER TABLE "MY_SCHEMA"."CUSTOMERS" MODIFY COLUMN "COMMENT" VARCHAR(20) UTF8;` | Mixed values; no single type fits. Shrinking the width (actual max length 15 + ~20% headroom); character set preserved. |
 | MY_SCHEMA | CUSTOMERS | CUST_ID | `VARCHAR(50) UTF8 --> DECIMAL(9, 0)` | `ALTER TABLE "MY_SCHEMA"."CUSTOMERS" MODIFY COLUMN "CUST_ID" DECIMAL(9, 0);` | WARNING: some values have leading zeros or a '+' sign (looks like an identifier: ID / ZIP / phone / article no.). Converting to DECIMAL LOSES them ('007' -> 7, '+49' -> 49). Review before applying! |
 | MY_SCHEMA | CUSTOMERS | DE_DATE | `VARCHAR(20) UTF8 --> DATE (format DD.MM.YYYY)` | `ALTER SESSION SET NLS_DATE_FORMAT='DD.MM.YYYY'; ALTER TABLE "MY_SCHEMA"."CUSTOMERS" MODIFY COLUMN "DE_DATE" DATE;` | Values match the date format 'DD.MM.YYYY' (not the session NLS_DATE_FORMAT). Run BOTH statements in query_text (the ALTER SESSION first). |
