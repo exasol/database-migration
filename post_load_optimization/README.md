@@ -294,15 +294,34 @@ The output is **sorted by `schema_name`, `table_name`, `column_name`**.
 | Column | Meaning |
 |--------|---------|
 | `schema_name`, `table_name`, `column_name` | the inspected column |
-| `conversion` | what happens, e.g. `DOUBLE --> DECIMAL(9, 0), max length: 1`, `VARCHAR(1000) UTF8  --> VARCHAR(20) UTF8, max length: 10`, or `Keep VARCHAR(100) UTF8, max length: 12` |
-| `query_text` | the generated `ALTER TABLE ... MODIFY ...` statement |
+| `conversion` | the **exact current type** and **exact target type**, e.g. `DECIMAL(20, 0) --> DECIMAL(9, 0), max length: 1`, `TIMESTAMP(6) WITH LOCAL TIME ZONE --> DATE`, `VARCHAR(1000) UTF8 --> VARCHAR(20) UTF8, max length: 10`, or `Keep DECIMAL(5, 0) (already minimal precision)` / `Keep VARCHAR(3) UTF8 (n <= 3, left untouched)` |
+| `query_text` | the generated `ALTER TABLE ... MODIFY ...` statement (and the FK DROP/RE-ADD statements, see below) |
 | `success` | only present when `apply_conversion = true`: `true` or the error message |
+
+With `log_for_all_columns = true` every inspected column of an enabled type is listed — now also the
+**already-minimal** (`DECIMAL` precision ≤ 9, `VARCHAR` size ≤ 3) and empty columns, each with a `Keep …` row.
 
 If the result would be empty, the script returns a single informative row in the `conversion`
 column instead:
 - `log_for_all_columns = false` → `No columns found that need optimization.`
 - `log_for_all_columns = true`  → `No matching columns found (check the filters and the convert_* switches).`
   — i.e. no column matched the schema/table filter and the enabled `convert_*` switches at all.
+
+### Foreign keys (handled automatically)
+
+A type change on a **primary/foreign key** column fails in Exasol unless the linked PK and FK columns are
+changed to the **same** type (`constraint violation … wrong types`). When `FOREIGN KEY`s touch the analyzed
+tables, the script handles this:
+
+- **DROP/RE-ADD wrapper:** the output gains a **`### DROP FOREIGN KEYS — run FIRST ###`** step and a
+  **`### RE-ADD FOREIGN KEYS — run LAST ###`** step (in the `query_text` column; composite FKs included), so
+  the script — and `apply_conversion = true` — runs end to end. Each FK is re-added in its **original
+  `ENABLE`/`DISABLE` state** (never changed).
+- **Type harmonization:** every referential key group is converted to **one common target type** that fits all
+  its columns (never a blanket VARCHAR); if no common smaller type exists, the whole group is kept (FK stays valid).
+- **Single table with an FK to another table:** if a key column's group reaches a table **outside the filter**,
+  the column is kept unchanged with a note to include the related table(s).
+- With **no** foreign keys in scope the run is exactly as before (one cheap catalog check is the only overhead).
 
 ### How it works
 
