@@ -130,7 +130,7 @@ The script returns **structured rows**, sorted by `schema_name`, `table_name`, `
 | Column | Meaning |
 |--------|---------|
 | `schema_name`, `table_name`, `column_name` | the inspected column |
-| `conversion` | short description of the suggestion, e.g. `VARCHAR --> DECIMAL(9)` or `Keep VARCHAR(100) UTF8, max length: 12` |
+| `conversion` | short description of the suggestion, e.g. `VARCHAR(50) UTF8 --> DECIMAL(9, 0)` or `Keep VARCHAR(100) UTF8, max length: 12` |
 | `query_text` | the `ALTER` statement(s) you would run (empty for *keep*/advisory rows). Multi-format date/timestamp suggestions include the required `ALTER SESSION SET NLS_..._FORMAT='…';` **before** the `ALTER TABLE`, so the cell is runnable as-is |
 | `notes` | warnings (leading zeros / `+` sign), the `0/1`-boolean `NOTE`, the ambiguity message, the TIMESTAMP-precision recipe, column-name hints |
 
@@ -141,12 +141,12 @@ Example (`log_for_all_columns = true`, session NLS at the ISO default):
 
 | schema_name | table_name | column_name | conversion | query_text | notes |
 |---|---|---|---|---|---|
-| MY_SCHEMA | CUSTOMERS | ACTIVE | `VARCHAR --> BOOLEAN` | `ALTER TABLE "MY_SCHEMA"."CUSTOMERS" MODIFY COLUMN "ACTIVE" BOOLEAN;` | NOTE: only 0/1 values. Verify these are real booleans, not flags/bits/codes you compute with. |
-| MY_SCHEMA | CUSTOMERS | AMOUNT | `VARCHAR --> DECIMAL(4, 2)` | `ALTER TABLE "MY_SCHEMA"."CUSTOMERS" MODIFY COLUMN "AMOUNT" DECIMAL(4, 2);` | |
+| MY_SCHEMA | CUSTOMERS | ACTIVE | `VARCHAR(10) UTF8 --> BOOLEAN` | `ALTER TABLE "MY_SCHEMA"."CUSTOMERS" MODIFY COLUMN "ACTIVE" BOOLEAN;` | NOTE: only 0/1 values. Verify these are real booleans, not flags/bits/codes you compute with. |
+| MY_SCHEMA | CUSTOMERS | AMOUNT | `VARCHAR(20) UTF8 --> DECIMAL(4, 2)` | `ALTER TABLE "MY_SCHEMA"."CUSTOMERS" MODIFY COLUMN "AMOUNT" DECIMAL(4, 2);` | |
 | MY_SCHEMA | CUSTOMERS | COMMENT | `VARCHAR(2000000) UTF8 --> VARCHAR(20) UTF8, max length: 15` | `ALTER TABLE "MY_SCHEMA"."CUSTOMERS" MODIFY COLUMN "COMMENT" VARCHAR(20) UTF8;` | Mixed values; no single type fits. Shrinking the width (actual max length 15 + ~20% headroom); character set preserved. |
-| MY_SCHEMA | CUSTOMERS | CUST_ID | `VARCHAR --> DECIMAL(9)` | `ALTER TABLE "MY_SCHEMA"."CUSTOMERS" MODIFY COLUMN "CUST_ID" DECIMAL(9);` | WARNING: some values have leading zeros or a '+' sign (looks like an identifier: ID / ZIP / phone / article no.). Converting to DECIMAL LOSES them ('007' -> 7, '+49' -> 49). Review before applying! |
-| MY_SCHEMA | CUSTOMERS | DE_DATE | `VARCHAR --> DATE (format DD.MM.YYYY)` | `ALTER SESSION SET NLS_DATE_FORMAT='DD.MM.YYYY'; ALTER TABLE "MY_SCHEMA"."CUSTOMERS" MODIFY COLUMN "DE_DATE" DATE;` | Values match the date format 'DD.MM.YYYY' (not the session NLS_DATE_FORMAT). Run BOTH statements in query_text (the ALTER SESSION first). |
-| MY_SCHEMA | CUSTOMERS | ORDER_DATE | `VARCHAR --> DATE` | `ALTER TABLE "MY_SCHEMA"."CUSTOMERS" MODIFY COLUMN "ORDER_DATE" DATE;` | |
+| MY_SCHEMA | CUSTOMERS | CUST_ID | `VARCHAR(50) UTF8 --> DECIMAL(9, 0)` | `ALTER TABLE "MY_SCHEMA"."CUSTOMERS" MODIFY COLUMN "CUST_ID" DECIMAL(9, 0);` | WARNING: some values have leading zeros or a '+' sign (looks like an identifier: ID / ZIP / phone / article no.). Converting to DECIMAL LOSES them ('007' -> 7, '+49' -> 49). Review before applying! |
+| MY_SCHEMA | CUSTOMERS | DE_DATE | `VARCHAR(20) UTF8 --> DATE (format DD.MM.YYYY)` | `ALTER SESSION SET NLS_DATE_FORMAT='DD.MM.YYYY'; ALTER TABLE "MY_SCHEMA"."CUSTOMERS" MODIFY COLUMN "DE_DATE" DATE;` | Values match the date format 'DD.MM.YYYY' (not the session NLS_DATE_FORMAT). Run BOTH statements in query_text (the ALTER SESSION first). |
+| MY_SCHEMA | CUSTOMERS | ORDER_DATE | `VARCHAR(20) UTF8 --> DATE` | `ALTER TABLE "MY_SCHEMA"."CUSTOMERS" MODIFY COLUMN "ORDER_DATE" DATE;` | |
 
 If no `VARCHAR` column matches the filter (no such table, or the table has no `VARCHAR` columns), the
 script returns a single informative row instead of an empty result set (in the `conversion` column):

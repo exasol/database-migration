@@ -34,7 +34,7 @@ CREATE SCHEMA IF NOT EXISTS DATABASE_MIGRATION;
 
     Output columns (sorted by schema_name, table_name, column_name):
       schema_name, table_name, column_name : the inspected column
-      conversion  : short description of the suggestion, e.g. "VARCHAR --> DECIMAL(9)" or
+      conversion  : short description of the suggestion, e.g. "VARCHAR(2000000) UTF8 --> DECIMAL(9, 0)" or
                     "Keep VARCHAR(100) UTF8, max length: 12"
       query_text  : the ALTER statement(s) to run (empty for "keep"/advisory rows). Multi-format
                     date/timestamp suggestions include the required "ALTER SESSION SET NLS_..._FORMAT".
@@ -395,9 +395,18 @@ CREATE OR REPLACE SCRIPT database_migration.convert_varchar(schema_pattern, tabl
             local query_text = ""
             local notes      = ""
 
+            -- Exact current data type for the CONVERSION field. This script only inspects VARCHAR columns
+            -- (column_type_id = 12), so the source is always "VARCHAR(<length>) <charset>". The character set
+            -- (ASCII/UTF8) is kept for both the source-type label and any VARCHAR width shrink.
+            local charset = 'UTF8'
+            if string.find(string.upper(curr_col_type), 'ASCII', 1, true) ~= nil then
+                charset = 'ASCII'
+            end
+            local src_type = "VARCHAR(" .. curr_col_len .. ") " .. charset
+
             if not qsuc then
                 -- Do not abort the whole run because of one problematic column; always surface the error.
-                conversion = "Could not analyze column"
+                conversion = "Could not analyze " .. src_type
                 notes      = res2.error_message or 'error'
                 overall_res[#overall_res + 1] = { curr_sch, curr_tab, curr_col, conversion, query_text, notes }
             else
@@ -408,26 +417,20 @@ CREATE OR REPLACE SCRIPT database_migration.convert_varchar(schema_pattern, tabl
                 local col_q   = quote(curr_col)
                 local altpfx  = "ALTER TABLE " .. sch_q .. "." .. tab_q .. " MODIFY COLUMN " .. col_q .. " "
 
-                -- Preserve the original character set for a possible VARCHAR shrink.
-                local charset = 'UTF8'
-                if string.find(string.upper(curr_col_type), 'ASCII', 1, true) ~= nil then
-                    charset = 'ASCII'
-                end
-
                 if r["ENTRIES"] == 0 then -- No data in the (sampled) column
-                    conversion = "No data in the sample"
+                    conversion = "Keep " .. src_type .. " (no data in sample - candidate for DROP COLUMN)"
                     notes      = "Column had no data in the sample - it may be a candidate for DROP COLUMN. Verify before dropping."
                 elseif r["ENTRIES"] == r["ITS_INTEGER"] then -- all sample values were integers
                     if r["ENTRIES"] == r["ITS_BOOLEAN_BINARY"] then -- ...but could be a 0/1 boolean
-                        conversion = "VARCHAR --> BOOLEAN"
+                        conversion = src_type .. " --> BOOLEAN"
                         query_text = altpfx .. "BOOLEAN;"
                         notes      = "NOTE: only 0/1 values. Verify these are real booleans, not flags/bits/codes you compute with."
                     elseif r["ITS_INTEGER_PRECISION"] > 36 then
-                        conversion = "Keep VARCHAR (integer precision " .. r["ITS_INTEGER_PRECISION"] .. " > max 36)"
+                        conversion = "Keep " .. src_type .. " (integer precision " .. r["ITS_INTEGER_PRECISION"] .. " > max 36)"
                         notes      = "Largest integer precision " .. r["ITS_INTEGER_PRECISION"] .. " exceeds the maximum DECIMAL precision of 36; not convertible."
                     else
-                        conversion = "VARCHAR --> DECIMAL(" .. adjust_precision(r["ITS_INTEGER_PRECISION"]) .. ")"
-                        query_text = altpfx .. "DECIMAL(" .. adjust_precision(r["ITS_INTEGER_PRECISION"]) .. ");"
+                        conversion = src_type .. " --> DECIMAL(" .. adjust_precision(r["ITS_INTEGER_PRECISION"]) .. ", 0)"
+                        query_text = altpfx .. "DECIMAL(" .. adjust_precision(r["ITS_INTEGER_PRECISION"]) .. ", 0);"
                         if r["ITS_NUMERIC_IDLIKE"] > 0 then
                             notes = "WARNING: some values have leading zeros or a '+' sign (looks like an identifier: ID / ZIP / phone / article no.). Converting to DECIMAL LOSES them ('007' -> 7, '+49' -> 49). Review before applying!"
                         end
@@ -435,24 +438,24 @@ CREATE OR REPLACE SCRIPT database_migration.convert_varchar(schema_pattern, tabl
                 elseif r["ENTRIES"] == r["ITS_INTEGER"] + r["ITS_DECIMAL"] then -- integers and decimals (not scientific)
                     local total_precision = math.max(r["ITS_INTEGER_PRECISION"], r["ITS_DECIMAL_PRECISION"]) + r["ITS_DECIMAL_SCALE"]
                     if total_precision > 36 then
-                        conversion = "Keep VARCHAR (decimal precision " .. total_precision .. " > max 36)"
+                        conversion = "Keep " .. src_type .. " (decimal precision " .. total_precision .. " > max 36)"
                         notes      = "Largest decimal precision " .. total_precision .. " exceeds the maximum DECIMAL precision of 36; not convertible."
                     else
-                        conversion = "VARCHAR --> DECIMAL(" .. total_precision .. ", " .. r["ITS_DECIMAL_SCALE"] .. ")"
+                        conversion = src_type .. " --> DECIMAL(" .. total_precision .. ", " .. r["ITS_DECIMAL_SCALE"] .. ")"
                         query_text = altpfx .. "DECIMAL(" .. total_precision .. ", " .. r["ITS_DECIMAL_SCALE"] .. ");"
                         if r["ITS_NUMERIC_IDLIKE"] > 0 then
                             notes = "WARNING: some values have leading zeros or a '+' sign (looks like an identifier). Converting to DECIMAL LOSES them. Review before applying!"
                         end
                     end
                 elseif r["ENTRIES"] == r["ITS_INTEGER"] + r["ITS_DECIMAL"] + r["ITS_DOUBLE_PRECISION"] then -- any numeric (incl. scientific)
-                    conversion = "VARCHAR --> DOUBLE PRECISION"
+                    conversion = src_type .. " --> DOUBLE PRECISION"
                     query_text = altpfx .. "DOUBLE PRECISION;"
                 elseif r["ENTRIES"] == r["ITS_DATE"] then -- dates only (no time component)
-                    conversion = "VARCHAR --> DATE"
+                    conversion = src_type .. " --> DATE"
                     query_text = altpfx .. "DATE;"
                 elseif r["ENTRIES"] == r["ITS_DATE"] + r["ITS_TIMESTAMP"] then -- dates and/or timestamps
                     local fp = math.min(r["ITS_TIMESTAMP_FP"], 9)
-                    conversion = "VARCHAR --> TIMESTAMP(" .. fp .. ")"
+                    conversion = src_type .. " --> TIMESTAMP(" .. fp .. ")"
                     query_text = altpfx .. "TIMESTAMP(" .. fp .. ");"
                     notes      = "Consider TIMESTAMP(" .. fp .. ") WITH LOCAL TIME ZONE if that fits better."
                     if fp > nls_ff then
@@ -464,20 +467,20 @@ CREATE OR REPLACE SCRIPT database_migration.convert_varchar(schema_pattern, tabl
                         notes = notes .. " Values have up to " .. fp .. " fractional-second digits but NLS_TIMESTAMP_FORMAT ('" .. nls_timestamp_format .. "') keeps fewer; the ALTER SESSION in query_text preserves full precision (a plain ALTER would truncate)."
                     end
                 elseif r["ENTRIES"] == r["ITS_BOOLEAN"] then -- booleans
-                    conversion = "VARCHAR --> BOOLEAN"
+                    conversion = src_type .. " --> BOOLEAN"
                     query_text = altpfx .. "BOOLEAN;"
                     notes      = "NOTE: verify the column is really a boolean (not a status text you rely on)."
                 elseif r["ENTRIES"] == r["ITS_DSINTERVAL"] then -- day-to-second intervals
                     local p  = math.min(math.max(r["ITS_DSINTERVAL_P"], 1), 9)
                     local fp = math.min(r["ITS_DSINTERVAL_FP"], 9)
-                    conversion = "VARCHAR --> INTERVAL DAY(" .. p .. ") TO SECOND(" .. fp .. ")"
+                    conversion = src_type .. " --> INTERVAL DAY(" .. p .. ") TO SECOND(" .. fp .. ")"
                     query_text = altpfx .. "INTERVAL DAY(" .. p .. ") TO SECOND(" .. fp .. ");"
                 elseif r["ENTRIES"] == r["ITS_YMINTERVAL"] then -- year-to-month intervals
                     local p = math.min(math.max(r["ITS_YMINTERVAL_P"], 1), 9)
-                    conversion = "VARCHAR --> INTERVAL YEAR(" .. p .. ") TO MONTH"
+                    conversion = src_type .. " --> INTERVAL YEAR(" .. p .. ") TO MONTH"
                     query_text = altpfx .. "INTERVAL YEAR(" .. p .. ") TO MONTH;"
                 elseif r["ENTRIES"] == r["ITS_GEOMETRY"] then -- geospatial data
-                    conversion = "VARCHAR --> GEOMETRY"
+                    conversion = src_type .. " --> GEOMETRY"
                     query_text = altpfx .. "GEOMETRY;"
                     notes      = "Consider specifying an SRID (a reference coordinate system; query EXA_SPATIAL_REF_SYS for possible values)."
                 else
@@ -490,37 +493,37 @@ CREATE OR REPLACE SCRIPT database_migration.convert_varchar(schema_pattern, tabl
                         mf = detect_explicit_format(curr_sch, curr_tab, curr_col, tab_sample, full_scan)
                     end
                     if mf ~= nil and mf.ambiguous then
-                        conversion = "Ambiguous date format (DD.MM vs MM.DD) - not converted"
+                        conversion = "Keep " .. src_type .. " (ambiguous date format DD.MM vs MM.DD - not converted)"
                         notes      = "Values look like dates but the day/month order is ambiguous (every day is <= 12). Pick the format yourself, e.g. ALTER SESSION SET NLS_DATE_FORMAT='DD.MM.YYYY'; then " .. altpfx .. "DATE;"
                     elseif mf ~= nil and mf.kind == 'DATE' then
-                        conversion = "VARCHAR --> DATE (format " .. mf.fmt .. ")"
+                        conversion = src_type .. " --> DATE (format " .. mf.fmt .. ")"
                         query_text = "ALTER SESSION SET NLS_DATE_FORMAT='" .. mf.fmt .. "'; " .. altpfx .. "DATE;"
                         notes      = "Values match the date format '" .. mf.fmt .. "' (not the session NLS_DATE_FORMAT). Run BOTH statements in query_text (the ALTER SESSION first)."
                     elseif mf ~= nil and mf.kind == 'TIMESTAMP' then
                         local fp    = mf.frac
                         local tsfmt = mf.fmt .. ' HH24:MI:SS'
                         if fp > 0 then tsfmt = tsfmt .. '.FF' .. fp end
-                        conversion = "VARCHAR --> TIMESTAMP(" .. fp .. ") (format " .. tsfmt .. ")"
+                        conversion = src_type .. " --> TIMESTAMP(" .. fp .. ") (format " .. tsfmt .. ")"
                         query_text = "ALTER SESSION SET NLS_TIMESTAMP_FORMAT='" .. tsfmt .. "'; " .. altpfx .. "TIMESTAMP(" .. fp .. ");"
                         notes      = "Values match the timestamp format '" .. tsfmt .. "' (not the session NLS_TIMESTAMP_FORMAT). Run BOTH statements in query_text (the ALTER SESSION first)."
                     elseif string.match(ucol, "_TIMESTAMP") or string.match(ucol, "TIMESTAMP$") or
                            string.match(ucol, "_TS") or string.match(ucol, "TS$") or
                            string.match(ucol, "_DATETIME") or string.match(ucol, "DATETIME$") or
                            ucol == "TIMSTAMP" then -- name looks like a timestamp
-                        conversion = "Keep VARCHAR (name looks like a timestamp; values do not match " .. nls_timestamp_format .. ")"
+                        conversion = "Keep " .. src_type .. " (name looks like a timestamp; values do not match " .. nls_timestamp_format .. ")"
                         notes      = "If this is a timestamp, normalize then convert, e.g.: UPDATE " .. sch_q .. "." .. tab_q .. " SET " .. col_q .. " = TO_CHAR(TO_TIMESTAMP(" .. col_q .. ", '<timestamp_format>'), '" .. nls_timestamp_format .. "'); then " .. altpfx .. "TIMESTAMP;"
                     elseif string.match(ucol, "_DATE") or string.match(ucol, "DATE$") or string.match(ucol, "^DATE_") or
                            string.match(ucol, "_DT") or string.match(ucol, "DT$") or
                            ucol == "DATE" or ucol == 'DOB' then -- name looks like a date
-                        conversion = "Keep VARCHAR (name looks like a date; values do not match " .. nls_date_format .. ")"
+                        conversion = "Keep " .. src_type .. " (name looks like a date; values do not match " .. nls_date_format .. ")"
                         notes      = "If this is a date, normalize then convert, e.g.: UPDATE " .. sch_q .. "." .. tab_q .. " SET " .. col_q .. " = TO_CHAR(TO_DATE(" .. col_q .. ", '<date_format>'), '" .. nls_date_format .. "'); then " .. altpfx .. "DATE;"
                     elseif estimate_optimal_varchar_length(r["MAX_LENGTH"]) < curr_col_len then -- shrink width
                         local new_col_len = estimate_optimal_varchar_length(r["MAX_LENGTH"])
-                        conversion = "VARCHAR(" .. curr_col_len .. ") " .. charset .. " --> VARCHAR(" .. new_col_len .. ") " .. charset .. ", max length: " .. r["MAX_LENGTH"]
+                        conversion = src_type .. " --> VARCHAR(" .. new_col_len .. ") " .. charset .. ", max length: " .. r["MAX_LENGTH"]
                         query_text = altpfx .. "VARCHAR(" .. new_col_len .. ") " .. charset .. ";"
                         notes      = "Mixed values; no single type fits. Shrinking the width (actual max length " .. r["MAX_LENGTH"] .. " + ~20% headroom); character set preserved."
                     else
-                        conversion = "Keep VARCHAR(" .. curr_col_len .. ") " .. charset .. ", max length: " .. r["MAX_LENGTH"]
+                        conversion = "Keep " .. src_type .. ", max length: " .. r["MAX_LENGTH"]
                     end
                 end
 
