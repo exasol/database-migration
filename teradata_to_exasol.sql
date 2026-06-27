@@ -1,570 +1,438 @@
 create schema if not exists database_migration;
 
-/* 
-     This script will generate create schema, create table and create import statements 
-     to load all needed data from a teradata database. Automatic datatype conversion is 
-     applied whenever needed. Additionally the migration can be checked via generic metrics. 
-     For that a checking table will be created and loaded for each individual table being migrated. 
-     The checking table will be created in the same schema with the same name adding '_MIG_CHK' as a suffix. 
-     A summary table for all the checking tables of a specific schema will be created in the database migration schema with the name of the migrated schema adding '_MIG_CHK' as a suffix.
-     Querying the summary tables will help you to identify deviations easily.
+/*
+    TERADATA_TO_EXASOL - generate the statements to migrate a Teradata (Vantage) database to Exasol.
 
-     Feel free to adjust it. 
+    Runs on the TARGET Exasol database, reads the SOURCE metadata through a JDBC connection (DBC catalog
+    views) and RETURNS the statements (CREATE SCHEMA / CREATE TABLE incl. PRIMARY KEY / FOREIGN KEY /
+    DISTRIBUTE BY / PARTITION BY / COMMENTs / IMPORT / a final CONSTRAINT STATE section / optional VIEW
+    review). It changes nothing itself - review and run the generated statements in the order returned.
+
+    SOURCE / TARGET: Teradata Vantage 20 and earlier (catalog views and ColumnType codes used here are stable
+    back to Teradata 14+) -> Exasol v8 (2025+). Use the Teradata JDBC driver (TeraJDBC). CHARSET=UTF16 is the
+    recommended connection setting for Unicode data, but the mapping is correct with UTF8 as well.
+
+    ONLY REAL USER DATA is generated: the built-in system databases (DBC, Sys*, TD_*, TDaaS_*, SYSLIB, ...)
+    are always excluded, and only real tables (TableKind 'T' and 'O' = NoPI/columnar) are migrated.
+
+    DATA-TYPE MAPPING (by DBC.ColumnsV ColumnType code; UDTs resolved via ColumnUDTName):
+      Exact: BYTEINT/SMALLINT/INTEGER/BIGINT -> DECIMAL(3|5|10|19,0); DECIMAL/NUMERIC(p,s) -> DECIMAL(p,s)
+      (p>36 -> DECIMAL_OVERFLOW); NUMBER -> DECIMAL or DOUBLE; FLOAT -> DOUBLE; DATE -> DATE; TIMESTAMP(n) ->
+      TIMESTAMP(n) (full precision); CHAR/VARCHAR -> CHAR/VARCHAR UTF8 (length in characters; CHAR>2000 ->
+      VARCHAR); CLOB -> VARCHAR(2000000).
+      Small documented difference: TIME(n)/TIME WITH TIME ZONE -> VARCHAR (Exasol has no TIME type; offset
+      kept as text); TIMESTAMP(n) WITH TIME ZONE -> TIMESTAMP(n) WITH LOCAL TIME ZONE (value converted to the
+      UTC instant); BYTE/VARBYTE/BLOB -> faithful base64 text in VARCHAR (BINARY_HANDLING; Exasol has no
+      general binary type - the bytes are preserved losslessly as base64 and can be decoded downstream);
+      JSON/XML/DATASET/most UDTs -> VARCHAR;
+      ST_GEOMETRY (and ST_* / MBR / MBB) -> GEOMETRY (WKT); INTERVAL -> native Exasol INTERVAL or VARCHAR
+      (INTERVAL_HANDLING); PERIOD(x) -> two columns x_BEGINNING / x_END.
+      Hard limits (the IMPORT fails loudly rather than corrupting data): a value > 2,000,000 characters
+      (unless TRUNCATE_LONG_STRINGS=true); DECIMAL/NUMBER values needing > 36 digits under DECIMAL_OVERFLOW='CAP'.
+
+    NLS: IMPORT FROM JDBC transfers TYPED values, so numbers/dates/timestamps are migrated by value and are
+    not affected by differing source/target locale settings.
+
+    CONSTRAINTS: PK/FK are always created DISABLED (fast, order-independent load); a final CONSTRAINT STATE
+    section sets them per CONSTRAINT_STATE. Exasol uses disabled keys as optimizer/BI metadata, so
+    'FORCE_DISABLE' (recommended) is fine and fastest; 'FORCE_ENABLE' makes Exasol re-validate the data.
+
+    DISTRIBUTION / PARTITIONING: the Teradata Primary Index is mapped to an Exasol DISTRIBUTE BY
+    (GENERATE_DISTRIBUTION_BY). A single-column Teradata RANGE_N partition is mapped best-effort to an Exasol
+    PARTITION BY on that column (GENERATE_PARTITION_BY); multi-level, CASE_N or expression-based PPI has no
+    single-column Exasol equivalent and is emitted as a commented manual-review note.
+
+    Not migrated (out of scope): secondary/join/hash indexes, CHECK/UNIQUE constraints (unsupported by
+    Exasol), macros/procedures/functions, users/roles/rights.
 */
-
 --/
 create or replace script database_migration.TERADATA_TO_EXASOL(
-        CONNECTION_NAME              	--name of the database connection inside exasol -> e.g. teradata_db
-        ,IDENTIFIER_CASE_INSENSITIVE 	--true if identifiers should be stored case-insensitiv (will be stored upper_case)
-        ,SCHEMA_FILTER               	--filter for the schemas to generate and load (except system schemas)  -> '%' to load all
-        ,TABLE_FILTER                	--filter for the tables to generate and load -> '%' to load all
-        ,CHECK_MIGRATION			 	--boolean flag to create and load checking tables with standardized metrics to identify deviations
-        ) RETURNS TABLE
+  CONNECTION_NAME               -- name of the JDBC connection inside Exasol -> e.g. TERADATA_JDBC
+  ,IDENTIFIER_CASE_INSENSITIVE  -- true (recommended; Teradata names are case-insensitive) => fold ALL identifiers to UPPER so Exasol queries need no quotes; false => keep verbatim/quoted
+  ,SCHEMA_FILTER                -- filter for the source databases/schemas (system databases always excluded) -> '%' = all
+  ,TABLE_FILTER                 -- filter for the tables/views -> '%' = all
+  ,TARGET_SCHEMA                -- target schema on Exasol; '' = use the source database name
+  ,CONSTRAINT_STATE             -- 'FORCE_DISABLE' (recommended), 'SET_AS_SOURCE' or 'FORCE_ENABLE'; PK/FK are always created DISABLED, then set after the IMPORTs
+  ,GENERATE_COMMENTS            -- true/false: migrate Teradata CommentString as COMMENT ON
+  ,GENERATE_VIEWS               -- true/false: emit source views as a commented manual-review section
+  ,GENERATE_DISTRIBUTION_BY     -- true/false: map the Teradata Primary Index to an Exasol DISTRIBUTE BY
+  ,GENERATE_PARTITION_BY        -- true/false: add a best-effort PARTITION BY from the Teradata partitioning column (single-column RANGE_N) via ALTER TABLE; complex PPI (CASE_N / multi-level / expression) is emitted as a commented manual-review note
+  ,BINARY_HANDLING              -- 'BASE64' (recommended; BYTE/VARBYTE/BLOB migrated losslessly as base64 text - Exasol has no binary type) or 'SKIP' (load NULL). Source values >~48000 bytes load as NULL (Teradata VARCHAR limit).
+  ,DECIMAL_OVERFLOW             -- 'CAP' (DECIMAL(36,s); IMPORT fails for values > 36 digits) or 'DOUBLE' (loads, ~15 significant digits) for source precision > 36
+  ,TRUNCATE_LONG_STRINGS        -- true: values > 2,000,000 chars are cut to 2,000,000 and imported; false: the IMPORT fails on such a value
+  ,INTERVAL_HANDLING            -- 'INTERVAL' (native Exasol INTERVAL, computable) or 'VARCHAR' (interval as text)
+  ,CHECK_MIGRATION              -- true/false: additionally emit data-validation metrics. Per migrated table a "<table>_MIG_CHK" table is filled with comparable metrics (row/NULL/DISTINCT counts, numeric MIN/MAX/AVG, char length MIN/MAX) computed on BOTH Teradata and Exasol; a "<schema>_MIG_CHK" summary in DATABASE_MIGRATION lists every metric side by side with an OK/DEVIATION status. Run this block AFTER the IMPORTs.
+) RETURNS TABLE
 AS
 
+-- IDENTIFIER_CASE_INSENSITIVE = true wraps every identifier in upper(...) (stored UPPER CASE), applied
+-- consistently to schemas, tables, columns, primary keys, foreign keys, distribution/partition keys, comments.
 exa_upper_begin=''
 exa_upper_end=''
-
-
 if IDENTIFIER_CASE_INSENSITIVE == true then
 	exa_upper_begin='upper('
 	exa_upper_end=')'
 end
 
-check_control = 0
-if CHECK_MIGRATION then 
-	check_control = 1
+-- Normalize option parameters.
+cstate = string.upper(tostring(CONSTRAINT_STATE))
+if cstate ~= 'SET_AS_SOURCE' and cstate ~= 'FORCE_ENABLE' then cstate = 'FORCE_DISABLE' end
+gen_comments = (GENERATE_COMMENTS == true) or (string.upper(tostring(GENERATE_COMMENTS)) == 'TRUE')
+gen_views    = (GENERATE_VIEWS == true) or (string.upper(tostring(GENERATE_VIEWS)) == 'TRUE')
+gen_dist     = (GENERATE_DISTRIBUTION_BY == true) or (string.upper(tostring(GENERATE_DISTRIBUTION_BY)) == 'TRUE')
+gen_part     = (GENERATE_PARTITION_BY == true) or (string.upper(tostring(GENERATE_PARTITION_BY)) == 'TRUE')
+trunc        = (TRUNCATE_LONG_STRINGS == true) or (string.upper(tostring(TRUNCATE_LONG_STRINGS)) == 'TRUE')
+-- Teradata binary (BYTE/VARBYTE/BLOB) is migrated faithfully as base64 text. Exasol has no general binary
+-- column type, and the JDBC import cannot receive raw binary; FROM_BYTES(col,'base64m') is a lossless byte
+-- encoding (preserves leading zero bytes, no line wrapping). Default BASE64; 'SKIP' loads NULL. Values larger
+-- than ~48000 source bytes would exceed the Teradata VARCHAR limit once encoded and are loaded as NULL.
+binmode = string.upper(tostring(BINARY_HANDLING))
+if binmode ~= 'SKIP' then binmode = 'BASE64' end
+decof = string.upper(tostring(DECIMAL_OVERFLOW))
+if decof ~= 'DOUBLE' then decof = 'CAP' end
+ivmode = string.upper(tostring(INTERVAL_HANDLING))
+if ivmode ~= 'VARCHAR' then ivmode = 'INTERVAL' end
+gen_check = (CHECK_MIGRATION == true) or (string.upper(tostring(CHECK_MIGRATION)) == 'TRUE')
+
+function U(col) return exa_upper_begin..col..exa_upper_end end
+-- target schema name expression (TARGET_SCHEMA override or the source schema)
+if TARGET_SCHEMA == null then tschema = [["schema_name"]] else tschema = [[']]..TARGET_SCHEMA..[[']] end
+sname_e = U(tschema)
+-- foreign-key parent schema: when TARGET_SCHEMA is set every table lands there, otherwise the parent keeps its own source schema
+if TARGET_SCHEMA == null then ref_sname_e = U('"ref_schema"') else ref_sname_e = sname_e end
+
+-- System databases excluded (Teradata 14-20 / Vantage, current as of 20). Only real user data is generated.
+sys_db = [[''All'',''Crashdumps'',''DBC'',''dbcmngr'',''Default'',''External_AP'',''EXTUSER'',''LockLogShredder'',''PUBLIC'',''SAS_SYSFNLIB'',''SQLJ'',''SysAdmin'',''SYSBAR'',''SYSJDBC'',''SYSLIB'',''SYSSPATIAL'',''SystemFe'',''SYSUDTLIB'',''SYSUIF'',''Sys_Calendar'',''TDaaS_BAR'',''TDaaS_DB'',''TDaaS_Maint'',''TDaaS_Monitor'',''TDaaS_Support'',''TDBCMgmt'',''TDMaps'',''TDPUSER'',''TDQCD'',''TDStats'',''tdwm'',''TD_ANALYTICS_DB'',''TD_METRIC_SVC'',''TD_MLDB'',''TD_MODELOPS'',''TD_SERVER_DB'',''TD_SYSAI'',''TD_SYSFNLIB'',''TD_SYSGPL'',''TD_SYSXML'',''TD_VAL'',''val'',''console'',''viewpoint'']]
+
+-------------------------------------------------------------------------------------------------------
+-- Remote (Teradata DBC) metadata queries. Inner literals are quote-doubled (embedded in statement '...').
+-- char_len: characters (UNICODE ColumnLength is bytes = 2x chars). frac: DecimalFractionalDigits.
+-------------------------------------------------------------------------------------------------------
+columns_q = [[select trim(c.DatabaseName) as schema_name, trim(c.TableName) as table_name, c.ColumnName as column_name, c.ColumnId as ordinal_position, trim(c.ColumnType) as data_type, trim(c.ColumnUDTName) as udt_name, c.DecimalTotalDigits as num_prec, c.DecimalFractionalDigits as num_scale, c.ColumnLength as col_len, c.CharType as char_type, case when c.CharType = 2 then c.ColumnLength/2 else c.ColumnLength end as char_len, case when c.Nullable = ''Y'' then 1 else 0 end as nullable, trim(c.DefaultValue) as default_value, trim(c.IdColType) as id_col_type, trim(c.CommentString) as col_comment from DBC.ColumnsV c join DBC.TablesV t on c.DatabaseName = t.DatabaseName and c.TableName = t.TableName and t.TableKind in (''T'',''O'') where c.DatabaseName not in (]]..sys_db..[[) and c.DatabaseName like '']]..SCHEMA_FILTER..[['' and c.TableName like '']]..TABLE_FILTER..[['']]
+
+pk_q = [[select trim(i.DatabaseName) as schema_name, trim(i.TableName) as table_name, i.ColumnName as column_name, i.ColumnPosition as column_position from DBC.IndicesV i where i.UniqueFlag = ''Y'' and i.IndexType = ''K'' and i.DatabaseName not in (]]..sys_db..[[) and i.DatabaseName like '']]..SCHEMA_FILTER..[['' and i.TableName like '']]..TABLE_FILTER..[['']]
+
+fk_q = [[select trim(ChildDB) as schema_name, trim(ChildTable) as table_name, trim(IndexName) as fk_name, trim(ChildKeyColumn) as fk_column, trim(ParentDB) as ref_schema, trim(ParentTable) as ref_table, trim(ParentKeyColumn) as ref_column from DBC.All_RI_ChildrenV where ChildDB not in (]]..sys_db..[[) and ChildDB like '']]..SCHEMA_FILTER..[['' and ChildTable like '']]..TABLE_FILTER..[['']]
+
+-------------------------------------------------------------------------------------------------------
+-- Exasol-side expressions producing the generated statement text.
+-------------------------------------------------------------------------------------------------------
+-- DECIMAL / NUMBER overflow.
+if decof == 'DOUBLE' then
+	dec_t = [[case when "num_prec" is null or "num_prec" > 36 or "num_prec" = -128 then 'DOUBLE' else 'DECIMAL(' || "num_prec" || ',' || (case when "num_scale" < 0 then 0 else "num_scale" end) || ')' end]]
+else
+	dec_t = [[case when "num_prec" is null or "num_prec" = -128 then 'DOUBLE' when "num_prec" > 36 then 'DECIMAL(36,' || (case when "num_scale" > 36 then 36 when "num_scale" < 0 then 0 else "num_scale" end) || ')' else 'DECIMAL(' || "num_prec" || ',' || (case when "num_scale" < 0 then 0 else "num_scale" end) || ')' end]]
 end
 
-res = query([[
+-- Binary target type. base64 expands bytes by 4/3; size to the encoded length, capped at the Exasol VARCHAR max.
+bin_t = [['VARCHAR(' || (case when "col_len" < 1 or floor(("col_len"+2)/3)*4 > 2000000 then 2000000 else floor(("col_len"+2)/3)*4 end) || ') ASCII']]
+
+-- INTERVAL target type.
+if ivmode == 'VARCHAR' then
+	iv_t = [['VARCHAR(40) ASCII']]
+else
+	iv_t = [[case when "data_type" in ('YR','YM','MO') then 'INTERVAL YEAR(4) TO MONTH' else 'INTERVAL DAY(4) TO SECOND(' || (case when "num_scale" between 0 and 9 then "num_scale" else 6 end) || ')' end]]
+end
+
+-- Exasol column type for non-period columns (period handled separately producing two columns).
+col_t = [[case
+	when "data_type" = 'I1' then 'DECIMAL(3,0)'
+	when "data_type" = 'I2' then 'DECIMAL(5,0)'
+	when "data_type" = 'I' then 'DECIMAL(10,0)'
+	when "data_type" = 'I8' then 'DECIMAL(19,0)'
+	when "data_type" in ('D','N') then ]]..dec_t..[[
+	when "data_type" = 'F' then 'DOUBLE'
+	when "data_type" = 'DA' then 'DATE'
+	when "data_type" = 'AT' then 'VARCHAR(15) ASCII'
+	when "data_type" = 'TZ' then 'VARCHAR(21) ASCII'
+	when "data_type" = 'TS' then 'TIMESTAMP(' || (case when "num_scale" between 0 and 9 then "num_scale" else 6 end) || ')'
+	when "data_type" = 'SZ' then 'TIMESTAMP(' || (case when "num_scale" between 0 and 9 then "num_scale" else 6 end) || ') WITH LOCAL TIME ZONE'
+	when "data_type" = 'CF' then case when "char_len" > 2000 then 'VARCHAR(' || "char_len" || ') UTF8' else 'CHAR(' || "char_len" || ') UTF8' end
+	when "data_type" = 'CV' then 'VARCHAR(' || (case when "char_len" < 1 then 2000000 else "char_len" end) || ') UTF8'
+	when "data_type" = 'CO' then 'VARCHAR(2000000) UTF8'
+	when "data_type" = 'JN' then 'VARCHAR(2000000) UTF8'
+	when "data_type" = 'XM' then 'VARCHAR(2000000) UTF8'
+	when "data_type" = 'DT' then 'VARCHAR(2000000) UTF8'
+	when "data_type" in ('BF','BV','BO') then ]]..bin_t..[[
+	when "data_type" in ('YR','YM','MO','DY','DH','DM','DS','HR','HM','HS','MI','MS','SC') then ]]..iv_t..[[
+	when "data_type" = 'UT' and "udt_name" in ('ST_GEOMETRY','MBR','MBB') then 'GEOMETRY'
+	when "data_type" = 'UT' then 'VARCHAR(2000000) UTF8'
+	else 'VARCHAR(2000000) UTF8'
+end]]
+
+-- Unsupported = a UDT/type we cannot represent. Here only the internal '++' (TD_ANYTYPE, function sigs) and
+-- a null/empty type are treated unsupported; everything else has a mapping above.
+unsup = [[("data_type" is null or "data_type" = '++' or "data_type" = '')]]
+
+-- column definition (handles PERIOD -> two columns); "exa_col" is the (cased) column name.
+coldef = [[case
+	when "data_type" = 'PD' then '"' || "exa_col" || '_BEGINNING" DATE, "' || "exa_col" || '_END" DATE'
+	when "data_type" in ('PS','PM') then '"' || "exa_col" || '_BEGINNING" TIMESTAMP(6), "' || "exa_col" || '_END" TIMESTAMP(6)'
+	when "data_type" in ('PT','PZ') then '"' || "exa_col" || '_BEGINNING" VARCHAR(21) ASCII, "' || "exa_col" || '_END" VARCHAR(21) ASCII'
+	else '"' || "exa_col" || '" ' || (]]..col_t..[[) || (case when "nullable" = 0 then ' NOT NULL' else '' end)
+end]]
+
+-- source SELECT expression(s) for the IMPORT (must align positionally with coldef).
+if binmode == 'SKIP' then bin_imp = [['cast(null as varchar(10))']] else bin_imp = [['case when bytes(' || "col_q" || ') <= 48000 then from_bytes(' || "col_q" || ', ''''base64m'''') else cast(null as varchar(10)) end']] end
+-- CLOB/JSON/XML/DATASET: cast to CLOB on the Teradata side (typed JSON/XML/DATASET arrive as JDBC type
+-- OTHER and cannot be received; CLOB transfers fine). Truncate via SUBSTR (Teradata VARCHAR max is 64000,
+-- so never cast to VARCHAR(2000000) on the Teradata side).
+if trunc then
+	clob_imp = [['substr(cast(' || "col_q" || ' as clob),1,2000000)']]
+else
+	clob_imp = [['cast(' || "col_q" || ' as clob)']]
+end
+src = [[case
+	when "data_type" = 'PD' then 'begin(' || "col_q" || '), end(' || "col_q" || ')'
+	when "data_type" in ('PS','PM') then 'cast(begin(' || "col_q" || ') as timestamp(6)), cast(end(' || "col_q" || ') as timestamp(6))'
+	when "data_type" in ('PT','PZ') then 'cast(cast(begin(' || "col_q" || ') as time(6)) as varchar(21)), cast(cast(end(' || "col_q" || ') as time(6)) as varchar(21))'
+	when "data_type" = 'AT' then 'cast(' || "col_q" || ' as varchar(15))'
+	when "data_type" = 'TZ' then 'cast(' || "col_q" || ' as varchar(21))'
+	when "data_type" = 'SZ' then 'cast(' || "col_q" || ' at time zone 0 as timestamp(' || (case when "num_scale" between 0 and 9 then "num_scale" else 6 end) || '))'
+	when "data_type" in ('BF','BV','BO') then ]]..bin_imp..[[
+	when "data_type" in ('CO','JN','XM','DT') then ]]..clob_imp..[[
+	when "data_type" = 'UT' and "udt_name" in ('ST_GEOMETRY','MBR','MBB') then "col_q" || '.ST_AsText()'
+	when "data_type" = 'UT' then 'cast(' || "col_q" || ' as varchar(32000))'
+	when "data_type" in ('YR','YM','MO','DY','DH','DM','DS','HR','HM','HS','MI','MS','SC') then 'cast(' || "col_q" || ' as varchar(40))'
+	else "col_q"
+end]]
+
+-- DEFAULT mapping (conservative: numeric/string literals + CURRENT_DATE/TIMESTAMP; else skipped).
+default_e = [[case
+	when "default_value" is null then ''
+	when "default_value" REGEXP_LIKE '^[-]{0,1}[0-9]+(\.[0-9]+){0,1}$' then ' DEFAULT ' || "default_value"
+	when "default_value" REGEXP_LIKE '^''.*''$' then ' DEFAULT ' || "default_value"
+	when upper("default_value") in ('CURRENT_DATE','DATE') then ' DEFAULT CURRENT_DATE'
+	when upper("default_value") in ('CURRENT_TIMESTAMP','CURRENT_TIME') then ' DEFAULT CURRENT_TIMESTAMP'
+	else ''
+end]]
+
+-- constraint-state word + trailing comment (final CONSTRAINT STATE section uses MODIFY CONSTRAINT).
+if cstate == 'FORCE_ENABLE' then sw = 'enable'; sc = [[  -- forced ENABLE (Exasol re-validates the data)]]
+elseif cstate == 'SET_AS_SOURCE' then sw = 'enable'; sc = [[  -- matches Teradata source (keys active)]]
+else sw = 'disable'; sc = [[  -- forced DISABLE (optimizer/BI metadata only; faster)]] end
+
+main_q = [['"' || ]]..sname_e..[[ || '"."' || ]]..U('"table_name"')..[[ || '"']]
+-- Teradata FKs are often unnamed (All_RI_ChildrenV.IndexName empty) -> generate a deterministic name.
+fkname = [[coalesce(nullif("fk_name",''), "table_name" || '_FK_' || "ref_table")]]
+
+-- optional CTEs
+dist_cte = ''  dist_union = ''
+if gen_dist then
+	dist_cte = [[
+,td_dist as (select * from (import from jdbc at ]]..CONNECTION_NAME..[[ statement 'select trim(DatabaseName) as schema_name, trim(TableName) as table_name, ColumnName as column_name, ColumnPosition as column_position from DBC.IndicesV where IndexType in (''P'',''Q'') and DatabaseName not in (]]..sys_db..[[) and DatabaseName like '']]..SCHEMA_FILTER..[['' and TableName like '']]..TABLE_FILTER..[[''') )
+,vv_dist as (select 'ALTER TABLE ' || ]]..main_q..[[ || ' DISTRIBUTE BY ' || group_concat('"' || ]]..U('"column_name"')..[[ || '"' order by "column_position") || ';' as sql_text from td_dist group by "schema_name","table_name")]]
+	dist_union = "\n".. [[UNION ALL select 35, cast('-- ### DISTRIBUTE BY (from Teradata Primary Index) ###' as varchar(2000000)) SQL_TEXT
+UNION ALL select 36, sql_text from vv_dist]]
+end
+
+comments_cte = ''  comments_union = ''
+if gen_comments then
+	comments_cte = [[
+,vv_tcomments as (select distinct * from (import from jdbc at ]]..CONNECTION_NAME..[[ statement 'select trim(DatabaseName) as schema_name, trim(TableName) as table_name, trim(CommentString) as tcomment from DBC.TablesV where TableKind in (''T'',''O'') and CommentString is not null and DatabaseName not in (]]..sys_db..[[) and DatabaseName like '']]..SCHEMA_FILTER..[['' and TableName like '']]..TABLE_FILTER..[[''') )
+,vv_comment_tab as (select 'COMMENT ON TABLE ' || ]]..main_q..[[ || ' IS ' || '''' || replace("tcomment", '''', '''''') || '''' || ';' as sql_text from vv_tcomments)
+,vv_comment_col as (select 'COMMENT ON COLUMN ' || ]]..main_q..[[ || '."' || ]]..U('"column_name"')..[[ || '"' || ' IS ' || '''' || replace("col_comment", '''', '''''') || '''' || ';' as sql_text from vv_columns where "col_comment" is not null and not ]]..unsup..[[ and "data_type" not in ('PD','PS','PM','PT','PZ'))]]
+	comments_union = "\n".. [[UNION ALL select 41, cast('-- ### COMMENTS ###' as varchar(2000000)) SQL_TEXT
+UNION ALL select 42, sql_text from vv_comment_tab
+UNION ALL select 43, sql_text from vv_comment_col]]
+end
+
+views_cte = ''  views_union = ''
+if gen_views then
+	views_cte = [[
+,vv_views_raw as (select * from (import from jdbc at ]]..CONNECTION_NAME..[[ statement 'select trim(DatabaseName) as schema_name, trim(TableName) as view_name, RequestText as view_text from DBC.TablesV where TableKind = ''V'' and DatabaseName not in (]]..sys_db..[[) and DatabaseName like '']]..SCHEMA_FILTER..[['' and TableName like '']]..TABLE_FILTER..[[''') )
+,vv_views as (select '-- ' || "schema_name" || '.' || "view_name" || '  (Teradata view - review and adapt to Exasol SQL manually):' || chr(10) || '-- ' || replace("view_text", chr(10), chr(10) || '-- ') as sql_text from vv_views_raw)]]
+	views_union = "\n".. [[UNION ALL select 90, cast('-- ### VIEWS (Teradata SQL - commented out, manual review required) ###' as varchar(2000000)) SQL_TEXT
+UNION ALL select 91, sql_text from vv_views]]
+end
+
+-- GENERATE_PARTITION_BY: best-effort Exasol PARTITION BY from the Teradata partitioning column. Teradata
+-- partitioning (PPI) is expression-based (RANGE_N / CASE_N); for a single-column RANGE_N the partition column is
+-- extracted and applied via ALTER TABLE ... PARTITION BY (Exasol partitions by column value - a recommended
+-- pattern for e.g. a date column). Multi-level, CASE_N or expression-based PPI has no single-column Exasol
+-- equivalent and is emitted as a commented manual-review note instead.
+part_cte = ''  part_union = ''
+if gen_part then
+	part_cte = [[
+,vv_part_raw as (select * from (import from jdbc at ]]..CONNECTION_NAME..[[ statement 'select trim(DatabaseName) as schema_name, trim(TableName) as table_name, trim(ConstraintText) as part_text from DBC.PartitioningConstraintsV where DatabaseName not in (]]..sys_db..[[) and DatabaseName like '']]..SCHEMA_FILTER..[['' and TableName like '']]..TABLE_FILTER..[[''') )
+,vv_partcol_raw as (
+	select "schema_name","table_name","part_text",
+	       case when instr("part_text",'CASE_N') = 0 and instr("part_text",'RANGE_N',1,2) = 0 and instr("part_text",'RANGE_N(') > 0 and instr("part_text",' BETWEEN') > instr("part_text",'RANGE_N(') + 8
+	            then trim(substr("part_text", instr("part_text",'RANGE_N(') + 8, instr("part_text",' BETWEEN') - instr("part_text",'RANGE_N(') - 8))
+	            else null end as "raw_col"
+	from vv_part_raw)
+,vv_part as (
+	select 'ALTER TABLE "' || ]]..sname_e..[[ || '"."' || ]]..U('"table_name"')..[[ || '" PARTITION BY "' || ]]..U('"raw_col"')..[[ || '";' as sql_text
+	from vv_partcol_raw where "raw_col" is not null and "raw_col" REGEXP_LIKE '^[A-Za-z_][A-Za-z0-9_]*$'
+	union all
+	select '-- "' || ]]..U('"schema_name"')..[[ || '"."' || ]]..U('"table_name"')..[[ || '" Teradata partitioning not auto-mapped (review and add PARTITION BY manually if appropriate): ' || "part_text" as sql_text
+	from vv_partcol_raw where "raw_col" is null or not "raw_col" REGEXP_LIKE '^[A-Za-z_][A-Za-z0-9_]*$')]]
+	part_union = "\n".. [[UNION ALL select 37, cast('-- ### PARTITION BY (best-effort from the Teradata partitioning column; complex PPI listed as a review note) ###' as varchar(2000000)) SQL_TEXT
+UNION ALL select 38, sql_text from vv_part]]
+end
+
+-- CHECK_MIGRATION: per migrated table a wide single-scan metrics row is computed on BOTH systems (typed, so
+-- the target stores both values with identical Exasol types); a per-schema summary unpivots and joins them,
+-- flagging each metric OK/DEVIATION. Metrics are chosen to be cross-database comparable so faithfully migrated
+-- data produces no false deviations: row/NULL/DISTINCT counts (where reliable), numeric MIN/MAX/SUM, date and
+-- timestamp MIN/MAX, char length MIN/MAX. Binary/LOB/geometry/UDT columns get NULL counts only.
+check_cte = ''  check_union = ''
+if gen_check then
+	check_cte = [[
+,vv_chk_cols as (select c.* from vv_columns c where c."data_type" is not null and c."data_type" not in ('++'))
+,vv_chk_base as (
+	select x.*, min("ordinal_position") over (partition by "exa_schema","exa_table") as "min_ord",
+	       sysrow."db_system", mid."metric_id",
+	       case when sysrow."db_system" = 'Exasol' then '"' || x."exa_col" || '"' else x."col_q" end as "ref"
+	from vv_chk_cols x
+	cross join (select 'Exasol' as "db_system" union all select 'Teradata' as "db_system") sysrow
+	cross join (select level-1 as "metric_id" from dual connect by level <= 8) mid
+)
+,vv_chk_expr as (
+	select "exa_schema","exa_table","schema_name","table_name","exa_col","col_q","ordinal_position","db_system","metric_id", "exa_table" || '_MIG_CHK' as "wide_name",
+	       (case
+	          when "metric_id" = 0 and "ordinal_position" = "min_ord" then 'cast(count(*) as decimal(36,0))'
+	          when "metric_id" = 1 and "data_type" in ('PD','PS','PM','PT','PZ') and "nullable" = 1 then 'cast(count(case when ' || (case when "db_system" = 'Exasol' then '"' || "exa_col" || '_BEGINNING"' else "col_q" end) || ' is null then 1 end) as decimal(36,0))'
+	          when "metric_id" = 1 and "nullable" = 1 and "data_type" not in ('PD','PS','PM','PT','PZ') then 'cast(count(case when ' || "ref" || ' is null then 1 end) as decimal(36,0))'
+	          when "metric_id" = 2 and "data_type" in ('I1','I2','I','I8') then 'cast(min(' || "ref" || ') as decimal(20,0))'
+	          when "metric_id" = 2 and "data_type" in ('N','D') and "num_prec" between 1 and 36 then 'cast(min(' || "ref" || ') as decimal(36,' || (case when "num_scale" is null or "num_scale" < 0 then 0 when "num_scale" > 36 then 36 else "num_scale" end) || '))'
+	          when "metric_id" = 2 and "data_type" in ('DA','TS') then 'min(' || "ref" || ')'
+	          when "metric_id" = 3 and "data_type" in ('I1','I2','I','I8') then 'cast(max(' || "ref" || ') as decimal(20,0))'
+	          when "metric_id" = 3 and "data_type" in ('N','D') and "num_prec" between 1 and 36 then 'cast(max(' || "ref" || ') as decimal(36,' || (case when "num_scale" is null or "num_scale" < 0 then 0 when "num_scale" > 36 then 36 else "num_scale" end) || '))'
+	          when "metric_id" = 3 and "data_type" in ('DA','TS') then 'max(' || "ref" || ')'
+	          when "metric_id" = 4 and "data_type" in ('I1','I2','I','I8','F','N','D','DA','TS','SZ','AT','TZ','YR','YM','MO','DY','DH','DM','DS','HR','HM','HS','MI','MS','SC') then 'cast(count(distinct ' || "ref" || ') as decimal(36,0))'
+	          when "metric_id" = 4 and "data_type" in ('CF','CV') then 'cast(count(distinct ' || "ref" || (case when "db_system" = 'Teradata' then ' (casespecific)' else '' end) || ') as decimal(36,0))'
+	          when "metric_id" = 4 and "data_type" in ('PD','PS','PM','PT','PZ') then (case when "db_system" = 'Exasol' then 'cast(count(distinct (' || '"' || "exa_col" || '_BEGINNING", "' || "exa_col" || '_END")) as decimal(36,0))' else 'cast(count(distinct ' || "col_q" || ') as decimal(36,0))' end)
+	          when "metric_id" = 5 and "data_type" in ('I1','I2','I','I8') then 'cast(sum(' || "ref" || ') as decimal(36,0))'
+	          when "metric_id" = 5 and "data_type" in ('N','D') and "num_prec" between 1 and 36 then 'cast(sum(' || "ref" || ') as decimal(36,' || (case when "num_scale" is null or "num_scale" < 0 then 0 when "num_scale" > 36 then 36 else "num_scale" end) || '))'
+	          when "metric_id" = 6 and "data_type" in ('CF','CV') and not ("data_type" = 'CF' and "char_len" > 2000) then 'cast(min(' || (case when "db_system" = 'Exasol' then 'length(' else 'character_length(' end) || "ref" || ')) as decimal(36,0))'
+	          when "metric_id" = 7 and "data_type" in ('CF','CV') and not ("data_type" = 'CF' and "char_len" > 2000) then 'cast(max(' || (case when "db_system" = 'Exasol' then 'length(' else 'character_length(' end) || "ref" || ')) as decimal(36,0))'
+	        end) as "metric_expr"
+	from vv_chk_base
+)
+,vv_chk_named as (
+	select "exa_schema","exa_table","schema_name","table_name","exa_col","col_q","ordinal_position","db_system","metric_id","wide_name","metric_expr",
+	       (case "metric_id" when 0 then 'ROW_CNT' when 1 then "exa_col" || '_NULLS' when 2 then "exa_col" || '_MIN' when 3 then "exa_col" || '_MAX' when 4 then "exa_col" || '_DISTINCT' when 5 then "exa_col" || '_SUM' when 6 then "exa_col" || '_MINLEN' when 7 then "exa_col" || '_MAXLEN' end) as "metric_name"
+	from vv_chk_expr where "metric_expr" is not null
+)
+,vv_chk_sys as (
+	select "exa_schema","exa_table","schema_name","table_name","wide_name","db_system",
+	       'select cast(' || '''' || "db_system" || '''' || ' as varchar(10)) as "DB_SYSTEM", ' || listagg("metric_expr" || ' as "' || "metric_name" || '"', ', ') within group (order by "ordinal_position","metric_id") || ' from ' || (case when "db_system" = 'Exasol' then '"' || "exa_schema" || '"."' || "exa_table" || '"' else '"' || "schema_name" || '"."' || "table_name" || '"' end) as "sys_select"
+	from vv_chk_named group by "exa_schema","exa_table","schema_name","table_name","wide_name","db_system"
+)
+,vv_chk_wide as (
+	select 'CREATE OR REPLACE TABLE "' || "exa_schema" || '"."' || "wide_name" || '" AS ' || max(case when "db_system" = 'Exasol' then "sys_select" end) || ' UNION ALL select * from (IMPORT FROM JDBC AT ]]..CONNECTION_NAME..[[ STATEMENT ' || '''' || replace(max(case when "db_system" = 'Teradata' then "sys_select" end), '''', '''''') || '''' || ') ;' as sql_text
+	from vv_chk_sys group by "exa_schema","wide_name"
+)
+,vv_chk_unpiv as (
+	select "exa_schema","exa_table","ordinal_position","metric_id","db_system",
+	       'select ' || '''' || "exa_table" || '''' || ' as "TABLE_NAME", ' || '''' || "metric_name" || '''' || ' as "METRIC", to_char("' || "metric_name" || '") as "VAL" from "' || "exa_schema" || '"."' || "wide_name" || '" where "DB_SYSTEM" = ' || '''' || "db_system" || '''' as "frag"
+	from vv_chk_named
+)
+,vv_chk_summary as (
+	select 'CREATE OR REPLACE TABLE "DATABASE_MIGRATION"."' || "exa_schema" || '_MIG_CHK" AS select e."TABLE_NAME", e."METRIC", e."VAL" as "EXASOL_METRIC", t."VAL" as "TERADATA_METRIC", case when coalesce(e."VAL", ''~NULL~'') = coalesce(t."VAL", ''~NULL~'') then ''OK'' else ''DEVIATION'' end as "STATUS" from (' || listagg(case when "db_system" = 'Exasol' then "frag" end, ' union all ') within group (order by "exa_table","ordinal_position","metric_id") || ') e join (' || listagg(case when "db_system" = 'Teradata' then "frag" end, ' union all ') within group (order by "exa_table","ordinal_position","metric_id") || ') t on e."TABLE_NAME" = t."TABLE_NAME" and e."METRIC" = t."METRIC" order by "STATUS" desc, e."TABLE_NAME", e."METRIC";' as sql_text
+	from vv_chk_unpiv group by "exa_schema"
+)]]
+	check_union = "\n".. [[UNION ALL select 70, cast('-- ### DATA VALIDATION (CHECK_MIGRATION) - run AFTER the IMPORTs; compares source vs target metrics ###' as varchar(2000000)) SQL_TEXT
+UNION ALL select 71, sql_text from vv_chk_wide
+UNION ALL select 72, cast('-- per-schema validation summary (one row per metric; STATUS = OK / DEVIATION):' as varchar(2000000))
+UNION ALL select 73, sql_text from vv_chk_summary
+UNION ALL select 74, cast('-- review deviations with:  select * from "DATABASE_MIGRATION"."<schema>_MIG_CHK" where "STATUS" = ''DEVIATION'';' as varchar(2000000))]]
+end
+
+suc, res = pquery([[
 with vv_columns as (
-	select	]]..exa_upper_begin..[["table_schema"]]..exa_upper_end..[[ as "exa_table_schema", 
-        	]]..exa_upper_begin..[["table_name"]]..exa_upper_end..[[ as "exa_table_name", 
-       		]]..exa_upper_begin..[["column_name"]]..exa_upper_end..[[ as "exa_column_name", 
-			'"' || "column_name" || '"' as "column_name_delimited", 
-			tableList.* 
-	from 	(
-		import from jdbc at ]]..CONNECTION_NAME..[[ 
-    	statement '
-		select 	trim(c.DatabaseName) as  table_schema, 
-        		trim(c.TableName) as    table_name, 
-        		ColumnName as           column_name,
-        		ColumnId as             ordinal_position, 
-        		trim(ColumnType) as     data_type, 
-        		cast(case when ColumnType in (''CF'', ''CV'') then substr(ColumnFormat, 3, length(ColumnFormat)-3) else ColumnLength end as integer) as character_maximum_length,
-        		DecimalTotalDigits as   numeric_precision, 
-       			DecimalFractionalDigits as numeric_scale,
-        		DecimalFractionalDigits as datetime_precision, 
-        		case when nullable = ''Y'' then 1 when nullable = ''N'' then 0 end as nullable 
-        from    DBC.ColumnsV c
-		join    DBC.TablesV t
-		on 		c.databaseName=t.DatabaseName 
-		AND 	c.TableName=t.TableName 
-		AND 	TableKind=''T''
-		where   table_schema not in (''All'', ''Crashdumps'', ''DBC'', ''dbcmngr'', 
-				''Default'', ''External_AP'', ''EXTUSER'', ''LockLogShredder'', ''PUBLIC'',
-				''Sys_Calendar'', ''SysAdmin'', ''SYSBAR'', ''SYSJDBC'', ''SYSLIB'',
-				''SystemFe'', ''SYSUDTLIB'', ''SYSUIF'', ''TD_SERVER_DB'', ''TDStats'',
-				''TD_SYSGPL'', ''TD_SYSXML'', ''TDMaps'', ''TDPUSER'', ''TDQCD'',
-				''tdwm'', ''SQLJ'', ''TD_SYSFNLIB'', ''SYSSPATIAL'') 
-		AND 	table_schema like '']]..SCHEMA_FILTER..[['' 
-		AND		table_name like '']]..TABLE_FILTER..[[''
-		') as tableList
+	select ]]..sname_e..[[ as "exa_schema", ]]..U('"table_name"')..[[ as "exa_table", ]]..U('"column_name"')..[[ as "exa_col", '"' || "column_name" || '"' as "col_q", t.*
+	from (import from jdbc at ]]..CONNECTION_NAME..[[ statement ']]..columns_q..[[') t
 )
-
-, vv_primary_keys_raw as (
-	select	]]..exa_upper_begin..[["table_schema"]]..exa_upper_end..[[ as "exa_table_schema", 
-            ]]..exa_upper_begin..[["table_name"]]..exa_upper_end..[[ as "exa_table_name", 
-            ]]..exa_upper_begin..[["column_name"]]..exa_upper_end..[[ as "exa_column_name",
-            "table_schema" as "table_schema",
-            "table_name" as "table_name",
-            "column_name" as "column_name",
-           "column_position" as "column_position"
-	from 	(
-		import from jdbc at ]]..CONNECTION_NAME..[[  
-		statement '
-		SELECT  DatabaseName as table_schema,
-		        TableName as table_name,
-		        ColumnName as column_name,
-		        ColumnPosition as column_position
-		FROM    DBC.IndicesV
-		WHERE 	UniqueFlag = ''Y'' AND IndexType IN (''K'')
-		and 	table_schema not in (''All'', ''Crashdumps'', ''DBC'', ''dbcmngr'', 
-		    	''Default'', ''External_AP'', ''EXTUSER'', ''LockLogShredder'', ''PUBLIC'',
-		    	''Sys_Calendar'', ''SysAdmin'', ''SYSBAR'', ''SYSJDBC'', ''SYSLIB'',
-		    	''SystemFe'', ''SYSUDTLIB'', ''SYSUIF'', ''TD_SERVER_DB'', ''TDStats'',
-		    	''TD_SYSGPL'', ''TD_SYSXML'', ''TDMaps'', ''TDPUSER'', ''TDQCD'',
-		    	''tdwm'', ''SQLJ'', ''TD_SYSFNLIB'', ''SYSSPATIAL'') 
-		and		table_schema like '']]..SCHEMA_FILTER..[['' 
-		and		table_name like '']]..TABLE_FILTER..[['' 
-		'
-	) as primarykeylist
+,vv_unsupported as (
+	select '-- !!! UNSUPPORTED TYPE - column NOT migrated: "' || "schema_name" || '"."' || "table_name" || '"."' || "column_name" || '" (Teradata type code: ' || coalesce("data_type",'null') || coalesce(' / ' || "udt_name",'') || ') - migrate this column manually !!!' as sql_text
+	from vv_columns where ]]..unsup..[[
 )
-
-,vv_foreign_keys_raw as (
-	select	]]..exa_upper_begin..[["ChildDB"]]..exa_upper_end..[[ as "exa_table_schema", 
- 			]]..exa_upper_begin..[["ChildTable"]]..exa_upper_end..[[ as "exa_table_name", 
- 			]]..exa_upper_begin..[["ChildKeyColumn"]]..exa_upper_end..[[ as "exa_foreign_key_column",
- 			]]..exa_upper_begin..[["ParentDB"]]..exa_upper_end..[[ as "exa_referenced_table_schema", 
- 			]]..exa_upper_begin..[["ParentTable"]]..exa_upper_end..[[ as "exa_referenced_table_name"
-	from 	(
-		import from jdbc at ]]..CONNECTION_NAME..[[  
-	    statement ' 
-	    SELECT  ChildDB,
-				ChildTable,
-	        	ChildKeyColumn,
-	        	ParentDB ,
-	        	ParentTable 
-		FROM    DBC.All_RI_ChildrenV
-		WHERE   ChildDB NOT IN (''All'', ''Crashdumps'', ''DBC'', ''dbcmngr'', 
-	    		''Default'', ''External_AP'', ''EXTUSER'', ''LockLogShredder'', ''PUBLIC'',
-	    		''Sys_Calendar'', ''SysAdmin'', ''SYSBAR'', ''SYSJDBC'', ''SYSLIB'',
-	    		''SystemFe'', ''SYSUDTLIB'', ''SYSUIF'', ''TD_SERVER_DB'', ''TDStats'',
-	    		''TD_SYSGPL'', ''TD_SYSXML'', ''TDMaps'', ''TDPUSER'', ''TDQCD'',
-	   			''tdwm'', ''SQLJ'', ''TD_SYSFNLIB'', ''SYSSPATIAL'') 
-		and		ChildDB like '']]..SCHEMA_FILTER..[['' 
-		and		ChildTable like '']]..TABLE_FILTER..[['' 
-		'
-	)
-),
-vv_create_schemas as(
-		SELECT	'create schema if not exists "' || "exa_table_schema" || '";' as sql_text 
-		from 	vv_columns  
-		group by "exa_table_schema" 
-		order by "exa_table_schema"
+,vv_pk_raw as (select * from (import from jdbc at ]]..CONNECTION_NAME..[[ statement ']]..pk_q..[['))
+,vv_pk as (
+	select 'ALTER TABLE ' || '"' || ]]..sname_e..[[ || '"."' || ]]..U('"table_name"')..[[ || '"' || ' ADD CONSTRAINT "' || ]]..U('"table_name"')..[[ || '_PK" PRIMARY KEY (' || group_concat('"' || ]]..U('"column_name"')..[[ || '"' order by "column_position") || ') DISABLE;' as sql_text,
+	       ]]..sname_e..[[ as "exa_schema", ]]..U('"table_name"')..[[ as "exa_table"
+	from vv_pk_raw group by "schema_name","table_name"
 )
+,vv_fk_raw as (select f.* from (import from jdbc at ]]..CONNECTION_NAME..[[ statement ']]..fk_q..[[') f where exists (select 1 from vv_columns c where c."schema_name" = f."ref_schema" and c."table_name" = f."ref_table"))
+,vv_fk as (
+	select 'ALTER TABLE ' || '"' || ]]..sname_e..[[ || '"."' || ]]..U('"table_name"')..[[ || '"' || ' ADD CONSTRAINT "' || ]]..U(fkname)..[[ || '" FOREIGN KEY (' || group_concat('"' || ]]..U('"fk_column"')..[[ || '"') || ') REFERENCES "' || ]]..ref_sname_e..[[ || '"."' || ]]..U('"ref_table"')..[[ || '" (' || group_concat('"' || ]]..U('"ref_column"')..[[ || '"') || ') DISABLE;' as sql_text
+	from vv_fk_raw group by "schema_name","table_name","fk_name","ref_schema","ref_table"
+)
+,vv_create_schemas as (select distinct 'CREATE SCHEMA IF NOT EXISTS "' || "exa_schema" || '";' as sql_text from vv_columns)
 ,vv_create_tables as (
-	select 	'create or replace table "' || "exa_table_schema" || '"."' || "exa_table_name" || '" (' || 
-	group_concat(
-	case 
-	when "data_type" = 'PD' then -- a teradata PERIOD(DATE) is splitted into the beginning and end DATE  
-		'"' ||  "exa_column_name" || '_BEGINNING " DATE,' ||
-		'"' ||  "exa_column_name" || '_END" DATE' 
-	when "data_type" in ('PS', 'PM', 'PT', 'PZ')  then  -- a teradata PERIOD(TIMESTAMP) is splitted into the beginning and end TIMESTAMP  
-		'"' ||  "exa_column_name" || '_BEGINNING " TIMESTAMP,' ||
-		'"' ||  "exa_column_name" || '_END" TIMESTAMP'        	       
-	else
-		'"' ||  "exa_column_name" || '" ' 
-	end ||	        
-	case 
-	when "data_type" = 'PD' then ''  --Period is already splitted into two dates before
-	when "data_type" in ('PS', 'PM', 'PT', 'PZ') then ''  --Period is already splitted into two timestamps before
-	when "data_type" = 'DA' then 'DATE' 
-	when "data_type" in ('BF', 'BO', 'BV') then 'VARCHAR(100)' --binary data types like BYTE, VARBYTE, BLOB are not supported then
-        when "data_type" = 'D'  then 
-                case 
-                when "numeric_precision" is null or "numeric_precision" > 36 then 
-                        'DOUBLE' 
-                        else 'decimal(' || "numeric_precision" || ',' || 
-                        case when ("numeric_scale" > "numeric_precision") then 
-                                "numeric_precision" 
-                                else  
-                                        case 
-                                        when "numeric_scale" < 0 then 
-                                                0 
-                                                else 
-                                                        "numeric_scale" 
-                                        end 
-                        end || ')' 
-                end 
-	when "data_type" = 'TS' then 'TIMESTAMP' 
-	when "data_type" = 'TZ' then 'TIMESTAMP' 
-	when "data_type" = 'SZ' then 'TIMESTAMP' 
-	when "data_type" = 'CF' then  
-                case 
-                when nvl("character_maximum_length",2000) > 2000 then 
-                'varchar(' ||
-                       nvl("character_maximum_length",2000) || ')' 
-                else 
-                'char(' ||
-                       nvl("character_maximum_length",2000) || ')' 
-                end 
-	when "data_type" = 'I1' then 'DECIMAL(9)'
-	when "data_type" = 'I2' then 'DECIMAL(9)'
-	when "data_type" = 'I8' then 'DECIMAL(19)' --maybe 18 but can result in errors while importing
-	when "data_type" = 'AT' then 'TIMESTAMP' 
-	when "data_type" = 'F'  then 'DOUBLE' 
-	when "data_type" in( 'CV' , 'JN') then  --Varchar and JSON
-	       'varchar(' || case when nvl("character_maximum_length",2000000) > 2000000 then 
-	       2000000 
-	       else 
-	               nvl("character_maximum_length",2000000) 
-               end || ')' 
-	when "data_type" = 'I'  then 'DECIMAL(10)' --maybe 9 but can result in errors while importing
-	when "data_type" = 'N'  then  --Number type 
-	       case when "numeric_precision" is null or "numeric_precision" > 36 or "numeric_precision" = -128 then 
-	       'DOUBLE' 
-	       else 'decimal(' || "numeric_precision" || ',' || 
-	               case when ("numeric_scale" > "numeric_precision") 
-	               then "numeric_precision" else  
-	                       case when "numeric_scale" < 0 then 
-	                       0
-	                       else "numeric_scale" 
-	                       end 
-                       end || ')' 
-               end 
-        when "data_type" = 'YR'  then  --INTERVAL YEAR 
-          'INTERVAL YEAR (' || "numeric_precision" ||  ') TO MONTH'
-        when "data_type" = 'YM'  then  --INTERVAL YEAR TO MONTH
-          'INTERVAL YEAR (' || "numeric_precision" ||  ') TO MONTH' 
-        when "data_type" = 'MO'  then  --INTERVAL MONTH 
-          'INTERVAL YEAR (4) TO MONTH'  
-        when "data_type" = 'DY'  then  --INTERVAL DAY 
-          'INTERVAL DAY (4) TO SECOND' 
-        when "data_type" = 'DH'  then  --INTERVAL DAY TO HOUR
-          'INTERVAL DAY (4) TO SECOND'    
-        when "data_type" = 'DM'  then  --INTERVAL DAY TO MINUTE
-          'INTERVAL DAY (4) TO SECOND'  
-        when "data_type" = 'DS'  then  --INTERVAL DAY TO SECOND  
-          'INTERVAL DAY (4) TO SECOND (' ||    "numeric_scale" || ')'
-        when "data_type" = 'HR'  then  --INTERVAL HOUR 
-          'INTERVAL DAY (4) TO SECOND' 
-        when "data_type" = 'HM'  then  --INTERVAL HOUR TO MINUTE  
-          'INTERVAL DAY (4) TO SECOND '  
-        when "data_type" = 'HS'  then  --INTERVAL HOUR TO SECOND  
-          'INTERVAL DAY (4) TO SECOND (' ||    "numeric_scale" || ')' 
-        when "data_type" = 'MI'  then  --INTERVAL MINUTE
-          'INTERVAL DAY (4) TO SECOND'  
-        when "data_type" = 'MS'  then  --INTERVAL MINUTE TO SECOND  
-          'INTERVAL DAY (4) TO SECOND (' ||    "numeric_scale" || ')'   
-        when "data_type" = 'SC'  then  --INTERVAL SECOND
-           'INTERVAL DAY (4) TO SECOND (' ||    "numeric_scale" || ')'     
-        when "data_type" in ('A1','AN')  then --ARRAY Datatype  
-           'VARCHAR(64000)'
-	else '/*UNKNOWN_DATATYPE:' || "data_type" || '*/ varchar(2000000)' 
-	end || case when "nullable" = 0 then ' NOT NULL ' else '' end
-	
-	order by       "ordinal_position") || ');' as sql_text
-	from           vv_columns  
-	group by       "exa_table_schema", "exa_table_name"
-	order by       "exa_table_schema","exa_table_name"
+	select 'CREATE OR REPLACE TABLE "' || "exa_schema" || '"."' || "exa_table" || '" (' || group_concat(case when ]]..unsup..[[ then null else (]]..coldef..[[) || ]]..default_e..[[ end order by "ordinal_position" separator ', ') || ');' as sql_text
+	from vv_columns group by "exa_schema","exa_table"
 )
-
-, vv_primary_keys as (
-	select 'ALTER TABLE "' || "exa_table_schema" || '"."' || "exa_table_name" || '" ADD CONSTRAINT PRIMARY KEY (' || 
-		group_concat('"'||  "exa_column_name" || '"'  order by "column_position")  || ') ;' as sql_text
-	from           vv_primary_keys_raw   
-		group by       "exa_table_schema", "exa_table_name"
-		order by       "exa_table_schema","exa_table_name"
-
-), vv_foreign_keys as (
-
-select 'ALTER TABLE "' || "exa_table_schema" || '"."' || "exa_table_name" ||
- '" ADD FOREIGN KEY (' || '"'||  "exa_foreign_key_column" || '") REFERENCES "' || "exa_referenced_table_schema" || '"."' || "exa_referenced_table_name" || '" DISABLE ;' as sql_text
-from vv_foreign_keys_raw   
-order by "exa_table_schema","exa_table_name"
-
-)
-, vv_imports as (
-	select 'import into "' || "exa_table_schema" || '"."' || "exa_table_name" || '" from jdbc at ]]..CONNECTION_NAME..[[ statement ''select ' || group_concat( 
-	case 
-	when "data_type" = 'DA' then "column_name_delimited"
-	when "data_type" = 'D'  then "column_name_delimited"
-	when "data_type" = 'TS' then "column_name_delimited"
-	when "data_type" = 'CF' then "column_name_delimited"
-	when "data_type" = 'I1' then "column_name_delimited"
-	when "data_type" = 'I2' then "column_name_delimited"
-	when "data_type" = 'I8' then "column_name_delimited"
-	when "data_type" = 'AT' then "column_name_delimited"
-	when "data_type" = 'F'  then "column_name_delimited"
-	when "data_type" = 'CV' then "column_name_delimited"
-	when "data_type" = 'I'  then "column_name_delimited"
-	when "data_type" = 'N'  then "column_name_delimited"
-	when "data_type" in ('A1','AN')  then 'cast(' || "column_name_delimited" || ' as varchar(64000)) '  --array datatypes are casted to a varchar in Teradata
-	when "data_type" in ('BF', 'BO', 'BV') then '''''NOT SUPPORTED''''' --binary data types (BYTE, VARBYTE, BLOB) are not supported
-	when "data_type" = 'JN'  then 'CAST(' || "column_name_delimited" ||  ' AS CLOB ) ' --json (max length in Exasol is 2000000 as it is stored as varchar)  
-	when "data_type" = 'PD'  then  'BEGIN('|| "column_name_delimited" || ') , END(' ||  "column_name_delimited" || ')'  --Period(Date) split into begin and end date
-	when "data_type" in ('PS', 'PM')  then  'CAST(  BEGIN('|| "column_name_delimited" || ') AS TIMESTAMP ) , CAST ( END(' ||  "column_name_delimited" || ') AS TIMESTAMP ) '  --Period(Timestamp) split into begin and end timestamp  
-	when "data_type" in ('PT', 'PZ')  then  'CAST(  BEGIN('|| "column_name_delimited" || ') AS TIME ) , CAST ( END(' ||  "column_name_delimited" || ') AS TIME ) '  --Period(Time) split into begin and end time	
-	when "data_type" = 'TZ' then  'cast(' || "column_name_delimited" || ' AS TIME)'  --time with time zone
-	when "data_type" = 'SZ' then  'cast(' || "column_name_delimited" || ' AS TIMESTAMP)'  --timestamp with time zone
-	when "data_type" = 'YR'  then 'cast(cast('|| "column_name_delimited" || ' AS INTERVAL YEAR  TO MONTH ) AS VARCHAR(50))'  --Interval Year
-	when "data_type" = 'YM'  then 'cast('|| "column_name_delimited" || ' AS VARCHAR(50) )'  --Interval Year to Month
-	when "data_type" = 'MO'  then 'cast(cast('|| "column_name_delimited" || ' AS INTERVAL YEAR  TO MONTH ) AS VARCHAR(50))'  --Interval Month
-	when "data_type" = 'DY'  then 'cast(cast('|| "column_name_delimited" || ' AS INTERVAL DAY (4)  TO SECOND) AS VARCHAR(50)) ' --Interval Day
-	when "data_type" = 'DH'  then 'cast(cast('|| "column_name_delimited" || ' AS INTERVAL DAY (4)  TO SECOND) AS VARCHAR(50)) '  --Interval Day to hour
-	when "data_type" = 'DM'  then 'cast(cast('|| "column_name_delimited" || ' AS INTERVAL DAY (4)  TO SECOND) AS VARCHAR(50)) '  --Interval Day to minute
-	when "data_type" = 'DS'  then 'cast(cast('|| "column_name_delimited" || ' AS INTERVAL DAY (4)  TO SECOND (' || "numeric_scale" || ')) AS VARCHAR(50)) '  --Interval day to second
-	when "data_type" = 'HR'  then 'cast(cast('|| "column_name_delimited" || ' AS INTERVAL DAY (4)  TO SECOND) AS VARCHAR(50)) '  --Interval Hour
-	when "data_type" = 'HM'  then 'cast(cast('|| "column_name_delimited" || ' AS INTERVAL DAY (4)  TO SECOND) AS VARCHAR(50)) '  --Interval Day to minute
-	when "data_type" = 'HS'  then 'cast(cast('|| "column_name_delimited" || ' AS INTERVAL DAY (4)  TO SECOND (' || "numeric_scale" || ')) AS VARCHAR(50)) '  --Interval day to second
-	when "data_type" = 'MI'  then 'cast(cast('|| "column_name_delimited" || ' AS INTERVAL DAY (4)  TO SECOND) AS VARCHAR(50)) ' --Interval Minute
-	when "data_type" = 'MS'  then 'cast(cast('|| "column_name_delimited" || ' AS INTERVAL DAY (4)  TO SECOND (' || "numeric_scale" || ')) AS VARCHAR(50)) '  --Interval minute to second
-	when "data_type" = 'SC'  then 'cast(cast('|| "column_name_delimited" || ' AS INTERVAL DAY (4)  TO SECOND (' || "numeric_scale" || ')) AS VARCHAR(50)) '  --Interval Second
-	else "column_name_delimited"
-	end
-	order by "ordinal_position") || ' from ' || "table_schema"|| '.' || "table_name"|| ''';' as sql_text
-	from vv_columns 
-	group by "exa_table_schema","exa_table_name", "table_schema","table_name"
-	order by "exa_table_schema","exa_table_name", "table_schema","table_name"
-)
-
-, vv_checks_expr as (
-	select  "db_system", c."exa_table_schema", c."exa_table_name", c."exa_column_name", c."column_name_delimited", c."table_schema", c."table_name", c."ordinal_position", c."data_type", c."nullable",
-	        count(case when p."exa_column_name" is not null then 1 end) over (partition by c."exa_table_schema", c."exa_table_name") as "cnt_pk",
-	        case when p."exa_column_name" is not null then true else false end "is_pk",
-	        p."column_position" as "column_position_pk",
-	        "metric_id",
-	        'DATABASE_MIGRATION' as "metric_schema",
-	        c."exa_table_name" || '_MIG_CHK' as "metric_table",
-	        case    when c."ordinal_position" = 1 and "metric_id" = 0 then 'cast(count(*) as decimal(36,0))'
-	        		when "nullable" = 1 and "metric_id" = 1 then 'cast(count(case when ' || case when "db_system" = 'Exasol' then '"' || c."exa_column_name" || '"' else c."column_name_delimited" end || ' is null then 1 end) as decimal(36,0))'
-	        		when c."data_type" in ( 'DA',   --DATE 
-	                                        'AT',   --TIME
-	                                        'TZ',   --TIME WITH TIME ZONE
-	                                        'TS',   --TIMESTAMP
-	                                        'SZ',   --TIMESTAMP WITH TIME ZONE
-	                                        
-	                                        'I',    --INTEGER
-	                                        'I1',   --BYTEINT
-	                                        'I2',   --SMALLINT
-	                                        'I8',   --BIGINT
-	                                        'F',    --DOUBLE PRECISION 
-	                                        'N',    --NUMBER
-	                                        'D'     --DECIMAL
-	                                        ) then
-	                		case 	when "metric_id" = 2 then
-	                                        case when c."data_type" in ('I', 'I1','I2','I8','F','N','D') then 'cast(' end ||
-	                                        'min(' || case when "db_system" = 'Exasol' then '"' || c."exa_column_name" || '"' else c."column_name_delimited" end || ')' ||
-	                                        case    when c."data_type" in ('I1', 'I2', 'I8', 'I') then ' as decimal(20,0))' 
-	                                                when c."data_type" = 'F' or c."numeric_precision" > 36 or c."numeric_precision" = -128 then ' as double precision)' 
-	                                                when c."data_type" in ('N', 'D') and c."numeric_precision" > 0 and c."numeric_scale" >= 0 then ' as decimal(' || c."numeric_precision" || ', ' || c."numeric_scale" || '))'
-	                                        end
-	                                when "metric_id" = 3 then
-	                                        case when c."data_type" in ('I', 'I1','I2','I8','F','N','D') then 'cast(' end ||
-	                                        'max(' || case when "db_system" = 'Exasol' then '"' || c."exa_column_name" || '"' else c."column_name_delimited" end || ')' ||
-	                                        case    when c."data_type" in ('I1', 'I2', 'I8', 'I') then ' as decimal(20,0))' 
-	                                                when c."data_type" = 'F' or c."numeric_precision" > 36 or c."numeric_precision" = -128 then ' as double precision)' 
-	                                                when c."data_type" in ('N', 'D') and c."numeric_precision" > 0 and c."numeric_scale" >= 0 then ' as decimal(' || c."numeric_precision" || ', ' || c."numeric_scale" || '))'
-	                                        end
-	                                when "metric_id" = 4 then
-	                        				'cast(count(distinct(' || case when "db_system" = 'Exasol' then '"' || c."exa_column_name" || '"' else c."column_name_delimited" end || ')) as decimal(36,0))'
-	                				when "metric_id" = 5 then
-	                                        case    when c."data_type" in ('D', 'I1', 'I2', 'I8', 'F', 'I', 'N') then
-	                                                		'cast(avg(cast(' || case when "db_system" = 'Exasol' then '"' || c."exa_column_name" || '"' else c."column_name_delimited" end || ' as double precision)) as double precision)'    --avoiding numeric overflow by casting the column first , second cast is to make sure the data types match after the import                           
-	                                        end
-	                        end
-	
-	                when c."data_type" in ( 'PD',   --PERIOD(DATE)
-	                                        'PT',   --PERIOD(TIME(n))
-	                                        'PZ',   --PERIOD(TIME(n) WITH TIME ZONE)
-	                                        'PS',   --PERIOD(TIMESTAMP(n))
-	                                        'PM'    --PERIOD(TIMESTAMP(n) WITH TIME ZONE)
-	                                        ) then
-	                        case    when "db_system" = 'Exasol' then
-	                        				case	when "metric_id" = 2 then 'min("' || c."exa_column_name" || '_BEGINNING")'
-	                                        		when "metric_id" = 3 then 'max("' || c."exa_column_name" || '_BEGINNING")'
-	                                        		when "metric_id" = 4 then 'min("' || c."exa_column_name" || '_END")'
-	                                        		when "metric_id" = 5 then 'max("' || c."exa_column_name" || '_END")'
-	                                        		when "metric_id" = 6 then 'cast(count(distinct("' || c."exa_column_name"  || '_BEGINNING", "' || c."exa_column_name" || '_END")) as decimal(36,0))'
-	                                		end
-	                                when "db_system" = 'Teradata' then
-	                                		case	when "metric_id" = 2 then 'min(begin(' || c."column_name_delimited" || '))'
-	                                        		when "metric_id" = 3 then 'max(begin(' || c."column_name_delimited" || '))'
-	                                        		when "metric_id" = 4 then 'min(end(' || c."column_name_delimited" || '))'
-	                                        		when "metric_id" = 5 then 'max(end(' || c."column_name_delimited" || '))'
-	                                        		when "metric_id" = 6 then 'cast(count(distinct(' || c."column_name_delimited" || ')) as decimal(36,0))'
-	                                		end
-	                        end
-	                
-	                when c."data_type" in ( 'CF',   --CHARACTER (fixed)
-	                                        'CV'    --CHARACTER (varying)
-	                                        ) then
-	                        case    when not(c."data_type" = 'CF' and "character_maximum_length" > 2000) then
-	                        				case 	when "metric_id" = 2 then 'cast(min(length(' || case when "db_system" = 'Exasol' then '"' || c."exa_column_name" || '"' else c."column_name_delimited" end || ')) as decimal(36,0))'
-	                        						when "metric_id" = 3 then 'cast(max(length(' || case when "db_system" = 'Exasol' then '"' || c."exa_column_name" || '"' else c."column_name_delimited" end || ')) as decimal(36,0))'
-	                						end
-	                        		when "metric_id" = 4 then 'cast(count(distinct(' || case when "db_system" = 'Exasol' then '"' || c."exa_column_name" || '"' else c."column_name_delimited" || ' (casespecific)' end || ')) as decimal(36,0))'
-	                        end 
-	                        
-	                when c."data_type" in ( 'YR',   --interval year
-	                                        'YM',   --interval year to month
-	                                        'MO',   --interval month
-	                                        'DY',   --interval day
-	                                        'DH',   --interval day to hour
-	                                        'DM',   --interval day to minute
-	                                        'DS',   --interval day to second
-	                                        'HR',   --interval hour
-	                                        'HM',   --interval hour to minute
-	                                        'HS',   --interval hour to second
-	                                        'MI',   --interval minute
-	                                        'MS',   --interval minute to second
-	                                        'SC'    --interval second
-	                                        ) then
-	                		case	when "metric_id" = 2 then 'cast(count(distinct(' || case when "db_system" = 'Exasol' then '"' || c."exa_column_name" || '"' else c."column_name_delimited" end  || ')) as decimal(36,0))'
-	                		end
-	                when "metric_id" = 1 then 'cast(''' || case when "db_system" = 'Teradata' then '''' end || 'data type "' || c."data_type" ||'" not checked' || case when "db_system" = 'Teradata' then '''' end || ''' as varchar(40))'
-	        end     "metric_column_expression",
-	        
-	        case 	when c."ordinal_position" = 1 and "metric_id" = 0 then '"CNT"'
-	        		when "nullable" = 1 and "metric_id" = 1 then '"' || c."exa_column_name" || '_CNT_NUL"'
-	        		when c."data_type" in ( 'DA',   --DATE 
-	                                        'AT',   --TIME
-	                                        'TZ',   --TIME WITH TIME ZONE
-	                                        'TS',   --TIMESTAMP
-	                                        'SZ',   --TIMESTAMP WITH TIME ZONE
-	                                        
-	                                        'I',    --INTEGER
-	                                        'I1',   --BYTEINT
-	                                        'I2',   --SMALLINT
-	                                        'I8',   --BIGINT
-	                                        'F',    --DOUBLE PRECISION 
-	                                        'N',    --NUMBER
-	                                        'D'     --DECIMAL
-	                                        ) then
-	                		case 	when "metric_id" = 2 then '"' || c."exa_column_name" || '_MIN"'
-	                				when "metric_id" = 3 then '"' || c."exa_column_name" || '_MAX"'
-	                				when "metric_id" = 4 then '"' || c."exa_column_name" || '_CNT_DST"'
-	                				when "metric_id" = 5 then '"' || c."exa_column_name" || '_AVG"'
-	        				end 
-		 			when c."data_type" in ( 'PD',   --PERIOD(DATE)
-	                                        'PT',   --PERIOD(TIME(n))
-	                                        'PZ',   --PERIOD(TIME(n) WITH TIME ZONE)
-	                                        'PS',   --PERIOD(TIMESTAMP(n))
-	                                        'PM'    --PERIOD(TIMESTAMP(n) WITH TIME ZONE)
-	                                        ) then
-	                        case	when "metric_id" = 2 then '"' || c."exa_column_name" || '_BEGINNING_MIN"'
-	                        		when "metric_id" = 3 then '"' || c."exa_column_name" || '_BEGINNING_MAX"'
-	                        		when "metric_id" = 4 then '"' || c."exa_column_name" || '_END_MIN"'
-	                        		when "metric_id" = 5 then '"' || c."exa_column_name" || '_END_MAX"'
-	                        		when "metric_id" = 6 then '"' || c."exa_column_name" || '_CNT_DST"'
-	                		end
-	        		 when c."data_type" in ( 'CF',   --CHARACTER (fixed)
-	                                         'CV'    --CHARACTER (varying)
-	                                        ) then
-	                        case    when not(c."data_type" = 'CF' and "character_maximum_length" > 2000) then
-	                        				case 	when "metric_id" = 2 then '"' || c."exa_column_name" || '_MIN_LEN"'
-	                        						when "metric_id" = 3 then '"' || c."exa_column_name" || '_MAX_LEN"'
-	                						end
-	                        		when "metric_id" = 4 then '"' || c."exa_column_name" || '_CNT_DST"'
-	                        end
-	                when c."data_type" in ( 'YR',   --interval year
-	                                        'YM',   --interval year to month
-	                                        'MO',   --interval month
-	                                        'DY',   --interval day
-	                                        'DH',   --interval day to hour
-	                                        'DM',   --interval day to minute
-	                                        'DS',   --interval day to second
-	                                        'HR',   --interval hour
-	                                        'HM',   --interval hour to minute
-	                                        'HS',   --interval hour to second
-	                                        'MI',   --interval minute
-	                                        'MS',   --interval minute to second
-	                                        'SC'    --interval second
-	                                        ) then
-	        				case	when "metric_id" = 2 then '"' || c."exa_column_name" || '_CNT_DST"'
-	                		end
-	                when "metric_id" = 1 then 'not checked ''' || c."exa_column_name" || ''''
-	        end		"metric_column_name"
-	        
-	from vv_columns c 
-	left join vv_primary_keys_raw p
-	on c."exa_table_schema" = p."exa_table_schema"
-	and c."exa_table_name" = p."exa_table_name" 
-	and c."exa_column_name" = p."exa_column_name"
-	  , (select 'Teradata' "db_system" union all select 'Exasol' "db_system")
-	  , (select level -1 "metric_id" from dual connect by level <= 7)
-	where local."metric_column_expression" is not null
-	and 1 = ]] .. check_control .. [[
-	order by c."exa_table_name", c."ordinal_position" asc nulls first, "metric_id"
-)
-
-, vv_checks as (
-    select  'create or replace table "' || "exa_table_schema" || '"."' || "metric_table" || '" as ' ||  
-            listagg("check_sql",  ' union all ' ) within group(order by case when "db_system" = 'Exasol' then 1 else 2 end) || ';' as sql_text
-    from (
-            select  "db_system", "exa_table_schema", "exa_table_name", "metric_table",
-                    case when "db_system" = 'Teradata' then 'select * from (import from jdbc at ]] .. CONNECTION_NAME .. [[ statement '''  end ||
-                    'select cast(''' || case when "db_system" = 'Teradata' then '''' end || "db_system" || case when "db_system" = 'Teradata' then '''' end  || ''' as varchar(20)) as "DB_SYSTEM", ' || 
-                    listagg("metric_column_expression" || ' as ' || "metric_column_name", ', ') within group(order by "ordinal_position", "metric_id") || 
-                    ' from ' || 
-                    case when "db_system" = 'Exasol' then '"' || "exa_table_schema" || '"."' || "exa_table_name" || '"' else '"' || "table_schema" || '"."' || "table_name" || '"' end ||
-                    case when "db_system" = 'Teradata' then ''') ' end 
-                    as "check_sql"
-            
-            from vv_checks_expr
-            group by "db_system", "exa_table_schema", "exa_table_name", "table_schema", "table_name", "metric_table"
-    )
-    group by "exa_table_schema", "metric_table"
-    order by "exa_table_schema", "metric_table"
-)
-
-, vv_check_summary as (       
-    select 1 ord2, 'create or replace table "' || "metric_schema" || '"."' || "exa_table_schema" || '_MIG_CHK" (schema_name varchar(128), table_name varchar(128), column_name varchar(128), metric_schema varchar(128), metric_table varchar(128),  metric_name varchar(128), exasol_metric varchar(50), teradata_metric varchar(50), check_timestamp timestamp default current_timestamp);' as sql_text
-    from vv_checks_expr
-    group by "metric_schema", "exa_table_schema"
-    union all
-    select 2 ord2, 'insert into "' || "metric_schema" || '"."' || "exa_table_schema" || '_MIG_CHK" (schema_name, table_name, column_name, metric_schema, metric_table, metric_name, exasol_metric, teradata_metric) ' 
-            || listagg(sql_text, '') within group(order by case when "db_system" = 'Exasol' then 1 else 2 end) || ' '
-            || 'select e.schema_name, e.table_name, e.column_name, e.metric_schema, e.metric_table, e.metric_name, e.exasol_metric, t.teradata_metric from exasol e join teradata t on e.schema_name = t.schema_name and e.table_name = t.table_name and e.metric_name = t.metric_name; ' as sql_text
-    from (
-    
-            select  "db_system", "exa_table_schema", "exa_table_name", "metric_schema",
-                    case when "db_system" = 'Exasol' then 'with ' else ', ' end || "db_system" || ' as ( '
-                    || listagg(
-                    	'select ''' || "exa_table_schema" || ''' as schema_name, ''' || "exa_table_name" || ''' as table_name,  ''' || "exa_column_name" || ''' column_name, ''' || "metric_schema" || ''' metric_schema, ''' || "metric_table" || ''' metric_table, ''' || "metric_column_name" || ''' as metric_name, to_char(' || "metric_column_name" || ') as ' || "db_system" || '_metric from "' || "exa_table_schema" || '"."' || "metric_table" || '" where DB_SYSTEM = ''' || "db_system" || '''', ' union all ')
-                    || ' )'  as sql_text
-            from vv_checks_expr
-            group by "db_system", "exa_table_schema", "exa_table_name", "metric_schema", "metric_table"
-            order by case when "db_system" = 'Exasol' then 1 else 2 end
-    
-    )
-    group by "exa_table_schema", "exa_table_name", "metric_schema"
-    union all
-    select 3 ord2, '--select * from "' || "metric_schema" || '"."' || "exa_table_schema" || '_MIG_CHK" where exasol_metric != teradata_metric;' as sql_text
-    from vv_checks_expr
-    group by "metric_schema", "exa_table_schema"
-)
-
+,vv_imports as (
+	select 'IMPORT INTO "' || "exa_schema" || '"."' || "exa_table" || '" FROM JDBC AT ]]..CONNECTION_NAME..[[ STATEMENT ' || '''' || 'select ' || group_concat(case when ]]..unsup..[[ then null else (]]..src..[[) end order by "ordinal_position" separator ', ') || ' from "' || "schema_name" || '"."' || "table_name" || '"' || '''' || ';' as sql_text
+	from vv_columns group by "exa_schema","exa_table","schema_name","table_name"
+)]]..dist_cte..comments_cte..views_cte..part_cte..check_cte..[[
 select sql_text from (
-	select 1 ord, 1 ord2, sql_text from vv_create_schemas 
-	UNION ALL
-	select 2 ord, 1 ord2, sql_text from vv_create_tables
-	UNION ALL
-	select 3 ord, 1 ord2, sql_text from vv_imports
-	UNION ALL
-	select 4 ord, 1 ord2, sql_text from vv_checks
-	UNION ALL
-	select 5 ord, ord2, sql_text from vv_check_summary
-	UNION ALL
-	select 6 ord, 1 ord2, sql_text from vv_primary_keys
-	UNION ALL
-	select 7 ord, 1 ord2, sql_text from vv_foreign_keys
-)
-order by ord, ord2
+	select 0 ord, sql_text SQL_TEXT from vv_unsupported
+	UNION ALL select 1, cast('-- ### SCHEMAS ###' as varchar(2000000))
+	UNION ALL select 2, sql_text from vv_create_schemas
+	UNION ALL select 3, cast('-- ### TABLES (incl. PRIMARY KEY, created DISABLED) ###' as varchar(2000000))
+	UNION ALL select 4, sql_text from vv_create_tables where sql_text not like '%();%'
+	UNION ALL select 5, cast('-- ### PRIMARY KEYS (DISABLED) ###' as varchar(2000000))
+	UNION ALL select 6, sql_text from vv_pk
+	UNION ALL select 7, cast('-- ### FOREIGN KEYS (DISABLED) ###' as varchar(2000000))
+	UNION ALL select 8, sql_text from vv_fk]]..dist_union..comments_union..[[
+	UNION ALL select 50, cast('-- ### IMPORTS ###' as varchar(2000000))
+	UNION ALL select 51, sql_text from vv_imports
+	UNION ALL select 60, cast('-- ### CONSTRAINT STATE - run AFTER the data load (keys created DISABLED for a fast, order-independent load) ###' as varchar(2000000))
+	UNION ALL select 61, 'ALTER TABLE "' || ]]..sname_e..[[ || '"."' || ]]..U('"table_name"')..[[ || '" MODIFY CONSTRAINT "' || ]]..U('"table_name"')..[[ || '_PK" ]]..sw..[[;]]..sc..[[' from vv_pk_raw group by "schema_name","table_name"
+	UNION ALL select 62, 'ALTER TABLE "' || ]]..sname_e..[[ || '"."' || ]]..U('"table_name"')..[[ || '" MODIFY CONSTRAINT "' || ]]..U(fkname)..[[ || '" ]]..sw..[[;]]..sc..[[' from vv_fk_raw group by "schema_name","table_name","fk_name","ref_table"]]..views_union..part_union..check_union..[[
+) order by ord
 ]],{})
 
---output(res.statement_text)
+if not suc then error('"'..res.error_message..'" caught while executing: "'..res.statement_text..'"') end
 return(res)
 /
-;
 
--- !!! Important: Please upload the Teradata JDBC-Driver via EXAOperation (Webinterface) !!!
--- !!! you can find an example here: https://docs.exasol.com/db/latest/loading_data/connect_sources/teradata.htm !!!
+-- ===================================================================================================
+-- CONNECTION SETUP
+-- ===================================================================================================
+-- Prerequisites
+--   * The Teradata database must be reachable from this Exasol database.
+--   * The credentials used in the connection must be valid.
+--   * Use the latest Teradata JDBC driver (terajdbc).
+--
+-- JDBC driver (install once in BucketFS - the driver and its settings.cfg)
+--   * terajdbc 20.00.00.58 or higher
+--       https://mvnrepository.com/artifact/com.teradata.jdbc/terajdbc
+--   * Driver setup guide:
+--       https://docs.exasol.com/db/latest/loading_data/connect_sources/teradata.htm
+--   * Teradata to Exasol Migration Guide:
+--       https://docs.exasol.com/db/latest/migration_guides/teradata/teradata_exasol.htm
+--
+-- Create a connection to the Teradata database (adjust host, database name and credentials),
+-- then run the accompanying test query.
+-- CHARSET=UTF16 is the recommended setting for Unicode data.
 
--- Create a connection to the Teradata database
-create or replace connection teradata_db to 'jdbc:teradata://192.168.56.103/CHARSET=UTF8' user 'dbc' identified by 'dbc';
--- Depending on your Teradata installation, CHARSET=UTF16 instead of CHARSET=UTF8 could be the better choice - otherwise you get errors like this one:
--- [42636] ETL-3003: [Column=5 Row=0] [String data right truncation. String length exceeds limit of 2 characters] (Session: 1611884537138472475)
--- In that case, configure your connection like this:
--- create connection teradata_db to 'jdbc:teradata://some.teradata.host.internal/CHARSET=UTF16' user 'db_username' identified by 'exasolRocks!';
+CREATE OR REPLACE CONNECTION TERADATA_JDBC
+    TO 'jdbc:teradata://teradata_host/CHARSET=UTF16,DBS_PORT=1025,DATABASE=my_teradata_db'
+    USER 'dbc' IDENTIFIED BY 'dbc';
+SELECT * FROM (IMPORT FROM JDBC AT TERADATA_JDBC STATEMENT 'SELECT ''Connection works''');
 
-
-
-IMPORT FROM JDBC AT teradata_db
-STATEMENT 'SELECT ''connection to teradata works''';
-
-
--- Finally start the import process
-execute script database_migration.TERADATA_TO_EXASOL(
-    'TERADATA_DB'	-- name of your database connection
-    ,true        	-- case sensitivity handling for identifiers -> false: handle them case sensitiv / true: handle them case insensitiv --> recommended: true
-    ,'%'			-- schema filter --> '%' to load all schemas (except system schemas). Examples: 'CORE' (to migrate the 'CORE' schema), 'MART_%' (to migrate all schemas whose name starts with 'MART_')
-    ,'%'			-- table filter --> '%' to load all tables in the schemas considered. Examples: 'H_EMPLOYEE' (to migrate all the tables whose name is 'H_EMPLOYEE'), 'H_%' (to migrate all tables whose name starts with 'H_') 
-    ,false			-- boolean flag to create checking tables. TRUE -> create/load checking tables / FALSE -> do not create/load checking tables. -> default = FALSE. 
-    				-- When the option is used, a checking table will be created and loaded for each individual table being migrated. 
-    				-- The checking table will be created in the same schema with the same name adding '_MIG_CHK' as a suffix. 
-    				-- A summary table for all the checking tables of a specific schema will be created in the database migration schema with the name of the migrated schema adding '_MIG_CHK' as a suffix.
-) 
---with output
-;
+-- ===================================================================================================
+-- GENERATE THE MIGRATION STATEMENTS (recommended defaults shown)
+-- ===================================================================================================
+EXECUTE SCRIPT DATABASE_MIGRATION.TERADATA_TO_EXASOL(
+    'TERADATA_JDBC',    -- CONNECTION_NAME: name of the JDBC connection created at the bottom of the script
+    true,               -- IDENTIFIER_CASE_INSENSITIVE: true (recommended) => fold ALL identifiers to UPPER so Exasol queries never need quotes (Teradata identifiers are case-insensitive, so nothing is lost); false => keep verbatim/quoted (preserves lower/MixedCase, but every query must quote them)
+    '%',                -- SCHEMA_FILTER: source database(s)/schema(s): 'CORE', 'MART_%', '%' (all; system databases are always excluded)
+    '%',                -- TABLE_FILTER: table(s)/view(s): 'H_EMPLOYEE', 'H_%', '%' (all)
+    '',                 -- TARGET_SCHEMA: Exasol target schema; '' (recommended) => use the source database name
+    'FORCE_DISABLE',    -- CONSTRAINT_STATE: 'FORCE_DISABLE' (recommended; PK/FK kept as metadata only - faster, order-independent imports, still used by BI tools), 'SET_AS_SOURCE' or 'FORCE_ENABLE' (all keys enabled = Exasol re-validates the data)
+    true,               -- GENERATE_COMMENTS: true (recommended) => migrate Teradata comments as COMMENT ON; false => skip
+    true,               -- GENERATE_VIEWS: true => emit source views as a commented manual-review section; false => skip
+    true,               -- GENERATE_DISTRIBUTION_BY: true => map the Teradata Primary Index to an Exasol DISTRIBUTE BY; false => skip
+    true,               -- GENERATE_PARTITION_BY: true => add a best-effort PARTITION BY from the Teradata partitioning column (single-column RANGE_N) inside the CREATE TABLE; complex PPI (CASE_N / multi-level / expression) is listed as a commented manual-review note; false => skip
+    'BASE64',           -- BINARY_HANDLING: 'BASE64' (recommended; BYTE/VARBYTE/BLOB migrated losslessly as base64 text - Exasol has no general binary type) or 'SKIP' (load NULL)
+    'CAP',              -- DECIMAL_OVERFLOW: 'CAP' (recommended; DECIMAL(36,s), import fails for values needing > 36 digits) or 'DOUBLE' (loads with ~15 significant digits)
+    false,              -- TRUNCATE_LONG_STRINGS: false (recommended) => import fails on a value > 2,000,000 chars; true => cut such values to 2,000,000 chars and import
+    'INTERVAL',         -- INTERVAL_HANDLING: 'INTERVAL' (recommended; native Exasol INTERVAL, computable) or 'VARCHAR' (interval as text)
+    false               -- CHECK_MIGRATION: false (recommended default) => skip; true => also build per-table "<table>_MIG_CHK" metric tables and a "<schema>_MIG_CHK" summary that compares source vs. target (run after the IMPORTs)
+);

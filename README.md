@@ -512,48 +512,102 @@ See the header of [sqlserver_to_exasol.sql](sqlserver_to_exasol.sql) for more in
 
 ### Teradata
 
-The first thing you need to do is add the Teradata JDBC driver to Exasol. The driver can be downloaded from
-[Teradata's Download site](https://downloads.teradata.com/download/connectivity/jdbc-driver). You need to register
-first, it's free. Make sure that you download the right version of the JDBC driver, matching the version of the
-Teradata database.
+The [teradata_to_exasol.sql](teradata_to_exasol.sql) script generates the statements to migrate a Teradata
+database (**Teradata Vantage 20**, backward compatible with earlier Teradata versions) to Exasol v8. It runs on
+the **target** Exasol database, reads the **source** metadata through a JDBC connection and **returns** the
+statements to recreate and load the source. It changes nothing itself — you review the output and run it, in the
+order returned.
 
-The downloaded package contains the file:
-* `terajdbc4.jar` contains the actual Java classes of the driver
+**Step by step**
+* **Install** the script on the **target** database (run [teradata_to_exasol.sql](teradata_to_exasol.sql) once;
+  it creates `DATABASE_MIGRATION.TERADATA_TO_EXASOL`).
+* **Install the JDBC driver** in BucketFS: use the Teradata **`terajdbc`** driver, version **20.00.00.58 or
+  higher** ([Maven](https://mvnrepository.com/artifact/com.teradata.jdbc/terajdbc)). See
+  [Load data from Teradata](https://docs.exasol.com/db/latest/loading_data/connect_sources/teradata.htm) and the
+  [Teradata → Exasol migration guide](https://docs.exasol.com/db/latest/migration_guides/teradata/teradata_exasol.htm).
+* **Create a connection** on the target pointing at the source database. A ready-to-edit `CREATE CONNECTION`
+  example and a connection test are at the bottom of the script. Use the JDBC URL parameter **`DBS_PORT=1025`**
+  (the Teradata default) and **`CHARSET=UTF16`** (recommended for Unicode data; `CHARSET=UTF8` also works with
+  this script because character columns are sized correctly); a default `DATABASE=` can also be set there.
+* **Adapt the `EXECUTE SCRIPT` parameters** to your scenario and run it (a few seconds, depending on the number
+  of tables).
+* **Copy the result set** into another session and execute the statements **in the output order** (the
+  CONSTRAINT STATE section, and — if enabled — the DATA VALIDATION section, run after the IMPORTs).
 
-This file needs to be uploaded when you add the Teradata JDBC driver for Exasol. In database versions prior to v8, to do this, log into
-EXAoperation, then select _Software_, then the _JDBC Drivers_ tab.
-
-Click `Add` then specify the following details:
-* Driver Name: `Teradata` (or something similar)
-* Main Class: `com.teradata.jdbc.TeraDriver`
-* Prefix: `jdbc:teradata:`
-* Comment: `Version 15.10` (or something similar)
-
-After clicking `Apply`, you will see the newly added driver's details on the top section of the driver list.
-Select the Teradata driver (the radio button in the first column) and then locate the `terajdbc4.jar` and upload it.
-
-For Exasol v8 or newer follow [Load data from Teradata](https://docs.exasol.com/db/latest/loading_data/connect_sources/teradata.htm).
-
-Next step is to test the connectivity. First, create a connection to the remote Teradata database:
-```SQL
-    CREATE OR REPLACE CONNECTION <name_of_connection>
-        TO 'jdbc:teradata://<host_name_or_ip_address>'
-        USER '<td_username>'
-        IDENTIFIED BY '<td_password>';
+```sql
+EXECUTE SCRIPT DATABASE_MIGRATION.TERADATA_TO_EXASOL(
+    'TERADATA_JDBC',    -- CONNECTION_NAME: name of the JDBC connection created at the bottom of the script
+    true,               -- IDENTIFIER_CASE_INSENSITIVE: true (recommended) => fold ALL identifiers to UPPER so Exasol queries never need quotes (Teradata identifiers are case-insensitive, so nothing is lost); false => keep verbatim/quoted (preserves lower/MixedCase, but every query must quote them)
+    '%',                -- SCHEMA_FILTER: source database(s)/schema(s): 'CORE', 'MART_%', '%' (all; system databases are always excluded)
+    '%',                -- TABLE_FILTER: table(s)/view(s): 'H_EMPLOYEE', 'H_%', '%' (all)
+    '',                 -- TARGET_SCHEMA: Exasol target schema; '' (recommended) => use the source database name
+    'FORCE_DISABLE',    -- CONSTRAINT_STATE: 'FORCE_DISABLE' (recommended; PK/FK kept as metadata only - faster, order-independent imports, still used by BI tools), 'SET_AS_SOURCE' or 'FORCE_ENABLE' (all keys enabled = Exasol re-validates the data)
+    true,               -- GENERATE_COMMENTS: true (recommended) => migrate Teradata comments as COMMENT ON; false => skip
+    true,               -- GENERATE_VIEWS: true => emit source views as a commented manual-review section; false => skip
+    true,               -- GENERATE_DISTRIBUTION_BY: true => map the Teradata Primary Index to an Exasol DISTRIBUTE BY; false => skip
+    true,               -- GENERATE_PARTITION_BY: true => add a best-effort PARTITION BY from the Teradata partitioning column (single-column RANGE_N); complex PPI (CASE_N / multi-level / expression) is listed as a commented manual-review note; false => skip
+    'BASE64',           -- BINARY_HANDLING: 'BASE64' (recommended; BYTE/VARBYTE/BLOB migrated losslessly as base64 text - Exasol has no general binary type) or 'SKIP' (load NULL)
+    'CAP',              -- DECIMAL_OVERFLOW: 'CAP' (recommended; DECIMAL(36,s), import fails for values needing > 36 digits) or 'DOUBLE' (loads with ~15 significant digits)
+    false,              -- TRUNCATE_LONG_STRINGS: false (recommended) => import fails on a value > 2,000,000 chars; true => cut such values to 2,000,000 chars and import
+    'INTERVAL',         -- INTERVAL_HANDLING: 'INTERVAL' (recommended; native Exasol INTERVAL, computable) or 'VARCHAR' (interval as text)
+    false               -- CHECK_MIGRATION: false (recommended default) => skip; true => also build per-table "<table>_MIG_CHK" metric tables and a "<schema>_MIG_CHK" summary that compares source vs. target (run after the IMPORTs)
+);
 ```
-You need to have `CREATE CONNECTION` privilege granted to the user used to do this.
-Additional JDBC connection parameters (such as `CHARSET` might need to be specified in the connection string/URL); see information
-on these [here](http://developer.teradata.com/doc/connectivity/jdbc/reference/current/frameset.html).
 
-Now, test the connectivity with a simple query:
-```SQL
-    SELECT *
-    FROM   (
-               IMPORT FROM JDBC AT <name_of_connection>
-               STATEMENT 'SELECT 1'
-           );
-```
-For the actual data-migration, see script [teradata_to_exasol.sql](teradata_to_exasol.sql)
+This script generates, in this order:
+* a prominent **`-- !!! UNSUPPORTED TYPE`** warning for any column the target cannot represent
+* `CREATE SCHEMA` and `CREATE TABLE` — every data type mapped to a sensible Exasol type, plus `NOT NULL`,
+  column `DEFAULT`s and the `PRIMARY KEY` (created disabled)
+* `ALTER TABLE … ADD … FOREIGN KEY` (created disabled; composite keys supported; Teradata's unnamed foreign
+  keys get a deterministic generated name; keys to tables outside the migration scope are skipped)
+* with `GENERATE_DISTRIBUTION_BY`: `ALTER TABLE … DISTRIBUTE BY` from the Teradata Primary Index
+* with `GENERATE_PARTITION_BY`: `ALTER TABLE … PARTITION BY` from the Teradata partitioning column (best-effort;
+  complex PPI as a commented review note — see below)
+* table & column `COMMENT`s (with `GENERATE_COMMENTS`)
+* `IMPORT` of the data (typed transfer — differing source/target NLS does not affect the data)
+* a **CONSTRAINT STATE** section to run after the IMPORTs (keys are created disabled for a fast,
+  order-independent load; this section then sets them per `CONSTRAINT_STATE`)
+* with `GENERATE_VIEWS`: the source views as a **commented** manual-review section (Teradata SQL is not
+  auto-translated)
+* with `CHECK_MIGRATION`: a **DATA VALIDATION** section (see below)
+
+**Data types & limitations.** Most types map exactly. Integers map to `DECIMAL(p,0)`, `NUMBER/DECIMAL(p,s)` to
+`DECIMAL(p,s)`, `FLOAT` to `DOUBLE`. Character columns are mapped to **`UTF8`** (lossless for Unicode/multibyte
+data); `CHAR > 2000` becomes `VARCHAR`. `DATE` maps exactly; `TIMESTAMP(n)` keeps full fractional precision;
+**`TIMESTAMP(n) WITH TIME ZONE → TIMESTAMP(n) WITH LOCAL TIME ZONE`** (stored as the correct UTC instant);
+`TIME`/`TIME WITH TIME ZONE → VARCHAR` (lossless text, offset kept). **`INTERVAL`** maps to a native Exasol
+`INTERVAL` (or `VARCHAR`, see `INTERVAL_HANDLING`). **`PERIOD(x)` becomes two columns** `x_BEGINNING` / `x_END`.
+**`ST_GEOMETRY`/`MBR`/`MBB` → `GEOMETRY`** (WKT); `CLOB`/`JSON`/`XML`/`DATASET` and other UDTs → `VARCHAR`.
+**Binary** (`BYTE`/`VARBYTE`/`BLOB`) is migrated **losslessly as base64 text** (`BINARY_HANDLING='BASE64'`; Exasol
+has no general binary column type — the bytes are preserved and can be decoded downstream); values larger than
+~48000 bytes exceed the Teradata transfer limit and are loaded as `NULL`. The IMPORT **fails loudly rather than
+corrupting data** when a value needs more than 36 decimal digits (`DECIMAL_OVERFLOW='CAP'`) or exceeds 2,000,000
+characters (unless `TRUNCATE_LONG_STRINGS=true`). **Always excluded** (so only real user data appears): all
+Teradata **system databases** (`DBC`, `Sys*`, `TD_*`, `TDaaS_*`, `SYSLIB`, `SYSSPATIAL`, `val`, … — current as
+of Vantage 20). Not migrated (out of scope): secondary/join/hash indexes, `UNIQUE`/`CHECK` constraints
+(unsupported by Exasol), macros/procedures/functions, users/roles/rights. See the script header for the full
+mapping table.
+
+**Distribution & partitioning.** The Teradata **Primary Index** is mapped to an Exasol `DISTRIBUTE BY`
+(`GENERATE_DISTRIBUTION_BY`). For partitioning (`GENERATE_PARTITION_BY`), a **single-column `RANGE_N`** partition
+is mapped **best-effort** to an Exasol `PARTITION BY` on that column (Exasol partitions by column value, a
+recommended pattern for e.g. a date column). Teradata partitioning that has no single-column Exasol equivalent —
+`CASE_N`, multi-level, or an expression instead of a plain column — is emitted as a **commented manual-review
+note** rather than applied, so nothing is silently mismapped.
+
+**Migration check (`CHECK_MIGRATION=true`).** For every migrated table the script builds a `"<table>_MIG_CHK"`
+table holding standardized, cross-database-comparable metrics (row count, per-column NULL counts, distinct
+counts, numeric MIN/MAX/SUM, character length MIN/MAX) computed on **both** Teradata and Exasol, plus a
+`DATABASE_MIGRATION."<schema>_MIG_CHK"` summary that lists every metric side by side with an **`OK` / `DEVIATION`**
+status. Review deviations with
+`SELECT * FROM DATABASE_MIGRATION."<schema>_MIG_CHK" WHERE "STATUS" = 'DEVIATION';`.
+
+**Privileges/visibility:** the source metadata is read **through the connection's user**, so the script sees —
+and generates statements for — only the objects that user may access. **To migrate everything, use a user with
+sufficient privileges on the source (e.g. `DBC` or a user with the equivalent rights on `DBC.*V` views).**
+
+See the header of [teradata_to_exasol.sql](teradata_to_exasol.sql) for more information!
+
 
 ### Vectorwise
 
