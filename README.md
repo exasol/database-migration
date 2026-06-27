@@ -496,9 +496,12 @@ Character columns are mapped to **`UTF8`** (lossless for any code page). Most ty
 `time → VARCHAR`, `rowversion/binary/varbinary/image → HASHTYPE/hex`, `xml/json/vector/sql_variant → VARCHAR`,
 `geometry/geography → GEOMETRY` (WKT, SRID not kept), `char/nchar > 2000 → VARCHAR`. The IMPORT **fails
 loudly rather than corrupting data** when a value needs more than 36 decimal digits (`DECIMAL_OVERFLOW='CAP'`)
-or exceeds 2,000,000 characters (unless `TRUNCATE_LONG_STRINGS=true`). Not migrated (out of scope): indexes,
-`UNIQUE`/`CHECK` constraints, functions/procedures/triggers, users/roles/permissions. See the script header
-for the full mapping table.
+or exceeds 2,000,000 characters (unless `TRUNCATE_LONG_STRINGS=true`). **Always excluded** (so only real user
+data/structures appear): the built-in **system schemas** (`sys`, `INFORMATION_SCHEMA`, `guest`, the fixed
+`db_*` role schemas), **Microsoft-shipped objects** (`is_ms_shipped`, e.g. `sysdiagrams`, `dtproperties`,
+`spt_*`, replication/CDC) and **external/"virtual" tables** (`is_external`); the user's own schemas (incl.
+`dbo`) are kept. Not migrated (out of scope): indexes, `UNIQUE`/`CHECK` constraints,
+functions/procedures/triggers, users/roles/permissions. See the script header for the full mapping table.
 
 **Privileges/visibility:** the source metadata is read **through the connection's user**, so the script sees
 — and generates statements for — only the objects that user may access. **To migrate everything, use a user
