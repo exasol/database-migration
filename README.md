@@ -10,7 +10,6 @@
 1. [Overview](#overview)
 2. [Migration source:](#migration-source)
     * [Azure Blob Storage](#azure-blob-storage)
-	* [Azure Sql](#azure-sql)
     * [CSV](#csv)
     * [DB2](#db2)
     * [Exasol](#exasol)
@@ -48,11 +47,6 @@ If you want to optimize existing scripts or create new scripts for additional sy
 
 The script [azure_blob_storage_to_exasol.sql](azure_blob_storage_to_exasol.sql) looks different than the other import scripts. It's made to load data from Azure Blob Storage in parallel and needs some preparation before you can use it. See [our documentation](https://docs.exasol.com/loading_data/loading_data_from_amazon_s3_in_parallel.htm) for detailed instructions.
 If you just want to import a single file, see 'Import from [CSV](#csv)'.
-
-### Azure SQL
-
-Azure SQL is essentially Microsoft SQL Server. You need to specify a DB you are working on in your connection-string.
-See script [azure_sql_to_exasol.sql](azure_sql_to_exasol.sql)
 
 
 ### CSV
@@ -438,7 +432,80 @@ For the actual data-migration, see script [snowflake_to_exasol.sql](snowflake_to
 
 ### SQL Server
 
-See script [sqlserver_to_exasol.sql](sqlserver_to_exasol.sql)
+The [sqlserver_to_exasol.sql](sqlserver_to_exasol.sql) script generates the statements to migrate a Microsoft
+SQL Server **or Azure SQL** database (SQL Server 2016–2025, including the new `json` and `vector` types) to
+Exasol v8. It runs on the **target** Exasol database, reads the **source** metadata through a JDBC connection
+and **returns** the statements to recreate and load the source. It changes nothing itself — you review the
+output and run it, in the order returned. *(This script replaces the former `azure_sql_to_exasol.sql`.)*
+
+**Step by step**
+* **Install** the script on the **target** database (run [sqlserver_to_exasol.sql](sqlserver_to_exasol.sql)
+  once; it creates `DATABASE_MIGRATION.SQLSERVER_TO_EXASOL`).
+* **Install the JDBC driver** in BucketFS: always use the latest Microsoft **`mssql-jdbc`** driver
+  ([Maven](https://mvnrepository.com/artifact/com.microsoft.sqlserver/mssql-jdbc)). **Do not use the obsolete
+  jTDS driver** — it is unstable with current SQL Server versions and with Azure. For Azure
+  `authentication=ActiveDirectoryPassword`, also install
+  [`azure-identity`](https://mvnrepository.com/artifact/com.azure/azure-identity) (with dependencies). See
+  [Load data from SQL Server](https://docs.exasol.com/db/latest/loading_data/connect_sources/sql_server.htm).
+* **Create a connection** on the target pointing at the source database. Ready-to-edit `CREATE CONNECTION`
+  examples and a connection test (on-prem, Azure, and Azure Entra ID / `ActiveDirectoryPassword`) are at the
+  bottom of the script.
+* **Adapt the `EXECUTE SCRIPT` parameters** to your scenario and run it (a few seconds, depending on the
+  number of tables).
+* **Copy the result set** into another session and execute the statements **in the output order** (the
+  CONSTRAINT STATE section runs after the IMPORTs).
+
+```sql
+EXECUTE SCRIPT DATABASE_MIGRATION.SQLSERVER_TO_EXASOL(
+    'SQLSERVER_JDBC',   -- CONNECTION_NAME: name of the JDBC connection created at the bottom of the script
+    false,              -- DB2SCHEMA: false (recommended) => "schema"."table"; true => "database"."schema_table" (migrate several databases at once)
+    'mydemo',           -- DB_FILTER: SQL Server database(s): 'mydemo', 'ma%', 'db1, db2', '%' (all)
+    '%',                -- SCHEMA_FILTER: schema(s): 'dbo', 'my%', 'schema1, schema2', '%' (all)
+    '',                 -- TARGET_SCHEMA: Exasol target schema; '' (recommended) => use the source schema (or database) name
+    '%',                -- TABLE_FILTER: table(s)/view(s): 'my_table', 'my%', 't1, t2', '%' (all)
+    true,               -- IDENTIFIER_CASE_INSENSITIVE: true (recommended for SQL Server) => fold ALL identifiers to UPPER so Exasol queries never need quotes (SQL Server identifiers are case-insensitive, so nothing is lost); false => keep verbatim/quoted (preserves lower/MixedCase, but every query must quote them)
+    'FORCE_DISABLE',    -- CONSTRAINT_STATE: 'FORCE_DISABLE' (recommended; PK/FK kept as metadata only - faster, order-independent imports, still used by BI tools), 'SET_AS_SOURCE' (each key ends in its SQL Server state) or 'FORCE_ENABLE' (all keys enabled = Exasol re-validates the data)
+    true,               -- GENERATE_COMMENTS: true (recommended) => migrate MS_Description as COMMENT ON; false => skip
+    true,               -- GENERATE_VIEWS: true => emit source views as a commented manual-review section; false => skip
+    true,               -- GENERATE_PARTITION_BY: true => add a best-effort PARTITION BY (from the SQL Server partitioning column) inside the CREATE TABLE; false => skip
+    'HASHTYPE',         -- BINARY_HANDLING: 'HASHTYPE' (recommended; fixed binary -> HASHTYPE, variable -> hex), 'HEX' (always hex VARCHAR) or 'SKIP' (load NULL)
+    'CAP',              -- DECIMAL_OVERFLOW: 'CAP' (recommended; DECIMAL(36,s), import fails for values needing > 36 digits) or 'DOUBLE' (loads with ~15 significant digits)
+    false               -- TRUNCATE_LONG_STRINGS: false (recommended) => import fails on a value > 2,000,000 chars; true => cut such values to 2,000,000 chars and import
+);
+```
+
+This script generates, in this order:
+* a prominent **`-- !!! UNSUPPORTED TYPE`** warning for any column the target cannot represent (see below)
+* `CREATE SCHEMA` and `CREATE TABLE` — every data type mapped to a sensible Exasol type, plus `NOT NULL`,
+  `IDENTITY`, column `DEFAULT`s, the `PRIMARY KEY` (created disabled), and — with `GENERATE_PARTITION_BY` — a
+  best-effort `PARTITION BY`
+* `ALTER TABLE … ADD … FOREIGN KEY` (created disabled; composite keys supported)
+* table & column `COMMENT`s (from `MS_Description`, with `GENERATE_COMMENTS`)
+* `IMPORT` of the data (typed transfer — differing source/target NLS does not affect the data; `datetime2`
+  fractional precision and `datetimeoffset` as a UTC instant are preserved)
+* a **CONSTRAINT STATE** section to run after the IMPORTs (keys are created disabled for a fast,
+  order-independent load; this section then sets them per `CONSTRAINT_STATE`)
+* with `GENERATE_VIEWS`: the source views as a **commented** manual-review section (T-SQL is not
+  auto-translated)
+
+**Data types & limitations.** Mapping is by base system type, so **alias user-defined types resolve to their
+base type automatically**; **CLR/assembly UDTs and unknown types are skipped with a prominent warning**.
+Character columns are mapped to **`UTF8`** (lossless for any code page). Most types map exactly
+(`datetime2(n)` keeps full precision); a few map with a small, documented difference — `float/real → DOUBLE`,
+`smalldatetime → TIMESTAMP(0)`, `datetimeoffset → TIMESTAMP(n) WITH LOCAL TIME ZONE` (UTC instant),
+`time → VARCHAR`, `rowversion/binary/varbinary/image → HASHTYPE/hex`, `xml/json/vector/sql_variant → VARCHAR`,
+`geometry/geography → GEOMETRY` (WKT, SRID not kept), `char/nchar > 2000 → VARCHAR`. The IMPORT **fails
+loudly rather than corrupting data** when a value needs more than 36 decimal digits (`DECIMAL_OVERFLOW='CAP'`)
+or exceeds 2,000,000 characters (unless `TRUNCATE_LONG_STRINGS=true`). Not migrated (out of scope): indexes,
+`UNIQUE`/`CHECK` constraints, functions/procedures/triggers, users/roles/permissions. See the script header
+for the full mapping table.
+
+**Privileges/visibility:** the source metadata is read **through the connection's user**, so the script sees
+— and generates statements for — only the objects that user may access. **To migrate everything, use a user
+with sufficient privileges on the source (e.g. `db_owner` / `VIEW DEFINITION`).**
+
+See the header of [sqlserver_to_exasol.sql](sqlserver_to_exasol.sql) for more information!
+
 
 ### Teradata
 
