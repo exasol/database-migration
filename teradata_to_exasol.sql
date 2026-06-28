@@ -24,9 +24,12 @@ create schema if not exists database_migration;
       kept as text); TIMESTAMP(n) WITH TIME ZONE -> TIMESTAMP(n) WITH LOCAL TIME ZONE (value converted to the
       UTC instant); BYTE/VARBYTE/BLOB -> faithful base64 text in VARCHAR (BINARY_HANDLING; Exasol has no
       general binary type - the bytes are preserved losslessly as base64 and can be decoded downstream);
-      JSON/XML/DATASET/most UDTs -> VARCHAR;
-      ST_GEOMETRY (and ST_* / MBR / MBB) -> GEOMETRY (WKT); INTERVAL -> native Exasol INTERVAL or VARCHAR
-      (INTERVAL_HANDLING); PERIOD(x) -> two columns x_BEGINNING / x_END.
+      JSON/XML/DATASET -> VARCHAR; ST_GEOMETRY (and ST_* / MBR / MBB) -> GEOMETRY (WKT).
+      User-defined types: a DISTINCT UDT is resolved to its base predefined type (via DBC.UDTCast) and mapped
+      like that base - numeric -> DECIMAL/DOUBLE, character -> CHAR/VARCHAR, DATE -> DATE, TIMESTAMP -> TIMESTAMP,
+      byte -> base64, etc., transferred by casting to the base type. Only STRUCTURED / ARRAY UDTs (no single base
+      type) are flagged UNSUPPORTED (the column is skipped with a prominent warning, not migrated).
+      INTERVAL -> native Exasol INTERVAL or VARCHAR (INTERVAL_HANDLING); PERIOD(x) -> two columns x_BEGINNING / x_END.
       Hard limits (the IMPORT fails loudly rather than corrupting data): a value > 2,000,000 characters
       (unless TRUNCATE_LONG_STRINGS=true); DECIMAL/NUMBER values needing > 36 digits under DECIMAL_OVERFLOW='CAP'.
 
@@ -108,7 +111,11 @@ sys_db = [[''All'',''Crashdumps'',''DBC'',''dbcmngr'',''Default'',''External_AP'
 -- Remote (Teradata DBC) metadata queries. Inner literals are quote-doubled (embedded in statement '...').
 -- char_len: characters (UNICODE ColumnLength is bytes = 2x chars). frac: DecimalFractionalDigits.
 -------------------------------------------------------------------------------------------------------
-columns_q = [[select trim(c.DatabaseName) as schema_name, trim(c.TableName) as table_name, c.ColumnName as column_name, c.ColumnId as ordinal_position, trim(c.ColumnType) as data_type, trim(c.ColumnUDTName) as udt_name, c.DecimalTotalDigits as num_prec, c.DecimalFractionalDigits as num_scale, c.ColumnLength as col_len, c.CharType as char_type, case when c.CharType = 2 then c.ColumnLength/2 else c.ColumnLength end as char_len, case when c.Nullable = ''Y'' then 1 else 0 end as nullable, trim(c.DefaultValue) as default_value, trim(c.IdColType) as id_col_type, trim(c.CommentString) as col_comment from DBC.ColumnsV c join DBC.TablesV t on c.DatabaseName = t.DatabaseName and c.TableName = t.TableName and t.TableKind in (''T'',''O'') where c.DatabaseName not in (]]..sys_db..[[) and c.DatabaseName like '']]..SCHEMA_FILTER..[['' and c.TableName like '']]..TABLE_FILTER..[['']]
+-- A DISTINCT UDT (ColumnType 'UT', UDTInfoV.TypeKind 'D') is resolved to its base predefined type via
+-- DBC.UDTCast: PDTCode is the base type code (same codes as ColumnType), with PDTTotalDigits/PDTImpliedPoint
+-- (numeric precision/scale, also time/timestamp fractional precision), PDTMaxLength/PDTCharType (char/byte).
+-- The "is_distinct" flag drives a cast-to-base in col_q (a distinct UDT cannot be read raw or cast to varchar).
+columns_q = [[select trim(c.DatabaseName) as schema_name, trim(c.TableName) as table_name, c.ColumnName as column_name, c.ColumnId as ordinal_position, coalesce(trim(b.pdt_code), trim(c.ColumnType)) as data_type, trim(c.ColumnUDTName) as udt_name, coalesce(b.pdt_prec, c.DecimalTotalDigits) as num_prec, coalesce(b.pdt_scale, c.DecimalFractionalDigits) as num_scale, coalesce(b.pdt_len, c.ColumnLength) as col_len, coalesce(b.pdt_chartype, c.CharType) as char_type, case when coalesce(b.pdt_chartype, c.CharType) = 2 then coalesce(b.pdt_len, c.ColumnLength)/2 else coalesce(b.pdt_len, c.ColumnLength) end as char_len, case when b.pdt_code is not null then 1 else 0 end as is_distinct, case when c.Nullable = ''Y'' then 1 else 0 end as nullable, trim(c.DefaultValue) as default_value, trim(c.IdColType) as id_col_type, trim(c.CommentString) as col_comment from DBC.ColumnsV c join DBC.TablesV t on c.DatabaseName = t.DatabaseName and c.TableName = t.TableName and t.TableKind in (''T'',''O'') left join (select i.TypeName as udtname, trim(ca.PDTCode) as pdt_code, ca.PDTTotalDigits as pdt_prec, ca.PDTImpliedPoint as pdt_scale, ca.PDTMaxLength as pdt_len, ca.PDTCharType as pdt_chartype from DBC.UDTInfoV i join DBC.UDTCast ca on ca.PrimaryUDTypeId = i.TypeId where i.TypeKind = ''D'' and ca.SecondaryUDTypeId = ''00000000''xb and ca.IsSourcePrimary = ''Y'') b on b.udtname = c.ColumnUDTName and c.ColumnType = ''UT'' where c.DatabaseName not in (]]..sys_db..[[) and c.DatabaseName like '']]..SCHEMA_FILTER..[['' and c.TableName like '']]..TABLE_FILTER..[['']]
 
 pk_q = [[select trim(i.DatabaseName) as schema_name, trim(i.TableName) as table_name, i.ColumnName as column_name, i.ColumnPosition as column_position from DBC.IndicesV i where i.UniqueFlag = ''Y'' and i.IndexType = ''K'' and i.DatabaseName not in (]]..sys_db..[[) and i.DatabaseName like '']]..SCHEMA_FILTER..[['' and i.TableName like '']]..TABLE_FILTER..[['']]
 
@@ -134,6 +141,28 @@ else
 	iv_t = [[case when "data_type" in ('YR','YM','MO') then 'INTERVAL YEAR(4) TO MONTH' else 'INTERVAL DAY(4) TO SECOND(' || (case when "num_scale" between 0 and 9 then "num_scale" else 6 end) || ')' end]]
 end
 
+-- UDT (ColumnType 'UT') resolution: DISTINCT UDTs were resolved to their base type code in columns_q (via
+-- DBC.UDTCast) and now carry that base code in "data_type" with "is_distinct"=1, so they map through the normal
+-- type branches below; "col_q" casts them to the base type for transfer. Geospatial built-ins (ST_GEOMETRY/MBR/
+-- MBB) keep data_type='UT' and map to GEOMETRY. Any remaining 'UT' (structured/array UDT) is flagged UNSUPPORTED.
+ut_geo  = [["udt_name" in ('ST_GEOMETRY','MBR','MBB')]]
+-- Teradata cast target for a distinct UDT's base predefined type (reconstructed from the base code + params).
+base_cast = [[case
+	when "data_type" = 'I1' then 'byteint' when "data_type" = 'I2' then 'smallint' when "data_type" = 'I' then 'integer' when "data_type" = 'I8' then 'bigint'
+	when "data_type" = 'D' then 'decimal(' || (case when "num_prec" < 1 or "num_prec" > 38 then 38 else "num_prec" end) || ',' || (case when "num_scale" < 0 or "num_scale" > 38 then 0 else "num_scale" end) || ')'
+	when "data_type" = 'N' then 'number'
+	when "data_type" = 'F' then 'float'
+	when "data_type" = 'DA' then 'date'
+	when "data_type" = 'AT' then 'time(' || (case when "num_scale" between 0 and 6 then "num_scale" else 6 end) || ')'
+	when "data_type" = 'TZ' then 'time(' || (case when "num_scale" between 0 and 6 then "num_scale" else 6 end) || ') with time zone'
+	when "data_type" = 'TS' then 'timestamp(' || (case when "num_scale" between 0 and 6 then "num_scale" else 6 end) || ')'
+	when "data_type" = 'SZ' then 'timestamp(' || (case when "num_scale" between 0 and 6 then "num_scale" else 6 end) || ') with time zone'
+	when "data_type" = 'CF' then 'char(' || (case when "char_len" < 1 then 1 else "char_len" end) || ') character set ' || (case when "char_type" = 2 then 'unicode' else 'latin' end)
+	when "data_type" = 'CV' then 'varchar(' || (case when "char_len" < 1 then 1 else "char_len" end) || ') character set ' || (case when "char_type" = 2 then 'unicode' else 'latin' end)
+	when "data_type" = 'BF' then 'byte(' || (case when "col_len" < 1 then 1 else "col_len" end) || ')'
+	when "data_type" = 'BV' then 'varbyte(' || (case when "col_len" < 1 then 1 else "col_len" end) || ')'
+	else 'varchar(32000)' end]]
+
 -- Exasol column type for non-period columns (period handled separately producing two columns).
 col_t = [[case
 	when "data_type" = 'I1' then 'DECIMAL(3,0)'
@@ -155,14 +184,14 @@ col_t = [[case
 	when "data_type" = 'DT' then 'VARCHAR(2000000) UTF8'
 	when "data_type" in ('BF','BV','BO') then ]]..bin_t..[[
 	when "data_type" in ('YR','YM','MO','DY','DH','DM','DS','HR','HM','HS','MI','MS','SC') then ]]..iv_t..[[
-	when "data_type" = 'UT' and "udt_name" in ('ST_GEOMETRY','MBR','MBB') then 'GEOMETRY'
+	when "data_type" = 'UT' and ]]..ut_geo..[[ then 'GEOMETRY'
 	when "data_type" = 'UT' then 'VARCHAR(2000000) UTF8'
 	else 'VARCHAR(2000000) UTF8'
 end]]
 
--- Unsupported = a UDT/type we cannot represent. Here only the internal '++' (TD_ANYTYPE, function sigs) and
--- a null/empty type are treated unsupported; everything else has a mapping above.
-unsup = [[("data_type" is null or "data_type" = '++' or "data_type" = '')]]
+-- Unsupported: the internal '++' (TD_ANYTYPE), a null type, or a 'UT' that is neither a resolved distinct UDT
+-- (those now carry their base code in "data_type") nor a geospatial built-in - i.e. structured / array UDTs.
+unsup = [[("data_type" is null or "data_type" = '++' or ("data_type" = 'UT' and not (]]..ut_geo..[[)))]]
 
 -- column definition (handles PERIOD -> two columns); "exa_col" is the (cased) column name.
 coldef = [[case
@@ -191,8 +220,7 @@ src = [[case
 	when "data_type" = 'SZ' then 'cast(' || "col_q" || ' at time zone 0 as timestamp(' || (case when "num_scale" between 0 and 9 then "num_scale" else 6 end) || '))'
 	when "data_type" in ('BF','BV','BO') then ]]..bin_imp..[[
 	when "data_type" in ('CO','JN','XM','DT') then ]]..clob_imp..[[
-	when "data_type" = 'UT' and "udt_name" in ('ST_GEOMETRY','MBR','MBB') then "col_q" || '.ST_AsText()'
-	when "data_type" = 'UT' then 'cast(' || "col_q" || ' as varchar(32000))'
+	when "data_type" = 'UT' and ]]..ut_geo..[[ then "col_q" || '.ST_AsText()'
 	when "data_type" in ('YR','YM','MO','DY','DH','DM','DS','HR','HM','HS','MI','MS','SC') then 'cast(' || "col_q" || ' as varchar(40))'
 	else "col_q"
 end]]
@@ -221,7 +249,7 @@ dist_cte = ''  dist_union = ''
 if gen_dist then
 	dist_cte = [[
 ,td_dist as (select * from (import from jdbc at ]]..CONNECTION_NAME..[[ statement 'select trim(DatabaseName) as schema_name, trim(TableName) as table_name, ColumnName as column_name, ColumnPosition as column_position from DBC.IndicesV where IndexType in (''P'',''Q'') and DatabaseName not in (]]..sys_db..[[) and DatabaseName like '']]..SCHEMA_FILTER..[['' and TableName like '']]..TABLE_FILTER..[[''') )
-,vv_dist as (select 'ALTER TABLE ' || ]]..main_q..[[ || ' DISTRIBUTE BY ' || group_concat('"' || ]]..U('"column_name"')..[[ || '"' order by "column_position") || ';' as sql_text from td_dist group by "schema_name","table_name")]]
+,vv_dist as (select 'ALTER TABLE ' || ]]..main_q..[[ || ' DISTRIBUTE BY ' || group_concat('"' || ]]..U('"column_name"')..[[ || '"' order by "column_position") || ';' as sql_text from td_dist d where not exists (select 1 from td_dist d2 join vv_unsup_cols u on u."schema_name" = d2."schema_name" and u."table_name" = d2."table_name" and u."column_name" = d2."column_name" where d2."schema_name" = d."schema_name" and d2."table_name" = d."table_name") group by d."schema_name",d."table_name")]]
 	dist_union = "\n".. [[UNION ALL select 35, cast('-- ### DISTRIBUTE BY (from Teradata Primary Index) ###' as varchar(2000000)) SQL_TEXT
 UNION ALL select 36, sql_text from vv_dist]]
 end
@@ -279,7 +307,7 @@ end
 check_cte = ''  check_union = ''
 if gen_check then
 	check_cte = [[
-,vv_chk_cols as (select c.* from vv_columns c where c."data_type" is not null and c."data_type" not in ('++'))
+,vv_chk_cols as (select c.* from vv_columns c where not (]]..unsup..[[))
 ,vv_chk_base as (
 	select x.*, min("ordinal_position") over (partition by "exa_schema","exa_table") as "min_ord",
 	       sysrow."db_system", mid."metric_id",
@@ -342,23 +370,28 @@ end
 
 suc, res = pquery([[
 with vv_columns as (
-	select ]]..sname_e..[[ as "exa_schema", ]]..U('"table_name"')..[[ as "exa_table", ]]..U('"column_name"')..[[ as "exa_col", '"' || "column_name" || '"' as "col_q", t.*
+	select ]]..sname_e..[[ as "exa_schema", ]]..U('"table_name"')..[[ as "exa_table", ]]..U('"column_name"')..[[ as "exa_col", case when "is_distinct" = 1 then 'cast("' || "column_name" || '" as ' || (]]..base_cast..[[) || ')' else '"' || "column_name" || '"' end as "col_q", t.*
 	from (import from jdbc at ]]..CONNECTION_NAME..[[ statement ']]..columns_q..[[') t
 )
 ,vv_unsupported as (
 	select '-- !!! UNSUPPORTED TYPE - column NOT migrated: "' || "schema_name" || '"."' || "table_name" || '"."' || "column_name" || '" (Teradata type code: ' || coalesce("data_type",'null') || coalesce(' / ' || "udt_name",'') || ') - migrate this column manually !!!' as sql_text
 	from vv_columns where ]]..unsup..[[
 )
+,vv_unsup_cols as (select "schema_name","table_name","column_name" from vv_columns where ]]..unsup..[[)
 ,vv_pk_raw as (select * from (import from jdbc at ]]..CONNECTION_NAME..[[ statement ']]..pk_q..[['))
+-- keep a PK only if none of its columns was dropped as an unsupported type
+,vv_pk_keep as (select pk.* from vv_pk_raw pk where not exists (select 1 from vv_pk_raw p2 join vv_unsup_cols u on u."schema_name" = p2."schema_name" and u."table_name" = p2."table_name" and u."column_name" = p2."column_name" where p2."schema_name" = pk."schema_name" and p2."table_name" = pk."table_name"))
 ,vv_pk as (
 	select 'ALTER TABLE ' || '"' || ]]..sname_e..[[ || '"."' || ]]..U('"table_name"')..[[ || '"' || ' ADD CONSTRAINT "' || ]]..U('"table_name"')..[[ || '_PK" PRIMARY KEY (' || group_concat('"' || ]]..U('"column_name"')..[[ || '"' order by "column_position") || ') DISABLE;' as sql_text,
 	       ]]..sname_e..[[ as "exa_schema", ]]..U('"table_name"')..[[ as "exa_table"
-	from vv_pk_raw group by "schema_name","table_name"
+	from vv_pk_keep group by "schema_name","table_name"
 )
 ,vv_fk_raw as (select f.* from (import from jdbc at ]]..CONNECTION_NAME..[[ statement ']]..fk_q..[[') f where exists (select 1 from vv_columns c where c."schema_name" = f."ref_schema" and c."table_name" = f."ref_table"))
+-- keep an FK only if none of its child or referenced columns was dropped as an unsupported type
+,vv_fk_keep as (select fk.* from vv_fk_raw fk where not exists (select 1 from vv_fk_raw f2 where f2."schema_name" = fk."schema_name" and f2."table_name" = fk."table_name" and f2."fk_name" = fk."fk_name" and (exists (select 1 from vv_unsup_cols u where u."schema_name" = f2."schema_name" and u."table_name" = f2."table_name" and u."column_name" = f2."fk_column") or exists (select 1 from vv_unsup_cols u2 where u2."schema_name" = f2."ref_schema" and u2."table_name" = f2."ref_table" and u2."column_name" = f2."ref_column"))))
 ,vv_fk as (
 	select 'ALTER TABLE ' || '"' || ]]..sname_e..[[ || '"."' || ]]..U('"table_name"')..[[ || '"' || ' ADD CONSTRAINT "' || ]]..U(fkname)..[[ || '" FOREIGN KEY (' || group_concat('"' || ]]..U('"fk_column"')..[[ || '"') || ') REFERENCES "' || ]]..ref_sname_e..[[ || '"."' || ]]..U('"ref_table"')..[[ || '" (' || group_concat('"' || ]]..U('"ref_column"')..[[ || '"') || ') DISABLE;' as sql_text
-	from vv_fk_raw group by "schema_name","table_name","fk_name","ref_schema","ref_table"
+	from vv_fk_keep group by "schema_name","table_name","fk_name","ref_schema","ref_table"
 )
 ,vv_create_schemas as (select distinct 'CREATE SCHEMA IF NOT EXISTS "' || "exa_schema" || '";' as sql_text from vv_columns)
 ,vv_create_tables as (
@@ -382,8 +415,8 @@ select sql_text from (
 	UNION ALL select 50, cast('-- ### IMPORTS ###' as varchar(2000000))
 	UNION ALL select 51, sql_text from vv_imports
 	UNION ALL select 60, cast('-- ### CONSTRAINT STATE - run AFTER the data load (keys created DISABLED for a fast, order-independent load) ###' as varchar(2000000))
-	UNION ALL select 61, 'ALTER TABLE "' || ]]..sname_e..[[ || '"."' || ]]..U('"table_name"')..[[ || '" MODIFY CONSTRAINT "' || ]]..U('"table_name"')..[[ || '_PK" ]]..sw..[[;]]..sc..[[' from vv_pk_raw group by "schema_name","table_name"
-	UNION ALL select 62, 'ALTER TABLE "' || ]]..sname_e..[[ || '"."' || ]]..U('"table_name"')..[[ || '" MODIFY CONSTRAINT "' || ]]..U(fkname)..[[ || '" ]]..sw..[[;]]..sc..[[' from vv_fk_raw group by "schema_name","table_name","fk_name","ref_table"]]..views_union..part_union..check_union..[[
+	UNION ALL select 61, 'ALTER TABLE "' || ]]..sname_e..[[ || '"."' || ]]..U('"table_name"')..[[ || '" MODIFY CONSTRAINT "' || ]]..U('"table_name"')..[[ || '_PK" ]]..sw..[[;]]..sc..[[' from vv_pk_keep group by "schema_name","table_name"
+	UNION ALL select 62, 'ALTER TABLE "' || ]]..sname_e..[[ || '"."' || ]]..U('"table_name"')..[[ || '" MODIFY CONSTRAINT "' || ]]..U(fkname)..[[ || '" ]]..sw..[[;]]..sc..[[' from vv_fk_keep group by "schema_name","table_name","fk_name","ref_table"]]..views_union..part_union..check_union..[[
 ) order by ord
 ]],{})
 

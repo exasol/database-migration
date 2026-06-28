@@ -577,7 +577,10 @@ data); `CHAR > 2000` becomes `VARCHAR`. `DATE` maps exactly; `TIMESTAMP(n)` keep
 **`TIMESTAMP(n) WITH TIME ZONE → TIMESTAMP(n) WITH LOCAL TIME ZONE`** (stored as the correct UTC instant);
 `TIME`/`TIME WITH TIME ZONE → VARCHAR` (lossless text, offset kept). **`INTERVAL`** maps to a native Exasol
 `INTERVAL` (or `VARCHAR`, see `INTERVAL_HANDLING`). **`PERIOD(x)` becomes two columns** `x_BEGINNING` / `x_END`.
-**`ST_GEOMETRY`/`MBR`/`MBB` → `GEOMETRY`** (WKT); `CLOB`/`JSON`/`XML`/`DATASET` and other UDTs → `VARCHAR`.
+**`ST_GEOMETRY`/`MBR`/`MBB` → `GEOMETRY`** (WKT); `CLOB`/`JSON`/`XML`/`DATASET` → `VARCHAR`. **Distinct
+user-defined types** are resolved to their base predefined type and migrated as that type (numeric → `DECIMAL`/
+`DOUBLE`, character → `CHAR`/`VARCHAR`, `DATE` → `DATE`, `TIMESTAMP` → `TIMESTAMP`, byte → base64, …); only
+**structured / array UDTs** (no single base type) are unsupported and flagged for manual review.
 **Binary** (`BYTE`/`VARBYTE`/`BLOB`) is migrated **losslessly as base64 text** (`BINARY_HANDLING='BASE64'`; Exasol
 has no general binary column type — the bytes are preserved and can be decoded downstream); values larger than
 ~48000 bytes exceed the Teradata transfer limit and are loaded as `NULL`. The IMPORT **fails loudly rather than
