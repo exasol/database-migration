@@ -217,23 +217,101 @@ For the actual data-migration, see script [mariadb_to_exasol.sql](mariadb_to_exa
 
 ### MySQL
 
-Create a connection:
-```SQL
-CREATE CONNECTION <name_of_connection>
-TO 'jdbc:mysql://192.168.137.5:3306'
-USER '<user>'
-IDENTIFIED BY '<password>';
-```
+The [mysql_to_exasol.sql](mysql_to_exasol.sql) script generates the statements to migrate a MySQL
+database (**MySQL 8 / 9**, backward compatible with earlier 5.x) to Exasol v8. It runs on the **target** Exasol
+database, reads the **source** metadata through a JDBC connection and **returns** the statements to recreate and
+load the source. It changes nothing itself — you review the output and run it, in the order returned.
 
-Test your connection:
-```SQL
-SELECT * FROM
-(
-IMPORT FROM JDBC AT <name_of_connection>
-STATEMENT 'SELECT 42 FROM DUAL'
+**Step by step**
+* **Install** the script on the **target** database (run [mysql_to_exasol.sql](mysql_to_exasol.sql) once; it
+  creates `DATABASE_MIGRATION.MYSQL_TO_EXASOL`).
+* **Install the JDBC driver** in BucketFS: use the latest MySQL **`mysql-connector-j`** driver
+  ([Maven](https://mvnrepository.com/artifact/com.mysql/mysql-connector-j)). See
+  [Load data from MySQL](https://docs.exasol.com/db/latest/loading_data/connect_sources/mysql.htm).
+* **Create a connection** on the target pointing at the source database. A ready-to-edit `CREATE CONNECTION`
+  example and a connection test are at the bottom of the script.
+* **Adapt the `EXECUTE SCRIPT` parameters** to your scenario and run it (a few seconds, depending on the number
+  of tables).
+* **Copy the result set** into another session and execute the statements **in the output order** (the
+  CONSTRAINT STATE section, and — if enabled — the DATA VALIDATION section, run after the IMPORTs).
+
+```sql
+EXECUTE SCRIPT DATABASE_MIGRATION.MYSQL_TO_EXASOL(
+    'MYSQL_JDBC',       -- CONNECTION_NAME: name of the JDBC connection created at the bottom of the script
+    true,               -- IDENTIFIER_CASE_INSENSITIVE: true (recommended) => fold ALL identifiers to UPPER so Exasol queries never need quotes; false => keep verbatim/quoted
+    '%',                -- SCHEMA_FILTER: source database(s): 'mydb', 'sales_%', '%' (all; system schemas always excluded)
+    '%',                -- TABLE_FILTER: table(s)/view(s): 'my_table', 'my_%', '%' (all)
+    '',                 -- TARGET_SCHEMA: Exasol target schema; '' (recommended) => use the source schema name
+    'FORCE_DISABLE',    -- CONSTRAINT_STATE: 'FORCE_DISABLE' (recommended; PK/FK kept as metadata only - faster, order-independent imports, still used by BI tools), 'SET_AS_SOURCE' or 'FORCE_ENABLE' (all keys enabled = Exasol re-validates the data)
+    true,               -- GENERATE_COMMENTS: true (recommended) => migrate MySQL comments as COMMENT ON; false => skip
+    true,               -- GENERATE_VIEWS: true => emit source views as a commented manual-review section; false => skip
+    true,               -- GENERATE_PARTITION_BY: true => add a best-effort PARTITION BY from a single-column MySQL partition key; complex partitioning is listed as a commented manual-review note; false => skip
+    'BASE64',           -- BINARY_HANDLING: 'BASE64' (recommended; binary/blob migrated losslessly as base64 text - Exasol has no general binary type) or 'SKIP' (load NULL)
+    'CAP',              -- DECIMAL_OVERFLOW: 'CAP' (recommended; decimal>36 -> DECIMAL(36,s); IMPORT fails for values needing > 36 digits), 'DOUBLE' (~15 significant digits) or 'VARCHAR' (lossless text)
+    false,              -- TRUNCATE_LONG_STRINGS: false (recommended) => import fails on a value > 2,000,000 chars; true => cut such values to 2,000,000 chars and import
+    'FAIL',             -- TEMPORAL_OUT_OF_RANGE: 'FAIL' (recommended; IMPORT fails on a zero-date / out-of-range date), 'NULL' (load NULL) or 'CLAMP' (clamp to the Exasol min)
+    false,              -- TINYINT1_AS_BOOLEAN: false (recommended; tinyint(1) -> DECIMAL(3,0), value preserved) or true (tinyint(1) -> BOOLEAN)
+    false               -- CHECK_MIGRATION: false (recommended default) => skip; true => also build per-table "<table>_MIG_CHK" metric tables and a "<schema>_MIG_CHK" summary that compares source vs. target (run after the IMPORTs)
 );
 ```
-Then you're ready to use the migration script: [mysql_to_exasol.sql](mysql_to_exasol.sql)
+
+This script generates, in this order:
+* `CREATE SCHEMA` and `CREATE TABLE` — every data type mapped to a sensible Exasol type, plus `NOT NULL`,
+  column `DEFAULT`s and the `PRIMARY KEY` (created disabled)
+* `ALTER TABLE … ADD … FOREIGN KEY` (created disabled; composite keys supported; keys to tables outside the
+  migration scope are skipped)
+* with `GENERATE_PARTITION_BY`: `ALTER TABLE … PARTITION BY` from a single-column MySQL partition key (best-effort)
+* table & column `COMMENT`s (with `GENERATE_COMMENTS`)
+* `IMPORT` of the data (typed transfer — differing source/target NLS does not affect the data)
+* a **CONSTRAINT STATE** section to run after the IMPORTs (keys created disabled for a fast, order-independent
+  load; this section then sets them per `CONSTRAINT_STATE`)
+* with `GENERATE_VIEWS`: the source views as a **commented** manual-review section (MySQL SQL is not
+  auto-translated)
+* with `CHECK_MIGRATION`: a **DATA VALIDATION** section (see below)
+
+**Data types & limitations.** Every MySQL type is covered (no silent drops). Integers map to
+`DECIMAL(3/5/7/10/19,0)` — **`UNSIGNED` widens** `mediumint`→`DECIMAL(8,0)` and `bigint`→`DECIMAL(20,0)`;
+`decimal(p,s)`→`DECIMAL(p,s)`, `float`/`double`→`DOUBLE`, `bit(M)`→`DECIMAL`. `date`→`DATE`; `datetime(p)` keeps
+full precision; **`timestamp(p)`→`TIMESTAMP(p) WITH LOCAL TIME ZONE`** (the tz-aware instant type), `datetime(p)`→
+`TIMESTAMP(p)` (wall clock). Character columns map to **`UTF8`**; `char>2000`→`VARCHAR`; `tinytext…longtext`/
+`json`→`VARCHAR(2000000)`; **`enum`/`set`→`VARCHAR`** (label / CSV). **`binary`/`varbinary`/`*blob`→base64 text**
+(`BINARY_HANDLING`, lossless, decode downstream). `time`→`VARCHAR(17)` (Exasol has no TIME type; MySQL `TIME`
+spans `-838:59:59 … 838:59:59` and keeps fractional seconds); `year`→`VARCHAR(4)`; spatial types→**`GEOMETRY`**
+(WKT via `ST_AsText`). **`tinyint(1)`** → `DECIMAL(3,0)` (value preserved; the JDBC driver otherwise coerces it
+to boolean, collapsing any non‑0/1 to 1), or `BOOLEAN` with `TINYINT1_AS_BOOLEAN=true`. **`decimal` with > 36
+digits** is handled via `DECIMAL_OVERFLOW` (`CAP` / `DOUBLE` / `VARCHAR`). The IMPORT **fails loudly rather than
+corrupting data** when a value needs more than 36 decimal digits (`CAP`), exceeds 2,000,000 characters (unless
+`TRUNCATE_LONG_STRINGS=true`), or is a zero-date / out-of-range date (`TEMPORAL_OUT_OF_RANGE='FAIL'`; `NULL` or
+`CLAMP` are available — see the optional `zeroDateTimeBehavior` driver note at the bottom of the script).
+**Always excluded** (so only real user data appears): the MySQL **system schemas** (`mysql`,
+`information_schema`, `performance_schema`, `sys`). Not migrated (out of scope): indexes, `UNIQUE`/`CHECK`
+constraints, triggers, routines, events, users/grants. `AUTO_INCREMENT` columns and `STORED`/`VIRTUAL` generated
+columns are migrated as plain columns carrying their values (Exasol has no auto-increment / computed columns).
+
+**Why some columns are read with a `CAST` on the source.** Verified live with Connector/J 9.7: `UNSIGNED`
+integers exceed their signed Java type (e.g. `SMALLINT UNSIGNED` 60000 overflows `java.lang.Short`;
+`BIGINT UNSIGNED` / `BIT(64)` overflow `java.lang.Long`), so every unsigned integer / bit is transferred as text
+into a `DECIMAL` target; `YEAR` is returned as a `DATE` by the driver, so it is read with `CAST(.. AS CHAR)`;
+`TIME` likewise, to keep its full range and fractional seconds.
+
+**Partitioning.** A single-column MySQL partition key (e.g. `RANGE COLUMNS(sale_date)`) is mapped best-effort to
+an Exasol `PARTITION BY` on that column; `HASH`/`KEY`/expression partitioning is emitted as a commented
+manual-review note. A MySQL partitioned table is one logical table, so data is never migrated twice. (MySQL has
+no distribution/clustering-key concept, so no `DISTRIBUTE BY` is generated.)
+
+**Migration check (`CHECK_MIGRATION=true`).** For every migrated table the script builds a `"<table>_MIG_CHK"`
+table holding standardized, cross-database-comparable metrics (row count, per-column NULL counts, distinct
+counts, numeric MIN/MAX/SUM, character length MIN/MAX) computed on **both** MySQL and Exasol, plus a
+`DATABASE_MIGRATION."<schema>_MIG_CHK"` summary that lists every metric side by side with an **`OK` / `DEVIATION`**
+status. Review deviations with
+`SELECT * FROM DATABASE_MIGRATION."<schema>_MIG_CHK" WHERE "STATUS" = 'DEVIATION';`.
+
+**Privileges/visibility:** the source metadata is read **through the connection's user**, so the script sees —
+and generates statements for — only the objects that user may access. **To migrate everything, use a user with
+sufficient privileges on the source.**
+
+See the header of [mysql_to_exasol.sql](mysql_to_exasol.sql) for more information!
+
 
 ### Netezza
 
