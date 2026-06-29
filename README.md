@@ -11,7 +11,7 @@
 2. [Migration source:](#migration-source)
     * [Azure Blob Storage](#azure-blob-storage)
     * [CSV](#csv)
-    * [DB2](#db2)
+    * [Db2](#db2)
     * [Exasol](#exasol)
     * [Google BigQuery](#google-bigquery)
     * [MariaDB](#mariadb)
@@ -80,9 +80,88 @@ For more details on `IMPORT` see [IMPORT](https://docs.exasol.com/db/latest/sql/
 * [Proper csv export from PostgreSQL](https://exasol.my.site.com/s/article/Proper-csv-export-from-PostgreSQL?language=en_US)
 * [Proper csv export from Microsoft SQL Server](https://exasol.my.site.com/s/article/Proper-csv-export-from-Microsoft-SQL-Server?language=en_US)
 
-### DB2
 
-See script [db2_to_exasol.sql](db2_to_exasol.sql)
+### Db2
+
+The [db2_to_exasol.sql](db2_to_exasol.sql) script generates the statements to migrate an **IBM Db2 for
+Linux/Unix/Windows** database (Db2 11.x / 12.x) to Exasol v8. It runs on the **target** Exasol database, reads the
+**source** metadata through a JDBC connection (the native `SYSCAT` catalog) and **returns** the statements to
+recreate and load the source. It changes nothing itself — you review the output and run it, in the order returned.
+
+**Step by step**
+* **Install** the script on the **target** database (run [db2_to_exasol.sql](db2_to_exasol.sql) once; it creates
+  `DATABASE_MIGRATION.DB2_TO_EXASOL`).
+* **Install the JDBC driver** in BucketFS: use the IBM Data Server Driver for JDBC and SQLJ (**`jcc`**)
+  ([Maven](https://mvnrepository.com/artifact/com.ibm.db2/jcc)). See
+  [Load data from Db2](https://docs.exasol.com/db/latest/loading_data/connect_sources/db2.htm).
+* **Create a connection** on the target pointing at the source database. A ready-to-edit `CREATE CONNECTION`
+  example and a connection test are at the bottom of the script.
+* **Adapt the `EXECUTE SCRIPT` parameters** to your scenario and run it.
+* **Copy the result set** into another session and execute the statements **in the output order** (the CONSTRAINT
+  STATE section, and — if enabled — the DATA VALIDATION section, run after the IMPORTs).
+
+```sql
+EXECUTE SCRIPT DATABASE_MIGRATION.DB2_TO_EXASOL(
+    'DB2_JDBC',         -- CONNECTION_NAME: name of the JDBC connection created at the bottom of the script
+    true,               -- IDENTIFIER_CASE_INSENSITIVE: true (recommended) => fold ALL identifiers to UPPER so Exasol queries never need quotes; false => keep verbatim/quoted
+    '%',                -- SCHEMA_FILTER: source schema(s): 'DB2INST1', 'APP_%', '%' (all; system schemas always excluded)
+    '%',                -- TABLE_FILTER: table(s)/view(s): 'MY_TABLE', 'MY_%', '%' (all)
+    '',                 -- TARGET_SCHEMA: Exasol target schema; '' (recommended) => use the source schema name
+    'FORCE_DISABLE',    -- CONSTRAINT_STATE: 'FORCE_DISABLE' (recommended; PK/FK kept as metadata only - faster, order-independent imports, still used by BI tools), 'SET_AS_SOURCE' or 'FORCE_ENABLE' (all keys enabled = Exasol re-validates the data)
+    true,               -- GENERATE_COMMENTS: true (recommended) => migrate Db2 comments as COMMENT ON; false => skip
+    true,               -- GENERATE_VIEWS: true => emit source views as a commented manual-review section; false => skip
+    true,               -- GENERATE_PARTITION_BY: true => best-effort PARTITION BY from a single-column Db2 range key; complex partitioning is listed as a commented review note; false => skip
+    true,               -- GENERATE_DISTRIBUTION_BY: true (default) => add DISTRIBUTE BY from the Db2 DISTRIBUTE BY HASH key; false => skip
+    'HEX',              -- BINARY_HANDLING: 'HEX' (recommended; binary/blob migrated losslessly as hex text - Db2 has no base64) or 'SKIP' (load NULL)
+    'VARCHAR',          -- DECFLOAT_HANDLING: 'VARCHAR' (recommended; lossless text, keeps all 16/34 digits) or 'DOUBLE' (~15-16 significant digits)
+    false,              -- TRUNCATE_LONG_STRINGS: false (recommended) => import fails on a value > 2,000,000 chars; true => cut such values to 2,000,000 chars and import
+    false               -- CHECK_MIGRATION: false (recommended default) => skip; true => also build per-table "<table>_MIG_CHK" metric tables and a "<schema>_MIG_CHK" summary that compares source vs. target (run after the IMPORTs)
+);
+```
+
+This script generates, in this order: `CREATE SCHEMA` / `CREATE TABLE` (every type mapped, plus `NOT NULL`,
+`DEFAULT`s and the `PRIMARY KEY`, created disabled); `FOREIGN KEY`s (disabled, composite supported); a best-effort
+`PARTITION BY` / `DISTRIBUTE BY`; table & column `COMMENT`s; the `IMPORT`s; a **CONSTRAINT STATE** section to run
+after the load; the source views as a **commented** review section; and (with `CHECK_MIGRATION`) a **DATA
+VALIDATION** section.
+
+**Data types & limitations.** Every Db2 type is covered (no silent drops). `SMALLINT`/`INTEGER`/`BIGINT` →
+`DECIMAL(5/10/19,0)`; `DECIMAL`/`NUMERIC(p,s)` → `DECIMAL(p,s)`; **`DECFLOAT`** → `VARCHAR` (lossless, keeps all
+16/34 digits) or `DOUBLE` (`DECFLOAT_HANDLING`); `REAL`/`DOUBLE` → `DOUBLE`. `DATE` → `DATE`; **`TIME`** →
+`VARCHAR(8)` (`HH:MM:SS`); **`TIMESTAMP(p)`** → `TIMESTAMP(min(p,9))` (Exasol's maximum precision is 9). Character:
+`CHAR`/`VARCHAR` → `CHAR`/`VARCHAR` `UTF8` (char > 2000 → VARCHAR); `CLOB`/`LONG VARCHAR` → `VARCHAR(2000000)`;
+**`GRAPHIC`/`VARGRAPHIC`/`DBCLOB`** (double-byte) → `CHAR`/`VARCHAR` `UTF8`. **Binary** (`CHAR`/`VARCHAR FOR BIT
+DATA`, `BINARY`, `VARBINARY`, `BLOB`, `ROWID`) → **hex text** (`BINARY_HANDLING`; Db2 has no base64). `XML` →
+`VARCHAR` (via `XMLSERIALIZE`); `BOOLEAN` → `BOOLEAN`. **DISTINCT-type UDTs** are resolved via `SYSCAT.DATATYPES`
+to their source built-in and migrated as that base type. The IMPORT **fails loudly rather than corrupting data**
+when a value exceeds 2,000,000 characters (unless `TRUNCATE_LONG_STRINGS=true`). **Db2 binary > 16,336 bytes**
+hits Db2's `HEX` limit (FOR BIT DATA fails loudly; BLOB is truncated — use `BINARY_HANDLING='SKIP'` to avoid
+partial data). **Always excluded** (so only real user data appears): the Db2 system schemas (`SYS*`, `NULLID`).
+Not migrated (out of scope): indexes, `UNIQUE`/`CHECK` constraints, triggers, routines, sequences, MQTs.
+`IDENTITY` and `GENERATED` columns are migrated as plain columns carrying their values.
+
+**Why some columns are read with a function/cast on the source.** Verified live with jcc 12.1.5.0: the driver
+cannot transfer `DECFLOAT`, `GRAPHIC`/`VARGRAPHIC`/`DBCLOB`, `BLOB` or DISTINCT-UDT values directly ("unknown JDBC
+type"), so they are read via `CAST(.. AS VARCHAR/base)` and `HEX(..)`; `TIME` is read via `REPLACE(CHAR(..),
+'.',':')` → `HH:MM:SS`; `XML` via `XMLSERIALIZE`; column aliases are ignored by the driver, so every metadata
+IMPORT carries an explicit derived column list.
+
+**Partitioning & distribution.** A single-column Db2 **range-partition** key is mapped to an Exasol `PARTITION
+BY` (`GENERATE_PARTITION_BY`), and the Db2 **`DISTRIBUTE BY HASH`** key to an Exasol `DISTRIBUTE BY`
+(`GENERATE_DISTRIBUTION_BY`, default true) — both verified live. Complex / multi-column / expression
+partitioning is emitted as a commented manual-review note.
+
+**Migration check (`CHECK_MIGRATION=true`).** For every migrated table the script builds a `"<table>_MIG_CHK"`
+table of standardized, cross-database-comparable metrics (row count, per-column NULL counts, numeric MIN/MAX/SUM,
+date/timestamp MIN/MAX) computed on **both** Db2 and Exasol, plus a `DATABASE_MIGRATION."<schema>_MIG_CHK"`
+summary flagging each metric **`OK` / `DEVIATION`**. Review with
+`SELECT * FROM DATABASE_MIGRATION."<schema>_MIG_CHK" WHERE "STATUS" = 'DEVIATION';`.
+
+**Privileges/visibility:** the source metadata is read **through the connection's user**, so the script sees only
+the objects that user may access. **To migrate everything, use a user with sufficient privileges on the source.**
+
+See the header of [db2_to_exasol.sql](db2_to_exasol.sql) for more information!
+
 
 ### Exasol
 
