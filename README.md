@@ -433,51 +433,122 @@ See the header of [mysql_to_exasol.sql](mysql_to_exasol.sql) for more informatio
 
 ### Netezza
 
-The first thing you need to do is add the IBM Netezza JDBC driver to Exasol. Since Netezza has run out of support in June 2019, the JDBC-driver (`nzjdbc3.jar`) can no longer be found on the official JDBC Download-page of IBM. Anyhow, the driver can be found within your Netezza distribution under following path: 
+The [netezza_to_exasol.sql](netezza_to_exasol.sql) script generates the statements to migrate an **IBM Netezza
+Performance Server (NPS)** database (7.x / 11.x) to Exasol v8. It runs on the **target** Exasol database, reads the
+**source** metadata through a JDBC connection (the native `_V_*` catalog) and **returns** the statements to
+recreate and load the source. It changes nothing itself — you review the output and run it, in the order returned.
 
-`nz/kit.version_number/sbin/nzjdbc3.jar   (eg. nz/kit.7.2.1.0/sbin/nzjdbc3.jar)`
+**Step by step**
+* **Install** the script on the **target** database (run [netezza_to_exasol.sql](netezza_to_exasol.sql) once; it
+  creates `DATABASE_MIGRATION.NETEZZA_TO_EXASOL`).
+* **Install the Netezza JDBC driver in BucketFS** — **this is required before the connection can be created.** The
+  driver is **not on Maven and not publicly downloadable**, so it must be obtained from IBM and uploaded together
+  with a `settings.cfg`:
+    1. **Download `nzjdbc3.jar` from IBM Fix Central** (a free IBM registration is required): search for
+       **"IBM Cloud Pak for Data System"**, select release **`NPS_11.3`**, and download
+       ([direct link](https://www.ibm.com/support/fixcentral/swg/selectFixes?parent=ibm%7EWebSphere&product=ibm/WebSphere/IBM+Cloud+Private+for+Data+System&release=NPS_11.3&platform=All&function=all)).
+       IBM help: [installing client tools](https://www.ibm.com/docs/en/netezza?topic=dls-installing-uninstalling-client-tools-software-2)
+       · [client software packages](https://www.ibm.com/docs/en/netezza?topic=iucts-client-software-packages#c_datacon_client_sw_packages).
+    2. **Create a plain-text `settings.cfg`** with exactly this content:
+       ```
+       DRIVERNAME=NETEZZA
+       DRIVERMAIN=org.netezza.Driver
+       PREFIX=jdbc:netezza:
+       NOSECURITY=YES
+       FETCHSIZE=100000
+       INSERTSIZE=-1
+       ```
+    3. **Upload both `nzjdbc3.jar` and `settings.cfg` to BucketFS** (Exasol "add a JDBC driver":
+       [on-premise guide](https://docs.exasol.com/db/latest/administration/on-premise/manage_drivers/add_jdbc_driver.htm)
+       · [SaaS guide](https://docs.exasol.com/db/latest/administration/manage_drivers/add_jdbc_driver.htm)).
+       On-premise example (set `WRITE_PW` and `DATABASE_NODE_IP` to your values):
+       ```bash
+       curl -k -X PUT -T settings.cfg https://w:$WRITE_PW@$DATABASE_NODE_IP:2581/default/drivers/jdbc/netezza/settings.cfg
+       curl -k -X PUT -T nzjdbc3.jar  https://w:$WRITE_PW@$DATABASE_NODE_IP:2581/default/drivers/jdbc/netezza/nzjdbc3.jar
+       ```
+* **Create a connection** on the target. **IMPORTANT:** point it at the **source database to migrate** (e.g.
+  `jdbc:netezza://host:5480/MYDB`), **not** at the `SYSTEM` database — Netezza cannot hold user tables in `SYSTEM`
+  and its `_V_*` catalog views are database-scoped. A ready-to-edit `CREATE CONNECTION` example and a connection
+  test are at the bottom of the script.
+* **Adapt the `EXECUTE SCRIPT` parameters** to your scenario and run it.
+* **Copy the result set** into another session and execute the statements **in the output order** (the CONSTRAINT
+  STATE section, and — if enabled — the DATA VALIDATION section, run after the IMPORTs).
 
-In database versions prior to v8, in order to add the driver to Exasol log into your EXAoperation, select the 'Software'-, then 'JDBC Drivers'-Tab.
-
-Click Add, then specify the following details:
-
-* Driver Name: `Netezza`
-* Main Class: `org.netezza.Driver`
-* Prefix: `jdbc:netezza:`
-* Disable Security Manager: `Check this box`
-
-After clicking Apply, you will see the newly added driver's details on the top section of the driver list. 
-Select the Netezza driver by locating the nzjdbc3.jar and upload it. When done the .jar file should be listed in the files column for the IBM Netezza driver.
-
-For Exasol v8 or newer use the values above in [Load data using JDBC (generic)](https://docs.exasol.com/db/latest/loading_data/connect_sources/import_data_using_jdbc.htm).
-
-The standard port for Netezza is `5480`.
-
-The Connection-String should look like the following: 
-`"jdbc:netezza://'host_ip':'port'/Database-Name" (User-ID, Password)`
-`(e.g. jdbc:netezza://127.0.0.1:5480/SYSTEM,  User-ID: ADMIN, Password: Password)`
-
-To test the connectivity of Exasol to your Netezza Instance create the following connection in your SQL-client:
-
-```SQL
-CREATE OR REPLACE CONNECTION <name_of_connection>
-        TO 'jdbc:netezza://<host_name>:<port>'
-        USER '<netezza_username>'
-        IDENTIFIED BY '<netezza_password>';
+```sql
+EXECUTE SCRIPT DATABASE_MIGRATION.NETEZZA_TO_EXASOL(
+    'NETEZZA_JDBC',     -- CONNECTION_NAME: JDBC connection (pointing at the SOURCE database, not SYSTEM)
+    true,               -- IDENTIFIER_CASE_INSENSITIVE: true (recommended) => fold ALL identifiers to UPPER so Exasol queries never need quotes; false => keep verbatim/quoted
+    '%',                -- SCHEMA_FILTER: source schema(s): 'MYSCHEMA', 'APP_%', '%' (all; system schemas always excluded)
+    '%',                -- TABLE_FILTER: table(s)/view(s): 'MY_TABLE', 'MY_%', '%' (all)
+    '',                 -- TARGET_SCHEMA: Exasol target schema; '' (recommended) => use the source schema name
+    'FORCE_DISABLE',    -- CONSTRAINT_STATE: 'FORCE_DISABLE' (recommended; PK/FK kept as metadata only - faster, order-independent imports, still used by BI tools), 'SET_AS_SOURCE' or 'FORCE_ENABLE' (all keys enabled = Exasol re-validates the data)
+    true,               -- GENERATE_COMMENTS: true (recommended) => migrate Netezza comments as COMMENT ON; false => skip
+    true,               -- GENERATE_VIEWS: true => emit source views as a commented manual-review section; false => skip
+    true,               -- GENERATE_DISTRIBUTION_BY: true (default) => add DISTRIBUTE BY from the Netezza hash distribution key; false => skip
+    'CAP',              -- DECIMAL_OVERFLOW: 'CAP' (recommended; numeric>36 -> DECIMAL(36,s); IMPORT fails for values needing > 36 digits), 'DOUBLE' (~15 digits) or 'VARCHAR' (lossless text)
+    'VARCHAR',          -- INTERVAL_HANDLING: 'VARCHAR' (recommended; interval as lossless text) or 'INTERVAL' (native Exasol INTERVAL, best-effort - day-time intervals only)
+    'HEX',              -- BINARY_HANDLING: 'HEX' (recommended; BINARY/VARBINARY migrated losslessly as hex text via to_hex - max 32000 bytes) or 'SKIP' (load NULL)
+    false               -- CHECK_MIGRATION: false (recommended default) => skip; true => also build "<table>_MIG_CHK" metric tables + a "<schema>_MIG_CHK" summary (source vs target) for post-load validation
+);
 ```
 
-You need to have CREATE CONNECTION privilege granted to the user in order to do this.
+This script generates, in this order: `CREATE SCHEMA` / `CREATE TABLE` (every type mapped, plus `NOT NULL`,
+`DEFAULT`s and the `PRIMARY KEY`, created disabled); `FOREIGN KEY`s (disabled, composite supported); a
+`DISTRIBUTE BY` from the Netezza distribution key; table & column `COMMENT`s; the `IMPORT`s; a **CONSTRAINT STATE**
+section to run after the load; the source views as a **commented** review section; and (with `CHECK_MIGRATION`) a
+**DATA VALIDATION** section.
 
-Test the connectivity with a simple query like:
+**Data types & limitations.** *Every* type this NPS supports was CREATE-probed live; all are covered (no silent
+drops). `BYTEINT`/`SMALLINT`/`INTEGER`/`BIGINT` → `DECIMAL(3/5/10/19,0)`; `NUMERIC(p,s)` → `DECIMAL(p,s)` (Netezza
+max precision 38; `p > 36` → `DECIMAL_OVERFLOW`); `REAL`/`DOUBLE PRECISION`/`FLOAT` → `DOUBLE`. `CHARACTER`/
+`CHARACTER VARYING` and the national `NCHAR`/`NVARCHAR` → `CHAR`/`VARCHAR` `UTF8` (char > 2000 → `VARCHAR`). `DATE`
+→ `DATE`; **`TIME`** → `VARCHAR(15)`, **`TIME WITH TIME ZONE`** → `VARCHAR(21)` (Exasol has no `TIME` type);
+**`TIMESTAMP`** → `TIMESTAMP(6)` (full microsecond precision). **`INTERVAL`** → `VARCHAR` (lossless) or a best-effort
+native Exasol `INTERVAL DAY TO SECOND` (`INTERVAL_HANDLING`). `BOOLEAN` → `BOOLEAN`. **`JSON`/`JSONB`/`JSONPATH`** →
+`VARCHAR` (text). **`BINARY`/`VARBINARY`** (reported as `BINARY VARYING`) → `VARCHAR` **hex text** via `to_hex`
+(`BINARY_HANDLING`). **`ST_GEOMETRY`** → `VARCHAR` (WKT, best-effort, via `ST_ASTEXT`). A `VARCHAR(2000000)`
+catch-all covers anything unexpected (no silent drops). The IMPORT **fails loudly rather than corrupting data** when
+a `NUMERIC` needs more than 36 digits under `DECIMAL_OVERFLOW='CAP'`, or a binary value exceeds 32000 bytes under
+`BINARY_HANDLING='HEX'` (Netezza's 64000-char VARCHAR limit on the hex text). **Internal data types** (`ROWID`,
+`CREATEXID`, `DELETEXID`, `DATASLICEID`) are pseudo-columns not present in the catalog, so they are never migrated.
+**Temporal** types are stored internally as integers but read as calendar values (migrated by value, full µs).
+**Always excluded** (so only real user data appears): the Netezza system schemas (`DEFINITION_SCHEMA`,
+`INFORMATION_SCHEMA`). Not migrated (out of scope): indexes/zone maps, `ORGANIZE ON` (CBT) clustering, `UNIQUE`/
+`CHECK` constraints, sequences, procedures, materialized views. **Not present in this NPS** (CREATE rejects them, so
+they cannot occur): `MONEY`, `GRAPHIC`/`VARGRAPHIC`, `LONG VARCHAR`, `CLOB`/`BLOB`, `BYTE`/`VARBYTE`, `TIMESTAMP
+WITH TIME ZONE`, `XML`, `ARRAY`, `UUID`.
 
-```SQL
-SELECT *
-    FROM   (
-               IMPORT FROM JDBC AT netezza_connection
-               STATEMENT 'SELECT 1 as "sucessfully_connected" from _v_dual '
-           );
-```
-For the actual data-migration, see script [netezza_to_exasol.sql](netezza_to_exasol.sql)
+**Why some columns are read with a cast/function on the source.** Verified live with the Netezza JDBC driver
+(`nzjdbc3.jar`, NPS 11.3.1.2): the driver cannot transfer some types directly, so the generated IMPORT reads them as
+text — `TIME` (`Bad value for NZ_TIME`) and `INTERVAL` (`unknown` JDBC type) and `TIME WITH TIME ZONE` via
+`CAST(.. AS VARCHAR)`; **`BINARY`/`VARBINARY`** (raw = "unknown") via **`to_hex(..)`**; **`ST_GEOMETRY`** (raw + cast
+both fail) via **`ST_ASTEXT(..)`** (WKT). Everything else — integers, `NUMERIC`, `REAL`/`DOUBLE`, all char types
+(incl. multibyte `NCHAR`/`NVARCHAR`), `DATE`, `TIMESTAMP` (full µs), `BOOLEAN`, and **`JSON`/`JSONB`/`JSONPATH`**
+(raw transfer works) — is read directly. Column `DEFAULT`s carry a Netezza `::"TYPE"` cast (e.g. `'NEW'::"NVARCHAR"`)
+which is stripped. (The driver honours column aliases; explicit derived column lists are emitted anyway for
+robustness, as in the other reworks.)
+
+**Distribution.** The Netezza hash distribution key (`DISTRIBUTE ON`) is mapped to an Exasol `DISTRIBUTE BY`
+(`GENERATE_DISTRIBUTION_BY`, default true), verified live. Netezza has **no range partitioning** (only hash
+distribution + `ORGANIZE ON` clustering), so there is no `GENERATE_PARTITION_BY`; `ORGANIZE ON` is not mapped.
+
+**Intervals.** `INTERVAL_HANDLING='VARCHAR'` (default) migrates the interval as lossless text
+(`1 year 2 mons 3 days`). `INTERVAL_HANDLING='INTERVAL'` builds a native Exasol `INTERVAL DAY TO SECOND` from the
+day-time components (via Netezza `EXTRACT`) — a best-effort that covers **day-time** intervals; year/month
+components and sub-second fractions are not representable in Exasol's `INTERVAL DAY TO SECOND` and are not carried,
+so use `VARCHAR` when those occur.
+
+**Migration check (`CHECK_MIGRATION=true`).** For every migrated table the script builds a `"<table>_MIG_CHK"`
+table of standardized, cross-database-comparable metrics (row count, per-column NULL counts, numeric MIN/MAX/SUM,
+date/timestamp MIN/MAX, variable-char min/max length) computed on **both** Netezza and Exasol, plus a
+`DATABASE_MIGRATION."<schema>_MIG_CHK"` summary flagging each metric **`OK` / `DEVIATION`**. Review with
+`SELECT * FROM DATABASE_MIGRATION."<schema>_MIG_CHK" WHERE "STATUS" = 'DEVIATION';`.
+
+**Privileges/visibility:** the source metadata is read **through the connection's user**, so the script sees only
+the objects that user may access. **To migrate everything, use a user with sufficient privileges on the source.**
+
+See the header of [netezza_to_exasol.sql](netezza_to_exasol.sql) for more information!
+
 
 ### Oracle
 
