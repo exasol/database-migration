@@ -160,59 +160,98 @@ For the actual data-migration, see script [bigquery_to_exasol.sql](bigquery_to_e
 
 Note: Due to the lack of an alternative datatype, the following Google BigQuery datatypes; `DATE`,`DATETIME`,`TIMESTAMP` and `ARRAY` are stored as VARCHAR. 
 
+
 ### MariaDB
 
-**Download Driver**
+The [mariadb_to_exasol.sql](mariadb_to_exasol.sql) script generates the statements to migrate a MariaDB database
+(**MariaDB 10.5+ / 11.x / 12.x**) to Exasol v8. It runs on the **target** Exasol database, reads the **source**
+metadata through a JDBC connection and **returns** the statements to recreate and load the source. It changes
+nothing itself — you review the output and run it, in the order returned. *(MariaDB is a fork of MySQL; this
+script shares most of the `mysql_to_exasol.sql` mapping but handles the MariaDB-specific behavior below.)*
 
-Download the JDBC driver for MariaDB from the [MariaDB connectors page](https://mariadb.com/downloads/connectors/connectors-data-access/java8-connector/). In the Product dropdown menu select **Java 8+connector**, in the Version dropdown menu select **the newest version**, in the OS dropdown menu select **Platform Independent**.
+**Step by step**
+* **Install** the script on the **target** database (run [mariadb_to_exasol.sql](mariadb_to_exasol.sql) once; it
+  creates `DATABASE_MIGRATION.MARIADB_TO_EXASOL`).
+* **Install the JDBC driver** in BucketFS: use the latest MariaDB **`mariadb-java-client`** driver
+  ([Maven](https://mvnrepository.com/artifact/org.mariadb.jdbc/mariadb-java-client)). See
+  [Load data from MariaDB](https://docs.exasol.com/db/latest/loading_data/connect_sources/mariadb.htm).
+* **Create a connection** on the target pointing at the source database. A ready-to-edit `CREATE CONNECTION`
+  example and a connection test are at the bottom of the script.
+* **Adapt the `EXECUTE SCRIPT` parameters** to your scenario and run it.
+* **Copy the result set** into another session and execute the statements **in the output order** (the
+  CONSTRAINT STATE section, and — if enabled — the DATA VALIDATION section, run after the IMPORTs).
 
-**Configure the Driver in EXAoperation, database versions prior to v8**
-
-Do the following to configure the driver in EXAoperation:
-1.	Log in to EXAoperation user interface as an Administrator user.
-2.	Select **Configuration > Software** and click the **JDBC Drivers** tab.
-3.	Click **Add** to add the JDBC driver details.
-4.	Enter the following details for the JDBC properties:
-* **Driver Name:** `MariaDB`
-* **Main Class:** `org.mariadb.jdbc.Driver`
-* **Prefix:** `jdbc:mariadb:`
-* **Disable Security Manager:** `Check the box to disable the security manager.` This allows the JDBC Driver to access certificate and additional information.
-* **Comment:** `This is an optional field.`
-
-5.	Click **Add** to save the settings.
-6.	Select the radio button next to the driver from list of JDBC driver.
-7.	Click **Choose File** to locate the downloaded driver and click **Upload** to upload the JDBC driver.
-
-For Exasol v8 or newer use the values above in [Load data using JDBC (generic)](https://docs.exasol.com/db/latest/loading_data/connect_sources/import_data_using_jdbc.htm).
-
-You can find a detailed information about the MariaDB driver at the following link: https://mariadb.com/kb/en/about-mariadb-connector-j/
-
-
-**Test Connectivity**
-
-
-To test the connectivity of Exasol to MariaDB create the following connection in your SQL client:
-
-```SQL
-CREATE OR REPLACE CONNECTION JDBC_MARIADB
-    TO 'jdbc:mariadb://192.168.56.103:3306/my_database'
-    USER 'user_name'
-    IDENTIFIED BY 'my_password';
-```
-
-You need to have CREATE CONNECTION privilege granted to the user used to do this. The connection string and authentication details in the example must be replaced with your own values.
-
-Run the following statement to test the connection:
-
-```SQL
-select * from 
-(
-import from JDBC at JDBC_MARIADB
-statement 'select ''Connection works'' from dual'
+```sql
+EXECUTE SCRIPT DATABASE_MIGRATION.MARIADB_TO_EXASOL(
+    'MARIADB_JDBC',     -- CONNECTION_NAME: name of the JDBC connection created at the bottom of the script
+    true,               -- IDENTIFIER_CASE_INSENSITIVE: true (recommended) => fold ALL identifiers to UPPER so Exasol queries never need quotes; false => keep verbatim/quoted
+    '%',                -- SCHEMA_FILTER: source database(s): 'mydb', 'sales_%', '%' (all; system schemas always excluded)
+    '%',                -- TABLE_FILTER: table(s)/view(s): 'my_table', 'my_%', '%' (all)
+    '',                 -- TARGET_SCHEMA: Exasol target schema; '' (recommended) => use the source schema name
+    'FORCE_DISABLE',    -- CONSTRAINT_STATE: 'FORCE_DISABLE' (recommended; PK/FK kept as metadata only - faster, order-independent imports, still used by BI tools), 'SET_AS_SOURCE' or 'FORCE_ENABLE' (all keys enabled = Exasol re-validates the data)
+    true,               -- GENERATE_COMMENTS: true (recommended) => migrate MariaDB comments as COMMENT ON; false => skip
+    true,               -- GENERATE_VIEWS: true => emit source views as a commented manual-review section; false => skip
+    true,               -- GENERATE_PARTITION_BY: true => add a best-effort PARTITION BY from a single-column MariaDB partition key; complex partitioning is listed as a commented manual-review note; false => skip
+    'BASE64',           -- BINARY_HANDLING: 'BASE64' (recommended; binary/blob migrated losslessly as base64 text - Exasol has no general binary type) or 'SKIP' (load NULL)
+    'CAP',              -- DECIMAL_OVERFLOW: 'CAP' (recommended; decimal>36 -> DECIMAL(36,s); IMPORT fails for values needing > 36 digits), 'DOUBLE' (~15 significant digits) or 'VARCHAR' (lossless text)
+    false,              -- TRUNCATE_LONG_STRINGS: false (recommended) => import fails on a value > 2,000,000 chars; true => cut such values to 2,000,000 chars and import
+    'NULL',             -- TEMPORAL_OUT_OF_RANGE: 'NULL' (recommended for MariaDB; zero-date -> NULL, matching the driver), 'CLAMP' (-> 0001-01-01) or 'FAIL' (IMPORT fails loudly on a zero-date)
+    false,              -- TINYINT1_AS_BOOLEAN: false (recommended; tinyint(1) -> DECIMAL(3,0), value preserved) or true (tinyint(1) -> BOOLEAN)
+    false               -- CHECK_MIGRATION: false (recommended default) => skip; true => also build per-table "<table>_MIG_CHK" metric tables and a "<schema>_MIG_CHK" summary that compares source vs. target (run after the IMPORTs)
 );
 ```
 
-For the actual data-migration, see script [mariadb_to_exasol.sql](mariadb_to_exasol.sql)
+This script generates, in this order: `CREATE SCHEMA` / `CREATE TABLE` (every type mapped, plus `NOT NULL`,
+`DEFAULT`s and the `PRIMARY KEY`, created disabled); `FOREIGN KEY`s (disabled, composite supported); a
+best-effort `PARTITION BY`; table & column `COMMENT`s; the `IMPORT`s; a **CONSTRAINT STATE** section to run after
+the load; the source views as a **commented** review section; and (with `CHECK_MIGRATION`) a **DATA VALIDATION**
+section.
+
+**Data types & limitations.** Every MariaDB type is covered (no silent drops). Integers map to
+`DECIMAL(3/5/7/10/19,0)` — **`UNSIGNED` widens** `mediumint`→`DECIMAL(8,0)` and `bigint`→`DECIMAL(20,0)`;
+`decimal(p,s)`→`DECIMAL(p,s)`, `float`/`double`→`DOUBLE`, `bit(M)`→`DECIMAL`. `date`→`DATE`; `datetime(p)` keeps
+full precision; **`timestamp(p)`→`TIMESTAMP(p) WITH LOCAL TIME ZONE`**, `datetime(p)`→`TIMESTAMP(p)` (wall clock).
+Character columns map to **`UTF8`**; `char>2000`→`VARCHAR`; `tinytext…longtext`/`json`→`VARCHAR(2000000)`
+(**MariaDB `JSON` is an alias for `LONGTEXT`**); **`enum`/`set`→`VARCHAR`**. **MariaDB-only native types**:
+**`UUID`→`CHAR(36)`**, **`INET4`→`VARCHAR(15)`**, **`INET6`→`VARCHAR(45)`**. **`binary`/`varbinary`/`*blob`→
+base64 text** (`BINARY_HANDLING`). `time`→`VARCHAR(17)` (Exasol has no TIME type; MariaDB `TIME` spans
+`-838:59:59 … 838:59:59`), `year`→`VARCHAR(4)`, spatial types→**`GEOMETRY`** (WKT). **`tinyint(1)`**→`DECIMAL(3,0)`
+(value preserved; the driver otherwise coerces it to boolean), or `BOOLEAN` with `TINYINT1_AS_BOOLEAN=true`.
+**`decimal` with > 36 digits** is handled via `DECIMAL_OVERFLOW`. The IMPORT **fails loudly rather than
+corrupting data** when a value needs more than 36 decimal digits (`CAP`) or exceeds 2,000,000 characters (unless
+`TRUNCATE_LONG_STRINGS=true`). **Always excluded** (so only real user data appears): the MariaDB **system
+schemas** (`mysql`, `information_schema`, `performance_schema`, `sys`) and **sequences**. Not migrated (out of
+scope): indexes, `UNIQUE`/`CHECK` constraints, triggers, routines, events. `AUTO_INCREMENT` and `STORED`/`VIRTUAL`
+generated columns are migrated as plain columns carrying their values.
+
+**Defaults & casts (MariaDB specifics).** MariaDB's `information_schema` returns SQL-literal-formatted defaults
+(a no-default column reads as `'NULL'`, string defaults are already quoted, `CURRENT_TIMESTAMP` reads as
+`current_timestamp()`); they are passed through faithfully. Some columns must be read with a `CAST` on the source
+(verified with Connector/J 3.5.9): `UNSIGNED` integers and `BIT` exceed their signed Java type (and overflow on a
+direct read), `YEAR` is returned as a `DATE`, `TIME` keeps its range/fraction, and the native `UUID` type is not
+transferable directly — all are read via `CAST(.. AS CHAR)` into the target.
+
+**Zero-dates.** MariaDB allows `0000-00-00` and the MariaDB driver converts it to `NULL` on read, so the default
+`TEMPORAL_OUT_OF_RANGE='NULL'` loads such values as `NULL`; `CLAMP` maps them to `0001-01-01` and `FAIL` makes the
+IMPORT fail loudly.
+
+**Sequences & system-versioned tables.** `CREATE SEQUENCE` objects are **skipped** (Exasol has no sequence type).
+**System-versioned** tables (`WITH SYSTEM VERSIONING`) are migrated as a normal table holding their **current**
+rows (Exasol has no system-versioning; the hidden period columns are not migrated and are dropped from the PK).
+
+**Partitioning.** A single-column MariaDB partition key is mapped best-effort to an Exasol `PARTITION BY`;
+`HASH`/`KEY`/expression partitioning is emitted as a commented review note. A MariaDB partitioned table is one
+logical table, so data is never migrated twice. (MariaDB has no distribution concept, so no `DISTRIBUTE BY`.)
+
+**Migration check (`CHECK_MIGRATION=true`).** For every migrated table the script builds a `"<table>_MIG_CHK"`
+table of standardized, cross-database-comparable metrics computed on **both** MariaDB and Exasol, plus a
+`DATABASE_MIGRATION."<schema>_MIG_CHK"` summary flagging each metric **`OK` / `DEVIATION`**. Review with
+`SELECT * FROM DATABASE_MIGRATION."<schema>_MIG_CHK" WHERE "STATUS" = 'DEVIATION';`.
+
+**Privileges/visibility:** the source metadata is read **through the connection's user**, so the script sees only
+the objects that user may access. **To migrate everything, use a user with sufficient privileges on the source.**
+
+See the header of [mariadb_to_exasol.sql](mariadb_to_exasol.sql) for more information!
 
 
 ### MySQL
