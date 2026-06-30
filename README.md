@@ -193,21 +193,24 @@ EXECUTE SCRIPT DATABASE_MIGRATION.EXASOL_TO_EXASOL(
   ,'%'           -- TABLE_FILTER: table name/filter, '%' = all
   ,true          -- GENERATE_VIEWS: true/false, include views (emitted as CREATE OR REPLACE FORCE VIEW)
   ,'%'           -- VIEW_FILTER: view name/filter, '%' = all
-  ,'DISABLE'     -- PK_SETTING: 'DISABLE' (faster load; appends an ENABLE-keys section) or 'ENABLE'
+  ,'FORCE_DISABLE' -- CONSTRAINT_STATE: 'FORCE_DISABLE' (recommended; PK/FK kept as metadata only - faster, order-independent imports, still used by BI tools), 'SET_AS_SOURCE' (each key ends in its source ENABLED/DISABLED state) or 'FORCE_ENABLE' (all keys enabled = Exasol re-validates the data)
   ,'8'           -- TARGET_VERSION: '8' (default) or '7' (downgrade: TIMESTAMP(p) -> TIMESTAMP)
 );
 ```
 
 This script generates, in this order:
 * `CREATE SCHEMA` and `CREATE TABLE` — columns keep their **exact source type** (so every data type *and* its
-  character set `ASCII`/`UTF8` is reproduced 1:1), plus `NOT NULL`, `IDENTITY` and column `DEFAULT`s
-* primary keys (quoted, in constraint order) and `ALTER TABLE … ADD … FOREIGN KEY`
+  character set `ASCII`/`UTF8` is reproduced 1:1), plus `NOT NULL`, `IDENTITY` and column `DEFAULT`s; primary
+  keys are created **disabled** (in constraint order)
+* `ALTER TABLE … ADD … FOREIGN KEY` (created **disabled**)
 * `ALTER TABLE … PARTITION BY` and `ALTER TABLE … DISTRIBUTE BY`
 * table & column `COMMENT`s
 * `IMPORT` of the data (typed transfer — differing source/target NLS does not affect the data; nanosecond
   `TIMESTAMP(9)` is preserved over both EXA and JDBC)
-* when `PK_SETTING='DISABLE'`: an **ENABLE PRIMARY & FOREIGN KEYS** section to run after the import (loading
-  is much faster with keys disabled; primary keys are enabled before foreign keys)
+* a **CONSTRAINT STATE** section to run after the import (primary/foreign keys are always created disabled so
+  loading is much faster and order-independent; this section sets each key's final state per `CONSTRAINT_STATE`
+  — `FORCE_DISABLE` keeps them disabled, `SET_AS_SOURCE` restores the source state, `FORCE_ENABLE` enables every
+  key — primary keys before foreign keys)
 * views, including their comment, created `WITH FORCE`
 
 System schemas (`SYS`, `EXA_STATISTICS`) and **virtual** objects are skipped. `7.1 → 8` and `7.1 → 7.1`
@@ -220,6 +223,7 @@ access on the source; the generated statements run on the target only where you 
 privileges. **To migrate everything, use a user with DBA privileges on both the source and the target.**
 
 See the header of [exasol_to_exasol.sql](exasol_to_exasol.sql) for more information!
+
 
 ### Google BigQuery
 
