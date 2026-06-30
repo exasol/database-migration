@@ -102,6 +102,15 @@ create schema if not exists database_migration;
     Views: SQL Server view bodies are T-SQL and cannot be auto-translated; with GENERATE_VIEWS = true they
     are emitted as a COMMENTED "manual review" section.
 
+    DATA VALIDATION (CHECK_MIGRATION): with true, the script additionally emits, for every migrated table, a
+    "<table>_MIG_CHK" table of standardized cross-database-comparable metrics computed on BOTH systems (the
+    Exasol target via a local SELECT and the SQL Server source via IMPORT) - row count, per-column NULL counts,
+    numeric MIN/MAX/SUM (exact integer/decimal types only), date/datetime MIN/MAX (to the second) and DISTINCT
+    counts - plus a DATABASE_MIGRATION."<schema>_MIG_CHK" summary flagging each metric OK / DEVIATION. Run this
+    section AFTER the IMPORTs; review with SELECT * FROM DATABASE_MIGRATION."<schema>_MIG_CHK" WHERE "STATUS" =
+    'DEVIATION'. The metric set is mapping-aware (e.g. float/real and binary/LOB/CLR/json/vector are excluded
+    from value metrics) so faithful data yields zero deviations.
+
     Privileges: source metadata is read THROUGH the connection user, so only the objects that user can see
     are generated. Use a user with sufficient rights (e.g. db_owner / VIEW DEFINITION) to migrate everything.
 */
@@ -121,6 +130,7 @@ create or replace script database_migration.SQLSERVER_TO_EXASOL(
   ,BINARY_HANDLING             -- 'HASHTYPE' (fixed binary -> HASHTYPE, variable -> hex), 'HEX' (always hex VARCHAR) or 'SKIP' (load NULL)
   ,DECIMAL_OVERFLOW            -- 'CAP' (DECIMAL(36,s); IMPORT fails for values > 36 digits) or 'DOUBLE' (loads, ~15 significant digits) for source precision > 36
   ,TRUNCATE_LONG_STRINGS       -- true: values > 2,000,000 chars are CUT to 2,000,000 and imported; false: the IMPORT fails on such a value (no silent truncation)
+  ,CHECK_MIGRATION             -- true/false: additionally emit data-validation metrics (per-table "<table>_MIG_CHK" + a "<schema>_MIG_CHK" summary comparing source vs target). Run AFTER the IMPORTs.
 ) RETURNS TABLE
 AS
 
@@ -144,6 +154,7 @@ binmode = string.upper(tostring(BINARY_HANDLING))
 if binmode ~= 'HEX' and binmode ~= 'SKIP' then binmode = 'HASHTYPE' end
 decof = string.upper(tostring(DECIMAL_OVERFLOW))
 if decof ~= 'DOUBLE' then decof = 'CAP' end
+gen_check = (CHECK_MIGRATION == true) or (string.upper(tostring(CHECK_MIGRATION)) == 'TRUE')
 -- All character columns are mapped to UTF8: lossless for any source code page and the safe universal target.
 csU = 'UTF8'
 
@@ -424,6 +435,83 @@ if gen_views then
 UNION ALL select 91, sql_text from vv_views]]
 end
 
+-- CHECK_MIGRATION: per migrated table a wide single-scan metrics row on BOTH systems (Exasol target via a local
+-- SELECT + SQL Server source via IMPORT) into "<table>_MIG_CHK"; a per-schema DATABASE_MIGRATION."<schema>_MIG_CHK"
+-- summary unpivots+joins them, flagging each metric OK/DEVIATION. Mapping-aware: only cross-comparable metrics per
+-- type (row/NULL/DISTINCT counts; numeric MIN/MAX/SUM on EXACT integer/decimal types only - not float/real;
+-- date/datetime MIN/MAX as text to the second). The 'SQLServer' label is added on the Exasol side so the source
+-- SELECT carries no string literals (no extra quote-nesting).
+check_cte = ''
+check_union = ''
+if gen_check then
+	c_num    = [[BASE_TYPE_NAME in ('tinyint','smallint','int','bigint','decimal','numeric','money','smallmoney')]]
+	c_dt     = [[BASE_TYPE_NAME in ('date','datetime','datetime2','smalldatetime')]]
+	c_dist   = [[BASE_TYPE_NAME in ('bit','tinyint','smallint','int','bigint','decimal','numeric','money','smallmoney','date','datetime','datetime2','smalldatetime','uniqueidentifier')]]
+	exa_dtf  = [[(case when BASE_TYPE_NAME = 'date' then '''YYYY-MM-DD''' else '''YYYY-MM-DD HH24:MI:SS''' end)]]
+	ss_len   = [[(case when BASE_TYPE_NAME = 'date' then 10 else 19 end)]]
+	ss_sty   = [[(case when BASE_TYPE_NAME = 'date' then 23 else 120 end)]]
+	if DB2SCHEMA then chk_tbl = U([[SCHEMA_NAME || '_' || TABLE_NAME || '_MIG_CHK']]) else chk_tbl = U([[TABLE_NAME || '_MIG_CHK']]) end
+	check_cte = [[
+,vv_chk_cols as (
+	select DB_NAME, SCHEMA_NAME, TABLE_NAME, COLUMN_ID, COLUMN_NAME, BASE_TYPE_NAME, IS_NULLABLE,
+		(case when BASE_TYPE_NAME in ('money','smallmoney') then 4 when SCALE < 0 then 0 when SCALE > 6 then 6 else SCALE end) as MSC,
+		'"' || ]]..U('COLUMN_NAME')..[[ || '"' as EREF, '[' || COLUMN_NAME || ']' as SREF,
+		min(COLUMN_ID) over (partition by DB_NAME, SCHEMA_NAME, TABLE_NAME) as MIN_COLID,
+		]]..main_qname..[[ as TGT, ]]..main_sname..[[ as TGTSCH, '"' || ]]..main_sname..[[ || '"."' || ]]..chk_tbl..[[ || '"' as WIDEQ
+	from sqlserv_base where not (]]..unsup..[[)
+)
+,vv_chk_x as (
+	select c.*, sysrow.DB_SYSTEM, m.metric_id,
+		(case when sysrow.DB_SYSTEM = 'Exasol' then c.EREF else c.SREF end) as CREF,
+		(case when sysrow.DB_SYSTEM = 'Exasol' then 'count' else 'count_big' end) as CFN
+	from vv_chk_cols c
+	cross join (select 'Exasol' as DB_SYSTEM union all select 'SQLServer' as DB_SYSTEM) sysrow
+	cross join (select level-1 as metric_id from dual connect by level <= 6) m
+)
+,vv_chk_e as (
+	select DB_NAME, SCHEMA_NAME, TABLE_NAME, COLUMN_ID, COLUMN_NAME, TGT, TGTSCH, WIDEQ, DB_SYSTEM, metric_id,
+		(case metric_id
+			when 0 then case when COLUMN_ID = MIN_COLID then 'cast(' || CFN || '(*) as decimal(36,0))' end
+			when 1 then case when IS_NULLABLE = 1 then 'cast(' || CFN || '(case when ' || CREF || ' is null then 1 end) as decimal(36,0))' end
+			when 2 then (case when ]]..c_num..[[ then 'cast(min(' || CREF || ') as decimal(36,' || MSC || '))'
+			                  when ]]..c_dt..[[ then (case when DB_SYSTEM = 'Exasol' then 'to_char(min(' || CREF || '),' || ]]..exa_dtf..[[ || ')' else 'convert(varchar(' || ]]..ss_len..[[ || '),min(' || CREF || '),' || ]]..ss_sty..[[ || ')' end) end)
+			when 3 then (case when ]]..c_num..[[ then 'cast(max(' || CREF || ') as decimal(36,' || MSC || '))'
+			                  when ]]..c_dt..[[ then (case when DB_SYSTEM = 'Exasol' then 'to_char(max(' || CREF || '),' || ]]..exa_dtf..[[ || ')' else 'convert(varchar(' || ]]..ss_len..[[ || '),max(' || CREF || '),' || ]]..ss_sty..[[ || ')' end) end)
+			when 4 then case when ]]..c_num..[[ then 'cast(sum(' || CREF || ') as decimal(36,' || MSC || '))' end
+			when 5 then case when ]]..c_dist..[[ then 'cast(' || CFN || '(distinct ' || CREF || ') as decimal(36,0))' end
+		end) as MEXPR,
+		(case metric_id when 0 then 'ROW_CNT' when 1 then COLUMN_NAME || '_NULLS' when 2 then COLUMN_NAME || '_MIN' when 3 then COLUMN_NAME || '_MAX' when 4 then COLUMN_NAME || '_SUM' when 5 then COLUMN_NAME || '_DISTINCT' end) as MNAME
+	from vv_chk_x
+)
+,vv_chk_named as (select * from vv_chk_e where MEXPR is not null)
+,vv_chk_sys as (
+	select DB_NAME, SCHEMA_NAME, TABLE_NAME, TGTSCH, WIDEQ, DB_SYSTEM,
+		case when DB_SYSTEM = 'Exasol'
+			then 'select ''Exasol'' as "DB_SYSTEM", ' || group_concat(MEXPR || ' as "' || ]]..U('MNAME')..[[ || '"' order by COLUMN_ID, metric_id separator ', ') || ' from ' || max(TGT)
+			else 'select ''SQLServer'' as "DB_SYSTEM", x.* from (import from jdbc at ]]..CONNECTION_NAME..[[ statement ' || '''' || 'select ' || group_concat(MEXPR order by COLUMN_ID, metric_id separator ', ') || ' from [' || max(DB_NAME) || '].[' || max(SCHEMA_NAME) || '].[' || max(TABLE_NAME) || ']' || '''' || ') x'
+		end as SEL
+	from vv_chk_named group by DB_NAME, SCHEMA_NAME, TABLE_NAME, TGTSCH, WIDEQ, DB_SYSTEM
+)
+,vv_chk_wide as (
+	select 'create or replace table ' || WIDEQ || ' as ' || max(case when DB_SYSTEM = 'Exasol' then SEL end) || ' UNION ALL ' || max(case when DB_SYSTEM = 'SQLServer' then SEL end) || ';' as sql_text
+	from vv_chk_sys group by TGTSCH, WIDEQ
+)
+,vv_chk_unpiv as (
+	select TGTSCH, TABLE_NAME, COLUMN_ID, metric_id, DB_SYSTEM, WIDEQ, MNAME,
+		'select ' || '''' || TABLE_NAME || '''' || ' as "TABLE_NAME", ' || '''' || MNAME || '''' || ' as "METRIC", to_char("' || ]]..U('MNAME')..[[ || '") as "VAL" from ' || WIDEQ || ' where "DB_SYSTEM" = ' || '''' || DB_SYSTEM || '''' as FRAG
+	from vv_chk_named
+)
+,vv_chk_summary as (
+	select 'create or replace table "DATABASE_MIGRATION"."' || ]]..U('TGTSCH')..[[ || '_MIG_CHK" as select e."TABLE_NAME", e."METRIC", e."VAL" as "EXASOL_METRIC", s."VAL" as "SQLSERVER_METRIC", case when coalesce(e."VAL", ''~NULL~'') = coalesce(s."VAL", ''~NULL~'') then ''OK'' else ''DEVIATION'' end as "STATUS" from (' || group_concat(case when DB_SYSTEM = 'Exasol' then FRAG end order by TABLE_NAME, COLUMN_ID, metric_id separator ' union all ') || ') e join (' || group_concat(case when DB_SYSTEM = 'SQLServer' then FRAG end order by TABLE_NAME, COLUMN_ID, metric_id separator ' union all ') || ') s on e."TABLE_NAME" = s."TABLE_NAME" and e."METRIC" = s."METRIC" order by "STATUS" desc, e."TABLE_NAME", e."METRIC";' as sql_text
+	from vv_chk_unpiv group by TGTSCH
+)]]
+	check_union = "\n"..[[UNION ALL select 70, cast('-- ### DATA VALIDATION (CHECK_MIGRATION) - run AFTER the IMPORTs; compares source vs target metrics ###' as varchar(2000000)) SQL_TEXT
+UNION ALL select 71, sql_text from vv_chk_wide
+UNION ALL select 72, cast('-- per-schema validation summary (one row per metric; STATUS = OK / DEVIATION):' as varchar(2000000))
+UNION ALL select 73, sql_text from vv_chk_summary
+UNION ALL select 74, cast('-- review deviations with:  SELECT * FROM DATABASE_MIGRATION."<schema>_MIG_CHK" WHERE "STATUS" = ''DEVIATION'';' as varchar(2000000))]]
+end
+
 -------------------------------------------------------------------------------------------------------
 -- Main query: build all sections and return them in execution order.
 -------------------------------------------------------------------------------------------------------
@@ -464,7 +552,7 @@ with sqlserv_base as (
 ,cr_imports as (
 	select 'import into ' || ]]..main_qname..[[ || ' (' || group_concat(case when ]]..unsup..[[ then NULL else '"' || ]]..U('COLUMN_NAME')..[[ || '"' end order by COLUMN_ID separator ', ') || ') from jdbc at ]]..CONNECTION_NAME..[[ statement ' || '''' || 'select ' || group_concat(case when ]]..unsup..[[ then NULL else (]]..src_expr..[[) end order by COLUMN_ID separator ', ') || ' from [' || DB_NAME || '].[' || SCHEMA_NAME || '].[' || TABLE_NAME || ']' || '''' || ';' as sql_text
 	from sqlserv_base group by DB_NAME, SCHEMA_NAME, TABLE_NAME
-)]]..comments_cte..views_cte..[[
+)]]..comments_cte..views_cte..check_cte..[[
 select SQL_TEXT from (
 	select 0 as ord, sql_text SQL_TEXT from vv_unsupported
 	UNION ALL select 1, cast('-- ### SCHEMAS ###' as varchar(2000000)) SQL_TEXT
@@ -477,7 +565,7 @@ select SQL_TEXT from (
 	UNION ALL select 51, sql_text from cr_imports
 	UNION ALL select 60, cast('-- ### CONSTRAINT STATE - run AFTER the data load (keys were created DISABLED for a fast, order-independent load) ###' as varchar(2000000)) SQL_TEXT
 	UNION ALL select 61, 'alter table ' || ]]..qname('SCHEMA_NAME','TABLE_NAME','DB_NAME')..[[ || ' modify constraint "' || ]]..U('PK_NAME')..[[ || '"' || (]]..pk_state..[[) from vv_pk
-	UNION ALL select 62, 'alter table ' || ]]..fk_parent..[[ || ' modify constraint "' || ]]..U('FK_NAME')..[[ || '"' || (]]..fk_state..[[) from vv_fk]]..views_union..[[
+	UNION ALL select 62, 'alter table ' || ]]..fk_parent..[[ || ' modify constraint "' || ]]..U('FK_NAME')..[[ || '"' || (]]..fk_state..[[) from vv_fk]]..views_union..check_union..[[
 ) order by ord
 ]],{})
 
@@ -545,5 +633,6 @@ EXECUTE SCRIPT database_migration.SQLSERVER_TO_EXASOL(
     true,               -- GENERATE_PARTITION_BY:       true => add a best-effort PARTITION BY (from the SQL Server partitioning column) inside the CREATE TABLE; false => skip
     'HASHTYPE',         -- BINARY_HANDLING:             'HASHTYPE' (recommended; fixed binary -> HASHTYPE, variable -> hex), 'HEX' (always hex VARCHAR) or 'SKIP' (load NULL)
     'CAP',              -- DECIMAL_OVERFLOW:            'CAP' (recommended; DECIMAL(36,s), import fails for values needing > 36 digits) or 'DOUBLE' (loads with ~15 significant digits)
-    false               -- TRUNCATE_LONG_STRINGS:       false (recommended) => import fails on a value > 2,000,000 chars; true => cut such values to 2,000,000 chars and import
+    false,              -- TRUNCATE_LONG_STRINGS:       false (recommended) => import fails on a value > 2,000,000 chars; true => cut such values to 2,000,000 chars and import
+    false               -- CHECK_MIGRATION:             false (recommended default) => skip; true => also build "<table>_MIG_CHK" metric tables + a "<schema>_MIG_CHK" summary (source vs target) for post-load validation
 );

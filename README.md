@@ -1,5 +1,5 @@
 # Database migration
-[![Build Status](https://travis-ci.org/exasol/database-migration.svg?branch=master)](https://travis-ci.org/exasol/database-migration)
+
 
 > ## ⚠️ Please note
 >
@@ -833,7 +833,8 @@ EXECUTE SCRIPT DATABASE_MIGRATION.SQLSERVER_TO_EXASOL(
     true,               -- GENERATE_PARTITION_BY: true => add a best-effort PARTITION BY (from the SQL Server partitioning column) inside the CREATE TABLE; false => skip
     'HASHTYPE',         -- BINARY_HANDLING: 'HASHTYPE' (recommended; fixed binary -> HASHTYPE, variable -> hex), 'HEX' (always hex VARCHAR) or 'SKIP' (load NULL)
     'CAP',              -- DECIMAL_OVERFLOW: 'CAP' (recommended; DECIMAL(36,s), import fails for values needing > 36 digits) or 'DOUBLE' (loads with ~15 significant digits)
-    false               -- TRUNCATE_LONG_STRINGS: false (recommended) => import fails on a value > 2,000,000 chars; true => cut such values to 2,000,000 chars and import
+    false,              -- TRUNCATE_LONG_STRINGS: false (recommended) => import fails on a value > 2,000,000 chars; true => cut such values to 2,000,000 chars and import
+    false               -- CHECK_MIGRATION: false (recommended default) => skip; true => also build "<table>_MIG_CHK" metric tables + a "<schema>_MIG_CHK" summary (source vs target) for post-load validation
 );
 ```
 
@@ -850,6 +851,8 @@ This script generates, in this order:
   order-independent load; this section then sets them per `CONSTRAINT_STATE`)
 * with `GENERATE_VIEWS`: the source views as a **commented** manual-review section (T-SQL is not
   auto-translated)
+* with `CHECK_MIGRATION`: a **DATA VALIDATION** section — per-table `"<table>_MIG_CHK"` metric tables and a
+  `"<schema>_MIG_CHK"` summary (run after the IMPORTs)
 
 **Data types & limitations.** Mapping is by base system type, so **alias user-defined types resolve to their
 base type automatically**; **CLR/assembly UDTs and unknown types are skipped with a prominent warning**.
@@ -865,6 +868,14 @@ data/structures appear): the built-in **system schemas** (`sys`, `INFORMATION_SC
 `spt_*`, replication/CDC) and **external/"virtual" tables** (`is_external`); the user's own schemas (incl.
 `dbo`) are kept. Not migrated (out of scope): indexes, `UNIQUE`/`CHECK` constraints,
 functions/procedures/triggers, users/roles/permissions. See the script header for the full mapping table.
+
+**Migration check (`CHECK_MIGRATION=true`).** For every migrated table the script builds a `"<table>_MIG_CHK"`
+table of standardized, cross-database-comparable metrics (row count, per-column NULL counts, numeric MIN/MAX/SUM
+on exact integer/decimal types, date/datetime MIN/MAX to the second, DISTINCT counts) computed on **both** SQL
+Server and Exasol, plus a `DATABASE_MIGRATION."<schema>_MIG_CHK"` summary flagging each metric **`OK` /
+`DEVIATION`**. The metric set is mapping-aware (float/real and binary/LOB/CLR/`json`/`vector` are excluded from
+value metrics) so faithful data yields zero deviations. Review with
+`SELECT * FROM DATABASE_MIGRATION."<schema>_MIG_CHK" WHERE "STATUS" = 'DEVIATION';`.
 
 **Privileges/visibility:** the source metadata is read **through the connection's user**, so the script sees
 — and generates statements for — only the objects that user may access. **To migrate everything, use a user
