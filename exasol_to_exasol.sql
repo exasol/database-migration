@@ -25,11 +25,12 @@ create schema if not exists database_migration;
     (created WITH FORCE so view-to-view ordering does not matter). System schemas (SYS, EXA_STATISTICS)
     and VIRTUAL schema objects are excluded.
 
-    Loading tip: data loads MUCH faster while primary/foreign keys are disabled. Run with PK_SETTING =
-    'DISABLE' (recommended): the keys are created in the DISABLEd state and the script appends a final
-    "ENABLE PRIMARY & FOREIGN KEYS" section. Run that section AFTER the IMPORTs to (re)validate and
-    activate every key (primary keys are enabled before foreign keys). With PK_SETTING = 'ENABLE' the keys
-    are active immediately and no ENABLE section is generated.
+    Constraints: primary/foreign keys are ALWAYS created in the DISABLEd state (data loads MUCH faster, and
+    the load is order-independent), then a final "CONSTRAINT STATE" section sets each key's final state - run
+    that section AFTER the IMPORTs (primary keys are processed before foreign keys). CONSTRAINT_STATE controls
+    the result: 'FORCE_DISABLE' (recommended) keeps every key disabled (kept as optimizer/BI metadata only);
+    'SET_AS_SOURCE' restores each key to the exact ENABLED/DISABLED state it has on the source; 'FORCE_ENABLE'
+    enables every key (Exasol re-validates the data while enabling).
 
     Not migrated (out of scope): functions, scripts/UDFs/adapters, users/roles/privileges, connections.
 
@@ -56,7 +57,7 @@ create or replace script database_migration.EXASOL_TO_EXASOL(
   ,TABLE_FILTER                -- filter for the tables to generate and load -> '%' for all
   ,GENERATE_VIEWS              -- true/false: include views
   ,VIEW_FILTER                 -- filter for the views to generate -> '%' for all
-  ,PK_SETTING                  -- ENABLE or DISABLE: state of the generated primary/foreign key constraints. 'DISABLE' = much faster load; an "ENABLE PRIMARY & FOREIGN KEYS" section is appended to run after the IMPORTs
+  ,CONSTRAINT_STATE            -- 'FORCE_DISABLE' (recommended), 'SET_AS_SOURCE' or 'FORCE_ENABLE'; PK/FK are always created DISABLED, then a final CONSTRAINT STATE section sets them after the IMPORTs
   ,TARGET_VERSION              -- target Exasol major version: '8' (default, no change) or '7' (downgrade TIMESTAMP(p) -> TIMESTAMP)
 ) RETURNS TABLE
 AS
@@ -113,33 +114,38 @@ UNION ALL
 select 20, g.* from vv_create_views g]]
 end
 
--- When the constraints are generated DISABLEd (PK_SETTING = 'DISABLE'), also emit the statements that
--- ENABLE every primary and foreign key afterwards. Loading data is much faster while keys are disabled;
--- run this section AFTER the IMPORTs to (re)validate and activate the keys. Primary keys are enabled
--- before foreign keys (sections 17 then 18). Not generated when the keys are already created ENABLEd.
-enable_cte=''
-enable_union=''
-if string.upper(tostring(PK_SETTING)) == 'DISABLE' then
-	enable_cte=[[
-,vv_enable_keys as (
-  select alter_enable, key_ord from
+-- CONSTRAINT_STATE: primary/foreign keys are always created DISABLED (fast, order-independent load); this
+-- section sets their FINAL state AFTER the IMPORTs. The MODIFY verb is chosen per mode: 'FORCE_ENABLE' enables
+-- every key, 'FORCE_DISABLE' leaves every key disabled, 'SET_AS_SOURCE' restores each key's exact source state
+-- (read from EXA_ALL_CONSTRAINTS.CONSTRAINT_ENABLED). Primary keys are processed before foreign keys (sections
+-- 17 then 18) - a foreign key can only be enabled once its referenced primary key is enabled.
+cstate = string.upper(tostring(CONSTRAINT_STATE))
+if cstate ~= 'SET_AS_SOURCE' and cstate ~= 'FORCE_ENABLE' then cstate = 'FORCE_DISABLE' end
+if cstate == 'FORCE_ENABLE' then
+	state_verb = [[''ENABLE'']]
+elseif cstate == 'SET_AS_SOURCE' then
+	state_verb = [[CASE WHEN CONSTRAINT_ENABLED THEN ''ENABLE'' ELSE ''DISABLE'' END]]
+else
+	state_verb = [[''DISABLE'']]
+end
+cstate_cte=[[
+,vv_constraint_state as (
+  select alter_state, key_ord from
    (IMPORT FROM ]]..CONNECTION_SETTING..[[ at ]]..CONNECTION_NAME..[[ STATEMENT
-   'select CONCAT(''ALTER TABLE "'',]]..exa_upper_begin..[[CONSTRAINT_SCHEMA]]..exa_upper_end..[[,''"."'',]]..exa_upper_begin..[[CONSTRAINT_TABLE]]..exa_upper_end..[[,''" MODIFY CONSTRAINT "'',]]..exa_upper_begin..[[CONSTRAINT_NAME]]..exa_upper_end..[[,''" ENABLE;'') as alter_enable,
+   'select CONCAT(''ALTER TABLE "'',]]..exa_upper_begin..[[CONSTRAINT_SCHEMA]]..exa_upper_end..[[,''"."'',]]..exa_upper_begin..[[CONSTRAINT_TABLE]]..exa_upper_end..[[,''" MODIFY CONSTRAINT "'',]]..exa_upper_begin..[[CONSTRAINT_NAME]]..exa_upper_end..[[,''" '',]]..state_verb..[[,'';'') as alter_state,
            CASE WHEN CONSTRAINT_TYPE = ''PRIMARY KEY'' THEN 1 ELSE 2 END as key_ord
-    from "SYS"."EXA_ALL_CONSTRAINT_COLUMNS"
+    from "SYS"."EXA_ALL_CONSTRAINTS"
     WHERE CONSTRAINT_TYPE IN (''PRIMARY KEY'',''FOREIGN KEY'')
     AND CONSTRAINT_SCHEMA like '']]..SCHEMA_FILTER..[[''
-    AND CONSTRAINT_TABLE like '']]..TABLE_FILTER..[[''
-    GROUP BY CONSTRAINT_SCHEMA, CONSTRAINT_TABLE, CONSTRAINT_NAME, CONSTRAINT_TYPE') as enable_keys
+    AND CONSTRAINT_TABLE like '']]..TABLE_FILTER..[[''') as cstate_keys
 )]]
-	enable_union="\n".. [[
+cstate_union="\n".. [[
 UNION ALL
-select 16, cast('-- ### ENABLE PRIMARY & FOREIGN KEYS - run AFTER the data load (loading is much faster with keys disabled) ###' as varchar(2000000)) SQL_TEXT
+select 16, cast('-- ### CONSTRAINT STATE - run AFTER the data load (keys are created DISABLED for a fast, order-independent load) ###' as varchar(2000000)) SQL_TEXT
 UNION ALL
-select 17, ek.alter_enable from vv_enable_keys ek where ek.key_ord = 1
+select 17, ek.alter_state from vv_constraint_state ek where ek.key_ord = 1
 UNION ALL
-select 18, ek2.alter_enable from vv_enable_keys ek2 where ek2.key_ord = 2]]
-end
+select 18, ek2.alter_state from vv_constraint_state ek2 where ek2.key_ord = 2]]
 
 suc, res = pquery([[
 with vv_exa_columns as (
@@ -178,7 +184,7 @@ with vv_exa_columns as (
   select 'CREATE OR REPLACE TABLE "' || "exa_table_schema" || '"."' || "exa_table_name" || '" (' || group_concat('"' || "exa_column_name" || '" ' || data_type ||' ' order by ordinal_position) || vv_pk_constraints.PK_CON || ');' as sql_text
 	from vv_exa_columns
 	left join (select "exa_table_schema" as pk_schema, "exa_table_name" as pk_table,
-                        (', CONSTRAINT "' || ]]..exa_upper_begin..[[constraint_name]]..exa_upper_end..[[ || '" PRIMARY KEY (' || GROUP_CONCAT('"' || "exa_column_name" || '"' ORDER BY pk_ordinal)) || ') ]]..PK_SETTING..[[' as PK_CON
+                        (', CONSTRAINT "' || ]]..exa_upper_begin..[[constraint_name]]..exa_upper_end..[[ || '" PRIMARY KEY (' || GROUP_CONCAT('"' || "exa_column_name" || '"' ORDER BY pk_ordinal)) || ') DISABLE' as PK_CON
                         from vv_exa_columns
                         where constraint_type = 'PRIMARY KEY'
                        GROUP BY "exa_table_schema", "exa_table_name", constraint_name) as vv_pk_constraints on vv_exa_columns."exa_table_schema" = vv_pk_constraints.pk_schema and vv_exa_columns."exa_table_name" = vv_pk_constraints.pk_table
@@ -188,7 +194,7 @@ with vv_exa_columns as (
 ,vv_create_foreignkey AS (
         select * from
          (IMPORT FROM ]]..CONNECTION_SETTING..[[ at ]]..CONNECTION_NAME..[[ STATEMENT
-         'select CONCAT(''ALTER TABLE "'',]]..exa_upper_begin..[[CONSTRAINT_SCHEMA]]..exa_upper_end..[[,''"."'',]]..exa_upper_begin..[[CONSTRAINT_TABLE]]..exa_upper_end..[[,''" ADD CONSTRAINT "'',]]..exa_upper_begin..[[CONSTRAINT_NAME]]..exa_upper_end..[[,''" FOREIGN KEY ('',GROUP_CONCAT(CONCAT(''"'',]]..exa_upper_begin..[[COLUMN_NAME]]..exa_upper_end..[[,''"'') ORDER BY ORDINAL_POSITION),'') REFERENCES "'',]]..exa_upper_begin..[[REFERENCED_SCHEMA]]..exa_upper_end..[[,''"."'',]]..exa_upper_begin..[[REFERENCED_TABLE]]..exa_upper_end..[[,''" ]]..PK_SETTING..[[;'') AS ALTER_TABLE
+         'select CONCAT(''ALTER TABLE "'',]]..exa_upper_begin..[[CONSTRAINT_SCHEMA]]..exa_upper_end..[[,''"."'',]]..exa_upper_begin..[[CONSTRAINT_TABLE]]..exa_upper_end..[[,''" ADD CONSTRAINT "'',]]..exa_upper_begin..[[CONSTRAINT_NAME]]..exa_upper_end..[[,''" FOREIGN KEY ('',GROUP_CONCAT(CONCAT(''"'',]]..exa_upper_begin..[[COLUMN_NAME]]..exa_upper_end..[[,''"'') ORDER BY ORDINAL_POSITION),'') REFERENCES "'',]]..exa_upper_begin..[[REFERENCED_SCHEMA]]..exa_upper_end..[[,''"."'',]]..exa_upper_begin..[[REFERENCED_TABLE]]..exa_upper_end..[[,''" DISABLE;'') AS ALTER_TABLE
          from "SYS"."EXA_ALL_CONSTRAINT_COLUMNS"
          WHERE "EXA_ALL_CONSTRAINT_COLUMNS"."CONSTRAINT_TYPE" = ''FOREIGN KEY''
          AND "CONSTRAINT_SCHEMA" like '']]..SCHEMA_FILTER..[[''
@@ -233,7 +239,7 @@ select alter_partion from
   select 'IMPORT INTO "' || "exa_table_schema" || '"."' || "exa_table_name" || '" FROM ]]..CONNECTION_SETTING..[[ AT ]]..CONNECTION_NAME..[[ TABLE "' || table_schema||'"."'||table_name||'";'  as sql_text
 	from vv_exa_columns group by "exa_table_schema","exa_table_name", table_schema,table_name
 	order by "exa_table_schema","exa_table_name", table_schema,table_name
-)]]..enable_cte..view_cte..[[
+)]]..cstate_cte..view_cte..[[
 select SQL_TEXT from (
 select 1 as ord, cast('-- ### SCHEMAS ###' as varchar(2000000)) SQL_TEXT
 union all
@@ -263,7 +269,7 @@ select 13, i.* from vv_column_comments i
 UNION ALL
 select 14, cast('-- ### IMPORTS ###' as varchar(2000000)) SQL_TEXT
 union all
-select 15, f.* from vv_imports f]]..enable_union..view_union..[[
+select 15, f.* from vv_imports f]]..cstate_union..view_union..[[
 ) order by ord
 ]],{})
 
@@ -363,10 +369,10 @@ STATEMENT 'SELECT ''Connection works'' '
     applied whenever needed. Copy out the generated statements and execute them in a separate
     SQL Commander window, in the order they are returned.
 
-    Tip: loading is MUCH faster with primary/foreign keys disabled. With PK_SETTING = 'DISABLE'
-    (as below) the keys are created disabled and the output ends with an
-    "ENABLE PRIMARY & FOREIGN KEYS" section - run that section LAST, after the IMPORTs, to
-    (re)validate and activate every key (primary keys first, then foreign keys).
+    Tip: loading is MUCH faster with primary/foreign keys disabled, so the keys are always created
+    disabled and the output ends with a "CONSTRAINT STATE" section - run that section LAST, after the
+    IMPORTs. It sets each key per CONSTRAINT_STATE: 'FORCE_DISABLE' keeps them disabled, 'SET_AS_SOURCE'
+    restores the source state, 'FORCE_ENABLE' enables every key (primary keys first, then foreign keys).
 */
 --
 EXECUTE SCRIPT DATABASE_MIGRATION.EXASOL_TO_EXASOL(
@@ -377,6 +383,6 @@ EXECUTE SCRIPT DATABASE_MIGRATION.EXASOL_TO_EXASOL(
   ,'%'           -- TABLE_FILTER: table name/filter, '%' = all
   ,true          -- GENERATE_VIEWS: true/false, include views (emitted as CREATE OR REPLACE FORCE VIEW)
   ,'%'           -- VIEW_FILTER: view name/filter, '%' = all
-  ,'DISABLE'     -- PK_SETTING: 'DISABLE' (faster load; appends an ENABLE-keys section) or 'ENABLE'
+  ,'FORCE_DISABLE' -- CONSTRAINT_STATE: 'FORCE_DISABLE' (recommended; PK/FK kept as metadata only - faster, order-independent imports, still used by BI tools), 'SET_AS_SOURCE' or 'FORCE_ENABLE' (all keys enabled = Exasol re-validates the data)
   ,'8'           -- TARGET_VERSION: '8' (default) or '7' (downgrade: TIMESTAMP(p) -> TIMESTAMP)
 );
