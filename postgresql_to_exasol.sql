@@ -299,7 +299,7 @@ if gen_check then
 ,vv_chk_base as (
 	select x.*, min("ordinal_position") over (partition by "exa_schema","exa_table") as "min_ord",
 	       sysrow."db_system", mid."metric_id",
-	       case when sysrow."db_system" = 'Exasol' then '"' || x."exa_col" || '"' else x."col_q" end as "ref"
+	       case when sysrow."db_system" = 'Exasol' then '"' || x."exa_col" || '"' when x."type_name" = 'oid' then x."col_q" || '::bigint' else x."col_q" end as "ref"  -- oid has no direct cast to numeric on PostgreSQL; ::bigint does
 	from vv_chk_cols x
 	cross join (select 'Exasol' as "db_system" union all select 'Postgres' as "db_system") sysrow
 	cross join (select level-1 as "metric_id" from dual connect by level <= 8) mid
