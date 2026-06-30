@@ -21,7 +21,7 @@
     * [PostgreSQL](#postgresql)
     * [Redshift](#redshift)
     * [S3](#s3)
-    * [SAP Hana](#sap-hana)
+    * [SAP HANA](#sap-hana)
     * [Snowflake](#snowflake)
     * [SQL Server](#sql-server)
     * [Teradata](#teradata)
@@ -694,61 +694,103 @@ See script [redshift_to_exasol.sql](redshift_to_exasol.sql)
 The script [s3_to_exasol.sql](s3_to_exasol.sql) looks different than the other import scripts. It's made to load data from S3 in parallel and needs some preparation before you can use it. See [our documentation](https://docs.exasol.com/loading_data/loading_data_from_amazon_s3_in_parallel.htm) for detailed instructions.
 If you just want to import a single file, see 'Import from [CSV](#csv)' above.
 
-### SAP Hana
 
-The first thing you need to do is add the SAP Hana JDBC driver to Exasol. The JDBC driver is located in your local SAP Hana Installation folder:
+### SAP HANA
 
-* eg: (C:\Program Files\sap\ngdbc.jar) on Microsoft Windows platforms
-* eg: (/usr/sap/ngdbc.jar) on Linux and UNIX platforms
+The [saphana_to_exasol.sql](saphana_to_exasol.sql) script generates the statements to migrate an **SAP HANA**
+database (verified on SAP HANA 2.0 SPS08) to Exasol v8. It runs on the **target** Exasol database, reads the
+**source** metadata through a JDBC connection (native `SYS.*` catalog) and **returns** the statements to recreate
+and load the source. It changes nothing itself — you review the output and run it, in the order returned.
 
-In database versions prior to v8, in order to add the driver to Exasol log into your EXAoperation, select the 'Software', then 'JDBC Drivers'-Tab.
+**Step by step**
+* **Install** the script on the **target** database (run [saphana_to_exasol.sql](saphana_to_exasol.sql) once; it
+  creates `DATABASE_MIGRATION.SAPHANA_TO_EXASOL`).
+* **Install the SAP HANA JDBC driver in BucketFS** — **required before the connection can be created:**
+    1. Download the SAP HANA JDBC driver **`ngdbc`** (`ngdbc-2.x.jar`) from Maven:
+       [com.sap.cloud.db.jdbc:ngdbc](https://mvnrepository.com/artifact/com.sap.cloud.db.jdbc/ngdbc). SAP's driver
+       documentation: [SAP HANA JDBC driver](https://help.sap.com/docs/SAP_HANA_CLIENT/f1b440ded6144a54ada97ff95dac7adf/ff15928cf5594d78b841fbbe649f04b4.html).
+    2. Create a plain-text `settings.cfg` with exactly this content:
+       ```
+       DRIVERNAME=SAPHANA
+       DRIVERMAIN=com.sap.db.jdbc.Driver
+       PREFIX=jdbc:sap:
+       NOSECURITY=YES
+       FETCHSIZE=100000
+       INSERTSIZE=-1
+       ```
+    3. Upload both `ngdbc-2.x.jar` and `settings.cfg` to BucketFS (Exasol "add a JDBC driver":
+       [on-premise guide](https://docs.exasol.com/db/latest/administration/on-premise/manage_drivers/add_jdbc_driver.htm)
+       · [SaaS guide](https://docs.exasol.com/db/latest/administration/manage_drivers/add_jdbc_driver.htm)).
+       On-premise example (set `WRITE_PW` and `DATABASE_NODE_IP`):
+       ```bash
+       curl -k -X PUT -T settings.cfg     https://w:$WRITE_PW@$DATABASE_NODE_IP:2581/default/drivers/jdbc/saphana/settings.cfg
+       curl -k -X PUT -T ngdbc-2.29.7.jar https://w:$WRITE_PW@$DATABASE_NODE_IP:2581/default/drivers/jdbc/saphana/ngdbc-2.29.7.jar
+       ```
+* **Create a connection** on the target pointing at the SAP HANA source. A ready-to-edit `CREATE CONNECTION`
+  example and a connection test are at the bottom of the script.
+* **Adapt the `EXECUTE SCRIPT` parameters** to your scenario and run it.
+* **Copy the result set** into another session and execute the statements **in the output order** (the CONSTRAINT
+  STATE section, and — if enabled — the DATA VALIDATION section, run after the IMPORTs).
 
-Click Add then specify the following details:
-
-* Driver Name: `SAP`
-* Main Class: `com.sap.db.jdbc.Driver`
-* Prefix: `jdbc:sap:`
-* Disable Security Manager: `Check this box`
-
-After clicking Apply, you will see the newly added driver's details on the top section of the driver list. Select the SAP Hana driver by locating the ngdbc.jar and upload it.
-When done the .jar file should be listed in the files column for the SAP Hana driver.
-
-For Exasol v8 or newer use the values above in [Load data using JDBC (generic)](https://docs.exasol.com/db/latest/loading_data/connect_sources/import_data_using_jdbc.htm).
-
-You can find a detailed information about configuring the SAP Hana driver at the following link:
-https://help.sap.com/viewer/52715f71adba4aaeb480d946c742d1f6/2.0.00/en-US/ff15928cf5594d78b841fbbe649f04b4.html
-
-The standard port number format for different instances 3NN15, NN- represents the instance number of HANA system to be used in client tools. (eg. 31015 Instance No 10, 30015 Instance No 00)
-In order to find out the instance number of your Hana-System type the following into your console:
-/usr/sap/HXE and press Autocomplete by tab. The Instance-Number should be displayed by the number of the HDB(XX)-File (eg. HDB90)
-Insert the number into your port number (-> eg. 39015)
-
-The Connection-String should look like the following: "jdbc:sap://'host_ip':'port'/"
-(User-ID: SYSTEM, Password: Your password)
-
-
-To test the connectivity of Exasol to your SAP Instance create the following connection in your SQL-client:
-
-```SQL
-CREATE OR REPLACE CONNECTION <name_of_connection>
-        TO 'jdbc:sap://<host_name>:<port>'
-        USER '<sap_username>'
-        IDENTIFIED BY '<sap_password>';
+```sql
+EXECUTE SCRIPT DATABASE_MIGRATION.SAPHANA_TO_EXASOL(
+    'SAPHANA_JDBC',     -- CONNECTION_NAME: JDBC connection to the SAP HANA source
+    true,               -- IDENTIFIER_CASE_INSENSITIVE: true (recommended) => fold ALL identifiers to UPPER so Exasol queries never need quotes; false => keep verbatim/quoted
+    '%',                -- SCHEMA_FILTER: source schema(s): 'MYSCHEMA', 'APP_%', '%' (all; system schemas always excluded)
+    '%',                -- TABLE_FILTER: table(s)/view(s): 'MY_TABLE', 'MY_%', '%' (all)
+    '',                 -- TARGET_SCHEMA: Exasol target schema; '' (recommended) => use the source schema name
+    'FORCE_DISABLE',    -- CONSTRAINT_STATE: 'FORCE_DISABLE' (recommended; PK/FK kept as metadata only - faster, order-independent imports, still used by BI tools), 'SET_AS_SOURCE' or 'FORCE_ENABLE' (all keys enabled = Exasol re-validates the data)
+    true,               -- GENERATE_COMMENTS: true (recommended) => migrate SAP HANA comments as COMMENT ON; false => skip
+    true,               -- GENERATE_VIEWS: true => emit source views as a commented manual-review section; false => skip
+    'CAP',              -- DECIMAL_OVERFLOW: 'CAP' (recommended; fixed DECIMAL>36 -> DECIMAL(36,s), floating DECIMAL/SMALLDECIMAL -> DOUBLE), 'DOUBLE' (~15 digits) or 'VARCHAR' (lossless text)
+    'HEX',              -- BINARY_HANDLING: 'HEX' (recommended; BINARY/VARBINARY/BLOB migrated losslessly as hex text via BINTOHEX) or 'SKIP' (load NULL)
+    false,              -- TRUNCATE_LONG_STRINGS: false (recommended) => import fails on a value > 2,000,000 chars; true => cut such values to 2,000,000 chars and import
+    false,              -- INCLUDE_SYSTEM_SCHEMA: false (recommended) => exclude the SYSTEM (DBA) schema; true => also migrate SYSTEM (SYS/_SYS_*/SAP_*/HANA_*/PUBLIC are always excluded)
+    false               -- CHECK_MIGRATION: false (recommended default) => skip; true => also build "<table>_MIG_CHK" metric tables + a "<schema>_MIG_CHK" summary (source vs target) for post-load validation
+);
 ```
 
-You need to have CREATE CONNECTION privilege granted to the user used to do this.
+This script generates, in this order: `CREATE SCHEMA` / `CREATE TABLE` (every type mapped, plus `NOT NULL` and
+`DEFAULT`s); `PRIMARY KEY`s and `FOREIGN KEY`s (created disabled, composite supported); table & column `COMMENT`s;
+the `IMPORT`s; a **CONSTRAINT STATE** section to run after the load; the source views as a **commented** review
+section; and (with `CHECK_MIGRATION`) a **DATA VALIDATION** section.
 
-Now, test the connectivity with a simple query like:
+**Data types & limitations.** *Every* SAP HANA type was CREATE-probed live; all are covered (no silent drops).
+`TINYINT` (unsigned 0–255) → `DECIMAL(3,0)`; `SMALLINT`/`INTEGER`/`BIGINT` → `DECIMAL(5/10/19,0)`; fixed
+`DECIMAL(p,s)` → `DECIMAL(p,s)` (`p > 36` → `DECIMAL_OVERFLOW`); **`DECIMAL` without scale and `SMALLDECIMAL` are
+floating-point decimals** → `DOUBLE` (or `VARCHAR`, `DECIMAL_OVERFLOW`); `REAL`/`DOUBLE`/`FLOAT` → `DOUBLE`.
+`CHAR`/`NCHAR` → `CHAR` `UTF8` (>2000 → `VARCHAR`); `VARCHAR`/`NVARCHAR`/`ALPHANUM`/`SHORTTEXT` → `VARCHAR` `UTF8`;
+`CLOB`/`NCLOB`/`TEXT`/`BINTEXT` → `VARCHAR(2000000)`. `DATE` → `DATE`; **`TIME`** → `VARCHAR(8)` (Exasol has no
+`TIME` type); `SECONDDATE` → `TIMESTAMP(0)`; **`TIMESTAMP`** → `TIMESTAMP(7)` (full 7 fractional digits preserved);
+`BOOLEAN` → `BOOLEAN`. **`BINARY`/`VARBINARY`/`BLOB`** → `VARCHAR` **hex** (`BINARY_HANDLING`). **`ST_POINT`/
+`ST_GEOMETRY`** → `GEOMETRY` (WKT; SRID not carried). A `VARCHAR(2000000)` catch-all covers anything unexpected.
+The IMPORT **fails loudly rather than corrupting data** when a fixed `DECIMAL` needs > 36 digits under
+`DECIMAL_OVERFLOW='CAP'`, when a hex-encoded binary would exceed 2,000,000 chars, or when a character/LOB value
+exceeds 2,000,000 chars (unless `TRUNCATE_LONG_STRINGS=true`). **Always excluded** (only real user data): the SAP
+HANA system schemas `SYS`, `_SYS_*`, `SAP_*`, `HANA_*`, `PUBLIC`, `UIS`; the DBA schema `SYSTEM` is excluded unless
+`INCLUDE_SYSTEM_SCHEMA=true`. Not migrated (out of scope): indexes, `UNIQUE`/`CHECK` constraints, sequences,
+procedures/functions, triggers, synonyms, and HANA partitioning (physical/distribution-oriented; no value-based
+Exasol equivalent).
 
-```SQL
+**Why some columns are read with a function on the source.** Verified live with the SAP HANA JDBC driver (`ngdbc`):
+the driver cannot transfer some types directly, so the generated IMPORT reads them as text — `BINARY`/`VARBINARY`/
+`BLOB` (raw "JDBC type unknown") via `BINTOHEX(..)`; `ST_POINT`/`ST_GEOMETRY` via `"col".ST_AsText()` (WKT);
+`NCLOB`/`TEXT`/`BINTEXT` via `TO_NVARCHAR(..)`; **`TIME` (which the driver returns as a TIMESTAMP with *today's*
+date!) via `TO_VARCHAR(..)` → `HH:MI:SS`**; floating `DECIMAL`/`SMALLDECIMAL` in `VARCHAR` mode via `TO_VARCHAR(..)`.
+Everything else (integers, fixed `DECIMAL`, `REAL`/`DOUBLE`, all char types, `CLOB`, `DATE`, `SECONDDATE`,
+`TIMESTAMP` with full microseconds, `BOOLEAN`) transfers directly.
 
-SELECT *
-    FROM   (
-               IMPORT FROM JDBC AT <name_of_connection>
-               STATEMENT 'SELECT 1 from dummy'
-           );
-```
-For the actual data-migration, see script [sap_hana_to_exasol.sql](sap_hana_to_exasol.sql)
+**Migration check (`CHECK_MIGRATION=true`).** For every migrated table the script builds a `"<table>_MIG_CHK"`
+table of standardized, cross-database-comparable metrics (row count, per-column NULL counts, exact integer/decimal
+MIN/MAX/SUM — never floating decimal/REAL/DOUBLE, date/timestamp MIN/MAX to the second, DISTINCT counts) computed on
+**both** SAP HANA and Exasol, plus a `DATABASE_MIGRATION."<schema>_MIG_CHK"` summary flagging each metric **`OK` /
+`DEVIATION`**. Review with `SELECT * FROM DATABASE_MIGRATION."<schema>_MIG_CHK" WHERE "STATUS" = 'DEVIATION';`.
+
+**Privileges/visibility:** the source metadata is read **through the connection's user**, so the script sees only
+the objects that user may access. **To migrate everything, use a user with sufficient privileges on the source.**
+
+See the header of [saphana_to_exasol.sql](saphana_to_exasol.sql) for more information!
+
 
 ### Snowflake
 
