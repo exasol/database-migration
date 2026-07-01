@@ -10,6 +10,7 @@
 1. [Overview](#overview)
 2. [Migration source:](#migration-source)
     * [Azure Blob Storage](#azure-blob-storage)
+    * [ClickHouse](#clickhouse)
     * [CSV](#csv)
     * [Db2](#db2)
     * [Exasol](#exasol)
@@ -47,6 +48,123 @@ If you want to optimize existing scripts or create new scripts for additional sy
 
 The script [azure_blob_storage_to_exasol.sql](azure_blob_storage_to_exasol.sql) looks different than the other import scripts. It's made to load data from Azure Blob Storage in parallel and needs some preparation before you can use it. See [our documentation](https://docs.exasol.com/loading_data/loading_data_from_amazon_s3_in_parallel.htm) for detailed instructions.
 If you just want to import a single file, see 'Import from [CSV](#csv)'.
+
+
+### ClickHouse
+
+The [clickhouse_to_exasol.sql](clickhouse_to_exasol.sql) script generates the statements to migrate a **ClickHouse**
+database (verified on ClickHouse 26.6) to Exasol v8. It runs on the **target** Exasol database, reads the **source**
+metadata through a JDBC connection (the native `system.columns` / `system.tables` catalog) and **returns** the
+statements to recreate and load the source. It changes nothing itself — you review the output and run it, in the
+order returned. A ClickHouse **database** maps to an Exasol schema.
+
+**Step by step**
+* **Install** the script on the **target** database (run [clickhouse_to_exasol.sql](clickhouse_to_exasol.sql) once;
+  it creates `DATABASE_MIGRATION.CLICKHOUSE_TO_EXASOL`).
+* **Install the ClickHouse JDBC driver in BucketFS** — **required before the connection can be created:**
+    1. Download the ClickHouse JDBC driver from Maven. You **must** take the **`-all-dependencies`** jar
+       (`clickhouse-jdbc-x.x.x-all-dependencies.jar`), which bundles everything the driver needs:
+       [com.clickhouse:clickhouse-jdbc](https://mvnrepository.com/artifact/com.clickhouse/clickhouse-jdbc). ClickHouse's
+       driver documentation: [ClickHouse JDBC](https://clickhouse.com/docs/integrations/language-clients/java/jdbc).
+    2. Create a plain-text `settings.cfg` with exactly this content:
+       ```
+       DRIVERNAME=CLICKHOUSE
+       DRIVERMAIN=com.clickhouse.jdbc.Driver
+       PREFIX=jdbc:clickhouse:
+       NOSECURITY=YES
+       FETCHSIZE=100000
+       INSERTSIZE=-1
+       ```
+    3. Upload both `clickhouse-jdbc-x.x.x-all-dependencies.jar` and `settings.cfg` to BucketFS (Exasol "add a JDBC
+       driver": [on-premise guide](https://docs.exasol.com/db/latest/administration/on-premise/manage_drivers/add_jdbc_driver.htm)
+       · [SaaS guide](https://docs.exasol.com/db/latest/administration/manage_drivers/add_jdbc_driver.htm)).
+       On-premise example (set `WRITE_PW` and `DATABASE_NODE_IP`):
+       ```bash
+       curl -k -X PUT -T settings.cfg                              https://w:$WRITE_PW@$DATABASE_NODE_IP:2581/default/drivers/jdbc/clickhouse/settings.cfg
+       curl -k -X PUT -T clickhouse-jdbc-0.9.8-all-dependencies.jar https://w:$WRITE_PW@$DATABASE_NODE_IP:2581/default/drivers/jdbc/clickhouse/clickhouse-jdbc-0.9.8-all-dependencies.jar
+       ```
+* **Create a connection** on the target pointing at the ClickHouse source (the JDBC driver uses the HTTP port,
+  default `8123`; the native/TCP port is `9000`). A ready-to-edit `CREATE CONNECTION` example and a connection test
+  are at the bottom of the script.
+* **Adapt the `EXECUTE SCRIPT` parameters** to your scenario and run it.
+* **Copy the result set** into another session and execute the statements **in the output order** (the CONSTRAINT
+  STATE section, and — if enabled — the DATA VALIDATION section, run after the IMPORTs).
+
+```sql
+EXECUTE SCRIPT DATABASE_MIGRATION.CLICKHOUSE_TO_EXASOL(
+    'CLICKHOUSE_JDBC',  -- CONNECTION_NAME: JDBC connection to the ClickHouse source
+    true,               -- IDENTIFIER_CASE_INSENSITIVE: true (recommended) => fold ALL identifiers to UPPER so Exasol queries never need quotes; false => keep verbatim/quoted (ClickHouse is case-sensitive - use false if names differ only by case)
+    '%',                -- SCHEMA_FILTER: source database(s): 'mydb', 'app_%', '%' (all; system databases always excluded)
+    '%',                -- TABLE_FILTER: table(s)/view(s): 'my_table', 'my_%', '%' (all)
+    '',                 -- TARGET_SCHEMA: Exasol target schema; '' (recommended) => use the source ClickHouse database name
+    'FORCE_DISABLE',    -- CONSTRAINT_STATE: 'FORCE_DISABLE' (recommended; the sort-key PRIMARY KEY kept as metadata only - faster, order-independent imports, still used by BI tools), 'SET_AS_SOURCE' or 'FORCE_ENABLE' (key enabled = Exasol re-validates the data; may fail on duplicate sort-key values)
+    true,               -- GENERATE_COMMENTS: true (recommended) => migrate ClickHouse comments as COMMENT ON; false => skip
+    true,               -- GENERATE_VIEWS: true => emit source views (View/MaterializedView) as a commented manual-review section; false => skip
+    'CAP',              -- DECIMAL_OVERFLOW: 'CAP' (recommended; > 36 digits -> DECIMAL(36,s)), 'DOUBLE' (~15 digits) or 'VARCHAR' (lossless text) for Int128/256, UInt128/256 and Decimal with precision > 36
+    false,              -- TRUNCATE_LONG_STRINGS: false (recommended) => import fails on a String/FixedString value > 2,000,000 chars; true => cut such values to 2,000,000 chars and import
+    false               -- CHECK_MIGRATION: false (recommended default) => skip; true => also build "<table>_MIG_CHK" metric tables + a "<schema>_MIG_CHK" summary (source vs target) for post-load validation
+);
+```
+
+This script generates, in this order: `CREATE SCHEMA` / `CREATE TABLE` (every type mapped, plus `NOT NULL` and
+`DEFAULT`s, and the `PRIMARY KEY` derived from the ClickHouse sort key, created disabled, composite supported); table
+& column `COMMENT`s; the `IMPORT`s; a **CONSTRAINT STATE** section to run after the load; the source views as a
+**commented** review section; and (with `CHECK_MIGRATION`) a **DATA VALIDATION** section. ClickHouse has no foreign
+keys, so none are generated.
+
+**Data types & limitations.** *Every* ClickHouse type was CREATE-probed live; all are covered (no silent drops).
+`Int8`/`Int16`/`Int32`/`Int64` → `DECIMAL(3/5/10/19,0)`; `UInt8`/`UInt16`/`UInt32`/`UInt64` → `DECIMAL(3/5/10/20,0)`;
+`Int128`/`Int256`/`UInt128`/`UInt256` → `DECIMAL(36,0)` (more than 36 digits → `DECIMAL_OVERFLOW`); `Decimal(P,S)`
+(incl. `Decimal32/64/128/256`) → `DECIMAL(P,S)` (`P > 36` → `DECIMAL_OVERFLOW`); `Float32`/`Float64`/`BFloat16` →
+`DOUBLE`. `String` → `VARCHAR(2000000)`; `FixedString(n)` → `VARCHAR(n)`. `Date`/`Date32` → `DATE`; `DateTime` (with or
+without a timezone) → `TIMESTAMP(0)`; **`DateTime64(p)`** → `TIMESTAMP(min(p,9))` (full sub-second fidelity preserved,
+verified to the nanosecond); the transferred value is the wall-clock instant. `Bool` → `BOOLEAN`. `UUID` → `CHAR(36)`;
+`Enum8`/`Enum16` → `VARCHAR` (the enum **label**); `IPv4`/`IPv6` → `VARCHAR(45)`. The complex types
+`Array`/`Tuple`/`Map`/`Nested`/`JSON`/`Variant`/`Dynamic` and the geo types (`Point`/`Ring`/`Polygon`/`MultiPolygon`/
+`LineString`/`MultiLineString`) → `VARCHAR(2000000)` holding ClickHouse's own text form. `Nullable(T)` and
+`LowCardinality(T)` are unwrapped to `T`; `SimpleAggregateFunction(f,T)` migrates its stored value as `T`;
+`AggregateFunction` (opaque binary aggregation state) is migrated as `NULL` with a note. A `VARCHAR(2000000)` catch-all
+covers anything unexpected. The IMPORT **fails loudly rather than corrupting data** when a value needs more than 36
+digits under `DECIMAL_OVERFLOW='CAP'`, or when a `String`/`FixedString` value exceeds 2,000,000 characters (unless
+`TRUNCATE_LONG_STRINGS=true`). **Always excluded** (only real user data): the ClickHouse system databases `system`,
+`information_schema`, `INFORMATION_SCHEMA`. Not migrated (out of scope): indexes, projections, TTL rules, ClickHouse
+partitioning/sharding (physical/distribution-oriented; no value-based Exasol equivalent), row policies, dictionaries,
+materialized-view logic.
+
+**Constraints & engines.** ClickHouse's `PRIMARY KEY` / `ORDER BY` is a **non-unique, non-enforced** sort key; its
+columns are migrated as an Exasol `PRIMARY KEY` created disabled (useful optimizer/BI metadata) and set afterwards per
+`CONSTRAINT_STATE` — `FORCE_ENABLE` may fail if the source data contains duplicate key values. Only real **data**
+tables are migrated (`MergeTree` family, `Memory`, `Log`, …); **views** (`View`/`MaterializedView`) are emitted as a
+commented review section (`GENERATE_VIEWS`); **integration/virtual-engine** tables (`Distributed`, `Dictionary`,
+`Kafka`, `S3Queue`, `Set`, `Join`, `MySQL`, `PostgreSQL`, `MongoDB`, …) are skipped with a note, as are `ALIAS` /
+`EPHEMERAL` columns (not stored in ClickHouse). Because ClickHouse identifiers are **case-sensitive**,
+`IDENTIFIER_CASE_INSENSITIVE=true` (the recommended default) folds them to upper case so Exasol queries need no quotes;
+use `false` if a table has names differing only by case (e.g. `Val` and `val`), which would otherwise collide.
+
+**Why some columns are read with a function on the source.** Verified live with the ClickHouse JDBC driver: the driver
+cannot transfer some types directly (it reports them as JDBC type `OTHER`), so the generated IMPORT reads them as text
+via **`toString(..)`** — `UUID`, `Array`, `Tuple`, `Map`, `Nested`, `IPv4`, `IPv6`, `JSON`, `Variant`, `Dynamic`, the
+geo types, and `SimpleAggregateFunction`; huge integers and `Decimal(P>36)` under `DECIMAL_OVERFLOW='VARCHAR'` are also
+read via `toString(..)` for lossless text. Two conversions are forced by Exasol's data model and are handled instead of
+failing silently: Exasol stores an empty string as `NULL` (so a ClickHouse `String` `''` becomes `NULL`), and Exasol
+has no floating-point `inf`/`nan` (so a ClickHouse Float `inf`/`-inf`/`nan` becomes `NULL`, read via
+`if(isFinite(..))`); accordingly `NOT NULL` is emitted only on exact numeric/temporal/boolean columns, never on
+character or Float columns. Everything else (integers, fitting `Decimal`, `String`/`FixedString`, `Date`/`Date32`,
+`DateTime`, `DateTime64` with full sub-seconds, `Bool`, `Enum` → its label) transfers directly.
+
+**Migration check (`CHECK_MIGRATION=true`).** For every migrated table the script builds a `"<table>_MIG_CHK"` table of
+standardized, cross-database-comparable metrics (row count, per-column NULL counts, exact integer/fixed-decimal
+MIN/MAX/SUM — never Float, huge integers or `Decimal(>36)`, date/timestamp MIN/MAX to the second, DISTINCT counts)
+computed on **both** ClickHouse and Exasol, plus a `DATABASE_MIGRATION."<schema>_MIG_CHK"` summary flagging each metric
+**`OK` / `DEVIATION`**. It is written to be tolerant of the unavoidable ClickHouse↔Exasol differences: an empty string
+and `inf`/`nan` are counted as `NULL` on the ClickHouse side, integer `SUM` is computed over `Decimal` (so ClickHouse's
+own wrap-around does not cause a false deviation), and aggregates over an empty table use the `-OrNull` combinator to
+match Exasol's `NULL`. Review with `SELECT * FROM DATABASE_MIGRATION."<schema>_MIG_CHK" WHERE "STATUS" = 'DEVIATION';`.
+
+**Privileges/visibility:** the source metadata is read **through the connection's user**, so the script sees only the
+objects that user may access. **To migrate everything, use a user with sufficient privileges on the source.**
+
+See the header of [clickhouse_to_exasol.sql](clickhouse_to_exasol.sql) for more information!
 
 
 ### CSV
