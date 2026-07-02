@@ -674,38 +674,120 @@ See the header of [netezza_to_exasol.sql](netezza_to_exasol.sql) for more inform
 
 ### Oracle
 
-When importing from Oracle, you have two options. You could import via JDBC or the  native Oracle interface (OCI).
-- OCI: Follow [Oracle OCI](https://docs.exasol.com/db/latest/loading_data/connect_sources/oracle.htm#OracleCallInterfaceOCI).
+The [oracle_to_exasol.sql](oracle_to_exasol.sql) script generates the statements to migrate an **Oracle** database
+(verified on Oracle 26ai / 23.26) to Exasol v8. It runs on the **target** Exasol database, reads the **source**
+metadata through an Oracle connection — either an **ORA** (OCI / Oracle Instant Client, faster, recommended) or a
+**JDBC** connection; the connection type is **auto-detected** — and **returns** the statements to recreate and load
+the source. It changes nothing itself — you review the output and run it, in the order returned. An Oracle schema
+(owner) maps to an Exasol schema.
 
-  Create a connection:
-  ``` SQL
-  CREATE CONNECTION <name_of_connection>
-  	TO '192.168.99.100:1521/xe'
-    USER '<user>'
-    IDENTIFIED BY '<password>';
-  ```
+**Step by step**
+* **Install** the script on the **target** database (run [oracle_to_exasol.sql](oracle_to_exasol.sql) once; it
+  creates `DATABASE_MIGRATION.ORACLE_TO_EXASOL`).
+* **Install the Oracle driver in BucketFS** — **required before the connection can be created.** Choose the
+  transport (you can install both):
+    1. **ORA / OCI (recommended, fastest):** the **Oracle Instant Client**. **The Instant Client version must match
+       your Exasol version** — see the table in
+       [Exasol's docs](https://docs.exasol.com/db/latest/administration/on-premise/manage_drivers/oracle_instant_client.htm):
+       | Exasol version | Oracle Instant Client |
+       |---|---|
+       | ≤ 8.31.0 | 12.1.0.2.0 |
+       | 8.32.0 – 2025.1.8 | 23.5.0.24.07 |
+       | **2025.1.9 and higher** | **instantclient-basic-linux.x64-23.9.0.25.07.zip** |
 
-- JDBC: Follow [Oracle JDBC](https://docs.exasol.com/db/latest/loading_data/connect_sources/oracle.htm#OracleJDBC).
+       Upload the matching Instant Client zip to BucketFS.
+    2. **JDBC (fallback, e.g. for large CLOB / INTERVAL columns):** download the latest `ojdbc11` driver from Maven
+       ([com.oracle.database.jdbc:ojdbc11](https://mvnrepository.com/artifact/com.oracle.database.jdbc/ojdbc11)) and,
+       with a `settings.cfg`, upload both to BucketFS as described in
+       [Exasol's Oracle JDBC docs](https://docs.exasol.com/db/latest/loading_data/connect_sources/oracle.htm#OracleJDBC).
+* **Create a connection** on the target pointing at the Oracle source (an `ORA` and/or a `JDBC` connection; the
+  script auto-detects which one you pass). A ready-to-edit `CREATE CONNECTION` example and a test are at the bottom
+  of the script.
+* **Adapt the `EXECUTE SCRIPT` parameters** to your scenario and run it.
+* **Copy the result set** into another session and execute the statements **in the output order** (the CONSTRAINT
+  STATE section, and — if enabled — the DATA VALIDATION section, run after the IMPORTs).
 
-  Create a connection:
-  ```SQL
-  CREATE CONNECTION <name_of_connection>
-  	TO 'jdbc:oracle:thin:@//192.168.99.100:1521/xe'
-  	USER '<user>'
-    IDENTIFIED BY '<password>';
-  ```
-
-Test your connection:
-```SQL
-SELECT * FROM
-(
-IMPORT FROM <conn_type> AT <name_of_connection>
-STATEMENT 'SELECT 42 FROM DUAL'
+```sql
+EXECUTE SCRIPT DATABASE_MIGRATION.ORACLE_TO_EXASOL(
+    'ORACLE_OCI',       -- CONNECTION_NAME: Oracle connection (ORA/OCI or JDBC - auto-detected)
+    true,               -- IDENTIFIER_CASE_INSENSITIVE: true (recommended) => fold ALL identifiers to UPPER so Exasol queries never need quotes; false => keep verbatim/quoted
+    'MYSCHEMA',         -- SCHEMA_FILTER: source schema(s)/owner(s): 'MYSCHEMA', 'APP%', 'S1, S2', '%' (all; Oracle-maintained schemas always excluded)
+    '%',                -- TABLE_FILTER: table(s): 'MY_TABLE', 'MY%', 'T1, T2', '%' (all)
+    '',                 -- TARGET_SCHEMA: Exasol target schema; '' (recommended) => use the source schema name
+    4,                  -- PARALLEL_STATEMENTS: 1 = one IMPORT per table; N>1 = N parallel statements (partition bin-packing, else ORA_HASH(ROWID) buckets)
+    'FORCE_DISABLE',    -- CONSTRAINT_STATE: 'FORCE_DISABLE' (recommended; PK/FK kept as metadata only - faster, order-independent imports), 'SET_AS_SOURCE' or 'FORCE_ENABLE' (all keys enabled = Exasol re-validates the data)
+    true,               -- GENERATE_COMMENTS: true (recommended) => migrate Oracle comments as COMMENT ON; false => skip
+    true,               -- GENERATE_VIEWS: true => emit source views as a commented manual-review section; false => skip
+    'CAP',              -- DECIMAL_OVERFLOW: 'CAP' (recommended; NUMBER>36 -> DECIMAL(36,s), unscaled NUMBER -> DOUBLE), 'DOUBLE' (~15 digits) or 'VARCHAR' (lossless text)
+    'HEX',              -- BINARY_HANDLING: 'HEX' (recommended; RAW/BLOB as hex text; BLOB capped ~2000 bytes) or 'SKIP' (load NULL)
+    'VARCHAR',          -- INTERVAL_HANDLING: 'VARCHAR' (recommended; lossless text, both transports) or 'INTERVAL' (native Exasol INTERVAL - JDBC connection only)
+    false,              -- TRUNCATE_LONG_STRINGS: false (recommended) => import fails on a value > 2,000,000 chars; true => cut such values to 2,000,000 chars and import
+    false               -- CHECK_MIGRATION: false (recommended default) => skip; true => also build "<table>_MIG_CHK" metric tables + a "<schema>_MIG_CHK" summary (source vs target) for post-load validation
 );
 ```
-`<con_type>` is either`JDBC` or `ORA`, depending on your connection
 
-Then you're ready to use the migration script: [oracle_to_exasol.sql](oracle_to_exasol.sql)
+This script generates, in this order: an informational NLS/encoding header; `CREATE SCHEMA` / `CREATE TABLE`
+(every type mapped, plus `NOT NULL`, `DEFAULT`s); `PRIMARY KEY`s and `FOREIGN KEY`s (created disabled, composite
+supported); table & column `COMMENT`s; the `IMPORT`s (split into `PARALLEL_STATEMENTS` parallel statements); a
+**CONSTRAINT STATE** section to run after the load; the source views as a **commented** review section; and (with
+`CHECK_MIGRATION`) a **DATA VALIDATION** section.
+
+**Data types & limitations.** *Every* Oracle 26ai type was CREATE-probed live and its transfer verified over **both**
+transports. `NUMBER(p,s)` → `DECIMAL(p,s)` (`p>36` → `DECIMAL_OVERFLOW`; **negative scale** → `DECIMAL(p+|s|,0)`);
+`NUMBER(p)`/`NUMBER(*,0)`/`INTEGER` → `DECIMAL(min(p,36),0)`; unscaled `NUMBER` → `DOUBLE` (or `VARCHAR`);
+`FLOAT`/`BINARY_FLOAT`/`BINARY_DOUBLE` → `DOUBLE` (**`Inf`/`NaN` → `NULL`**, Exasol has neither). `CHAR`/`NCHAR` →
+`CHAR` `UTF8` (>2000 → `VARCHAR`); `VARCHAR2`/`NVARCHAR2` → `VARCHAR` `UTF8`; `CLOB`/`NCLOB`/`LONG` → `VARCHAR(2000000)`.
+`RAW`/`BLOB`/`LONG RAW` → `VARCHAR` **hex** (`BINARY_HANDLING`; BLOB capped ~2000 bytes/value). **`DATE`** →
+**`TIMESTAMP(0)`** (Oracle `DATE` carries a time component); `TIMESTAMP(p)` → `TIMESTAMP(min(p,9))`;
+`TIMESTAMP WITH TIME ZONE` → `TIMESTAMP` (**normalized to UTC**); `TIMESTAMP WITH LOCAL TIME ZONE` → `TIMESTAMP`.
+`INTERVAL` → `VARCHAR` (or native Exasol `INTERVAL`, `INTERVAL_HANDLING`). `XMLTYPE`/`JSON`/`VECTOR` (23ai) →
+`VARCHAR`; `SDO_GEOMETRY` → `VARCHAR` (WKT); **`BOOLEAN`** (23ai) → `BOOLEAN`. Anything else →
+`VARCHAR(2000000)` catch-all (never silently dropped). The IMPORT **fails loudly rather than corrupting data** when a
+`NUMBER` needs more than 36 digits under `DECIMAL_OVERFLOW='CAP'`, a char/LOB value exceeds 2,000,000 chars, or a date
+is out of Exasol's `0001-01-01 .. 9999-12-31` range (e.g. a BC date). **Always excluded** (only real user data):
+Oracle-maintained schemas (`SYS`, `SYSTEM`, `XDB`, `MDSYS`, `CTXSYS`, … via `ALL_USERS.ORACLE_MAINTAINED='Y'`) plus
+`PDBADMIN`. Not migrated (out of scope): indexes, `UNIQUE`/`CHECK` constraints, sequences, procedures/functions,
+triggers, synonyms, materialized-view logic.
+
+**ORA vs JDBC (both fully supported and tested).** Exasol recommends **OCI/ORA for performance**; **JDBC is the
+documented fallback for large CLOB and INTERVAL columns.** The script auto-detects the connection and emits the
+matching read: large `CLOB`/`NCLOB` stream to 2,000,000 chars over **JDBC** but are read with `TO_CHAR` (capped at
+4000 chars) over **OCI**; native Exasol `INTERVAL` targets and the WKT→`GEOMETRY`/`BOOLEAN` conversions behave
+differently per transport and are handled automatically. If you have large CLOBs or want native INTERVALs, use the
+JDBC connection.
+
+**Why some columns are read with a function on the source.** Verified live over both transports: neither transport
+reads Oracle's non-scalar types as-is, so the generated IMPORT converts them on the Oracle side — `RAW`/`BLOB` via
+`RAWTOHEX`(`/DBMS_LOB.SUBSTR`); `CLOB` via the raw LOB (JDBC) or `TO_CHAR` (OCI), `NCLOB` via `TO_CLOB`/`TO_CHAR`;
+`BINARY_FLOAT`/`BINARY_DOUBLE` via `CAST(.. AS NUMBER)` with an `Inf`/`NaN`→`NULL` guard; `TIMESTAMP WITH TIME ZONE`
+via `CAST(SYS_EXTRACT_UTC(..) AS TIMESTAMP)`; `INTERVAL` via `TO_CHAR`; `XMLTYPE` via `XMLSERIALIZE`; `JSON` via
+`JSON_SERIALIZE`; `VECTOR` via `FROM_VECTOR`; `SDO_GEOMETRY` via `SDO_UTIL.TO_WKTGEOMETRY`; `BOOLEAN` via a
+transport-matching `CASE`. Everything else (integers, fitting `NUMBER`, `CHAR`/`VARCHAR2`, `DATE`, `TIMESTAMP`)
+transfers directly.
+
+**NLS / encoding — the migration is NLS-independent.** Numbers, dates and timestamps are transferred **typed**
+(binary), so they are immune to the `NLS_NUMERIC_CHARACTERS` (`.`/`,` decimal separator), `NLS_DATE_FORMAT` and
+`NLS_TIMESTAMP_FORMAT` of **both** the Oracle and the Exasol session (verified in all four DE/US combinations).
+Where a number must be rendered as text (`DECIMAL_OVERFLOW='VARCHAR'`), the decimal separator is forced to `.`.
+Character data → Exasol `UTF8` (converted from any source `NLS_CHARACTERSET`; multibyte preserved). The output starts
+with a commented header showing the source NLS settings for information.
+
+**PARALLEL_STATEMENTS.** With `PARALLEL_STATEMENTS = N > 1`, each table's `IMPORT` is split into `N` parallel
+`STATEMENT` clauses: if the table is **partitioned**, its partitions are distributed across the `N` statements by
+**balanced bin-packing** (from `ALL_TAB_PARTITIONS` row counts); otherwise the table is split into `N` buckets via
+**`ORA_HASH(ROWID, N-1)`**. Verified live on both transports (all rows loaded exactly once).
+
+**Migration check (`CHECK_MIGRATION=true`).** For every migrated table the script builds a `"<table>_MIG_CHK"` table
+of standardized, cross-database-comparable metrics (row count, per-column NULL counts, exact `NUMBER` MIN/MAX/SUM,
+date/timestamp MIN/MAX to the second, DISTINCT counts) computed on **both** Oracle and Exasol, plus a
+`DATABASE_MIGRATION."<schema>_MIG_CHK"` summary flagging each metric **`OK` / `DEVIATION`**. It is NLS-safe (numbers
+typed, dates with a numeric mask, both sides `TO_CHAR`'d on Exasol). Review with
+`SELECT * FROM DATABASE_MIGRATION."<schema>_MIG_CHK" WHERE "STATUS" = 'DEVIATION';`.
+
+**Privileges/visibility:** the source metadata is read **through the connection's user**, so the script sees only the
+objects that user may access. **To migrate everything, use a user with sufficient privileges on the source.**
+
+See the header of [oracle_to_exasol.sql](oracle_to_exasol.sql) for more information!
 
 
 ### PostgreSQL

@@ -1,864 +1,504 @@
 create schema if not exists database_migration;
-/* 
-	This script will generate create schema, create table and import statements 
-	to load all needed data from an Oracle database. Automatic datatype conversion is
-	applied whenever needed. Feel free to adjust it. 
-	Primary and foreign key constraints will be generated but can be commented out via script parameters.
-	This script can also create and populate check tables to identify differences.
-	A summary table for all the check tables allows for easy queriying.
-*/
 
-;
+/*
+    oracle_to_exasol.sql  -  generate the statements to migrate an Oracle database to Exasol v8.
+
+    Source: Oracle Database (verified on Oracle 26ai / 23.26). This script runs on the TARGET Exasol database, reads
+    the SOURCE metadata through an Oracle connection - either an ORA (OCI / Oracle Instant Client, faster,
+    recommended) or a JDBC connection; the connection type is AUTO-DETECTED - and RETURNS the statements (CREATE
+    SCHEMA / CREATE TABLE incl. PRIMARY KEY / FOREIGN KEY / COMMENTs / IMPORT / a final CONSTRAINT STATE section /
+    optional VIEW review section / optional DATA VALIDATION). It changes nothing itself - review the output and run
+    it in the order returned. An Oracle schema (owner) maps to an Exasol schema.
+
+    BOTH TRANSPORTS: every type is migrated so that it transfers correctly over BOTH "IMPORT FROM ORA" (OCI) and
+    "IMPORT FROM JDBC". Oracle's non-scalar types are read through an Oracle-side conversion (TO_CHAR, RAWTOHEX,
+    CAST, XMLSERIALIZE, JSON_SERIALIZE, FROM_VECTOR, SDO_UTIL.TO_WKTGEOMETRY, ...) so the transferred value is a
+    plain VARCHAR2/NUMBER/TIMESTAMP that both transports handle identically.
+
+    DATA TYPE MAPPING (every Oracle type CREATE-probed live on 26ai; transfer verified over BOTH ORA and JDBC):
+      NUMBER(p,s) fixed -> DECIMAL(p,s) (p>36 -> DECIMAL_OVERFLOW; negative scale -> DECIMAL(p+|s|,0));
+      NUMBER(p)/NUMBER(*,0)/INTEGER/INT/SMALLINT -> DECIMAL(min(p,36),0); NUMBER without precision -> DOUBLE (or
+      VARCHAR via DECIMAL_OVERFLOW); FLOAT/BINARY_FLOAT/BINARY_DOUBLE -> DOUBLE (Inf/NaN -> NULL, Exasol has neither);
+      CHAR/NCHAR -> CHAR UTF8 (>2000 -> VARCHAR); VARCHAR2/NVARCHAR2 -> VARCHAR UTF8; CLOB/NCLOB -> VARCHAR(2000000);
+      RAW/BLOB -> VARCHAR hex (BINARY_HANDLING); DATE -> TIMESTAMP(0) (Oracle DATE carries a time component);
+      TIMESTAMP(p) -> TIMESTAMP(min(p,9)); TIMESTAMP WITH [LOCAL] TIME ZONE -> TIMESTAMP (WITH TIME ZONE normalized to
+      UTC); INTERVAL -> VARCHAR (INTERVAL_HANDLING, native Exasol INTERVAL optional/JDBC-only); XMLTYPE/JSON/VECTOR ->
+      VARCHAR; SDO_GEOMETRY -> VARCHAR (WKT); BOOLEAN -> BOOLEAN. Anything else -> VARCHAR(2000000) catch-all (never
+      silently dropped). Hard limits (fail loudly, never corrupt): NUMBER needing > 36 digits under
+      DECIMAL_OVERFLOW='CAP'; a character/LOB value > 2,000,000 chars (unless TRUNCATE_LONG_STRINGS=true). Exasol's
+      DATE/TIMESTAMP range is 0001-01-01 .. 9999-12-31 (no BC): a BC (year < 1) Oracle date is out of range - over the
+      ORA transport the IMPORT fails loudly, so pre-process such values before migrating.
+
+    OCI vs JDBC (verified): both transfer every type. Large CLOB/NCLOB stream to 2,000,000 chars only via JDBC; over
+    OCI a LOB is read with TO_CHAR and is capped at 4000 chars (Oracle VARCHAR2 SQL limit; 32767 with EXTENDED
+    MAX_STRING_SIZE). This matches Exasol's guidance to fall back to JDBC for CLOB/INTERVAL columns. The script emits
+    the transport-matching read automatically. BLOB/RAW -> hex is capped at 2000 bytes/value (STANDARD MAX_STRING_SIZE).
+
+    PARALLEL_STATEMENTS: if > 1, each table's IMPORT is split into that many parallel statements using balanced
+    bin-packing of the table's partitions (from ALL_TAB_PARTITIONS); if a table has no partitions, ORA_HASH of the
+    ROWID is used to split it into that many buckets.
+
+    CONSTRAINTS: PRIMARY KEY / FOREIGN KEY are migrated, created DISABLED; a final CONSTRAINT STATE section sets them
+    per CONSTRAINT_STATE (run after the IMPORTs). Identity/generated columns are migrated as plain columns.
+
+    Not migrated (out of scope): indexes, UNIQUE/CHECK constraints, sequences, procedures/functions, triggers,
+    synonyms, materialized-view logic; BLOB/RAW beyond the documented byte cap. Always excluded (only real user data):
+    Oracle-maintained schemas (SYS, SYSTEM, XDB, MDSYS, ... via ALL_USERS.ORACLE_MAINTAINED='Y').
+*/
 --/
-create or replace script database_migration.ORACLE_TO_EXASOL (
-CONNECTION_NAME				 -- name of the database connection inside exasol -> e.g. mysql_db
-,IDENTIFIER_CASE_INSENSITIVE -- TRUE if identifiers should be put uppercase
-,SCHEMA_FILTER               -- filter for the schemas to generate and load, e.g. 'my_schema', 'my%', 'schema1, schema2', '%'
-,TABLE_FILTER                -- filter for the tables to generate and load, e.g. 'my_table', 'my%', 'table1, table2', '%'
-,PARALLEL_STATEMENTS  		 -- number or parallel statements for imports using balanced bin packing with partitions, if partitions are available, else ora_hash partitioning of the rowid will be used.
-,CREATE_PK					 -- TRUE if primary keys should be created, else they will generated but commented out
-,CREATE_FK					 -- TRUE if foreign keys should be created, else they will generated but commented out. NOTE that FKs on tables that do not exist/were not migrated, will fail.
-,CHECK_MIGRATION			 -- TRUE if checking tables and summary should be created
-) RETURNS TABLE 
+create or replace script database_migration.ORACLE_TO_EXASOL(
+  CONNECTION_NAME               -- name of the Oracle connection inside Exasol (ORA/OCI or JDBC - auto-detected) -> e.g. ORACLE_OCI
+  ,IDENTIFIER_CASE_INSENSITIVE  -- true (recommended) => fold ALL identifiers to UPPER so Exasol queries need no quotes; false => keep verbatim/quoted
+  ,SCHEMA_FILTER                -- source schema(s)/owner(s): 'MYSCHEMA', 'APP%', 'S1, S2', '%' (all user schemas; Oracle-maintained schemas always excluded)
+  ,TABLE_FILTER                 -- table(s): 'MY_TABLE', 'MY%', 'T1, T2', '%' (all)
+  ,TARGET_SCHEMA                -- target schema on Exasol; '' = use the source schema (owner) name
+  ,PARALLEL_STATEMENTS          -- integer >= 1: number of parallel IMPORT statements per table (partition bin-packing if partitioned, else ORA_HASH(ROWID) buckets)
+  ,CONSTRAINT_STATE             -- 'FORCE_DISABLE' (recommended), 'SET_AS_SOURCE' or 'FORCE_ENABLE'; PK/FK are always created DISABLED, then set after the IMPORTs
+  ,GENERATE_COMMENTS            -- true/false: migrate Oracle table/column comments as COMMENT ON
+  ,GENERATE_VIEWS               -- true/false: emit source views as a commented manual-review section
+  ,DECIMAL_OVERFLOW             -- 'CAP' (recommended; NUMBER>36 -> DECIMAL(36,s), unscaled NUMBER -> DOUBLE), 'DOUBLE' (~15 digits) or 'VARCHAR' (lossless text)
+  ,BINARY_HANDLING              -- 'HEX' (recommended; RAW/BLOB migrated as hex text via RAWTOHEX; BLOB capped ~2000 bytes) or 'SKIP' (load NULL)
+  ,INTERVAL_HANDLING            -- 'VARCHAR' (recommended; interval as lossless text, both transports) or 'INTERVAL' (native Exasol INTERVAL - JDBC connection only)
+  ,TRUNCATE_LONG_STRINGS        -- true: char/LOB values > 2,000,000 chars are cut to 2,000,000 and imported; false: the IMPORT fails on such a value
+  ,CHECK_MIGRATION              -- true/false: additionally emit data-validation metrics (per-table "<table>_MIG_CHK" + a "<schema>_MIG_CHK" summary comparing source vs target). Run AFTER the IMPORTs.
+) RETURNS TABLE
 AS
 
--- Functions
-function string.startsWith(String,word)
-   return string.sub(String,1,string.len(word))==word
-end
-
-
--- checking the parameter types
-if(type(IDENTIFIER_CASE_INSENSITIVE) ~= 'boolean') then 
-	error('expected a boolean value for parameter IDENTIFIER_CASE_INSENSITIVE, but instead got ' .. type(IDENTIFIER_CASE_INSENSITIVE) .. '.')
-end
-
-if(type(CREATE_PK) ~= 'boolean') then 
-	error('expected a boolean value for parameter CREATE_PK, but instead got ' .. type(CREATE_PK) .. '.')
-end
-
-if(type(CREATE_FK) ~= 'boolean') then 
-	error('expected a boolean value for parameter CREATE_FK, but instead got ' .. type(CREATE_FK) .. '.')
-end
-
+-- ---- parameter handling -----------------------------------------------------------------------------
+function startsWith(s, w) return string.sub(s, 1, string.len(w)) == w end
 ps = 1
-if(type(PARALLEL_STATEMENTS) == 'number') then 
-	ps = math.floor(PARALLEL_STATEMENTS)
-else
-	error('expected an interger value for parameter PARALLEL_STATEMENTS, but instead got ' .. type(PARALLEL_STATEMENTS) .. '.')
-end
+if type(PARALLEL_STATEMENTS) == 'number' then ps = math.floor(PARALLEL_STATEMENTS) end
+if ps < 1 then ps = 1 end
 
-if(type(CHECK_MIGRATION) ~= 'boolean') then 
-	error('expected a boolean value for parameter CHECK_MIGRATION, but instead got ' .. type(CHECK_MIGRATION) .. '.')
-end
-
-
-
-
-function get_connection_type_by_testing(CONNECTION_NAME)
-	-- TEST OCI/ORA
-	success, res = pquery([[
-	
-	select * from(
-			import from ora at ::c
-			statement 'select owner from ALL_TAB_COLUMNS'
-					);]], {c=CONNECTION_NAME})
-	if success then
-		return 'ORA' 
-	end
-
-	-- TEST JDBC
-	success, res = pquery([[
-	
-	select * from(
-			import from jdbc at ::c
-			statement 'select owner from ALL_TAB_COLUMNS'
-					);]], {c=CONNECTION_NAME})
-	if success then
-		return 'JDBC' 
-	end
-	return 'unknown'
-end
-
-
-function get_connection_type(CONNECTION_NAME)
-	CONNECTION_TYPE='unknown'
-	-- check system table for connection type first
-	success, res = pquery([[select CONNECTION_STRING from SYS.EXA_DBA_CONNECTIONS
-		where CONNECTION_NAME = :c ]] , {c=CONNECTION_NAME})
-
-	output(res.statement_text)
-	
-	if success then
-		if #res == 0 then
-			error([[The connection ]]..CONNECTION_NAME..[[ doesn't exist, please try again with a valid connection name]])
-		end
-		if string.startsWith(string.upper(res[1][1]), 'JDBC') then 
-			CONNECTION_TYPE = 'JDBC'
-		else 
-			CONNECTION_TYPE = 'ORA'
-		end
-
-	else -- if user can't access this table --> try oci and jdbc
-		output([[Can't access table SYS.EXA_DBA_CONNECTIONS ... will try to determine connection type by trying it out ]])
-		CONNECTION_TYPE = get_connection_type_by_testing(CONNECTION_NAME)
-	end
-	
-	output('Connection detected as '..CONNECTION_TYPE..' connection')
-	-- error handling
-	if CONNECTION_TYPE == 'unknown' then
-		error([[The connection ]]..CONNECTION_NAME..[[ seems to fit neither an JDBC nor an OCI connection pattern, please verify that ]]..CONNECTION_NAME..[[ is a valid OCI/JDBC connection]])
-	end
-	return CONNECTION_TYPE
-end
-
--- check whether connection is OCI or JDBC Connection
-CONNECTION_TYPE = get_connection_type(CONNECTION_NAME)
-
-
--- set schema and table filter conditions
 exa_upper_begin=''
 exa_upper_end=''
 if IDENTIFIER_CASE_INSENSITIVE == true then
 	exa_upper_begin='upper('
 	exa_upper_end=')'
 end
+function U(col) return exa_upper_begin..col..exa_upper_end end
 
-if string.match(SCHEMA_FILTER, '%%') then	
-	SCHEMA_STR = [[like ('']]..SCHEMA_FILTER..[['')]]		
-else	
-	SCHEMA_STR = [[in ('']]..SCHEMA_FILTER:gsub("^%s*(.-)%s*$", "%1"):gsub('%s*,%s*',"'',''")..[['')]]		
+cstate = string.upper(tostring(CONSTRAINT_STATE))
+if cstate ~= 'SET_AS_SOURCE' and cstate ~= 'FORCE_ENABLE' then cstate = 'FORCE_DISABLE' end
+gen_comments = (GENERATE_COMMENTS == true) or (string.upper(tostring(GENERATE_COMMENTS)) == 'TRUE')
+gen_views    = (GENERATE_VIEWS == true) or (string.upper(tostring(GENERATE_VIEWS)) == 'TRUE')
+decof = string.upper(tostring(DECIMAL_OVERFLOW))
+if decof ~= 'DOUBLE' and decof ~= 'VARCHAR' then decof = 'CAP' end
+binmode = string.upper(tostring(BINARY_HANDLING))
+if binmode ~= 'SKIP' then binmode = 'HEX' end
+ivmode = string.upper(tostring(INTERVAL_HANDLING))
+if ivmode ~= 'INTERVAL' then ivmode = 'VARCHAR' end
+trunc    = (TRUNCATE_LONG_STRINGS == true) or (string.upper(tostring(TRUNCATE_LONG_STRINGS)) == 'TRUE')
+gen_check = (CHECK_MIGRATION == true) or (string.upper(tostring(CHECK_MIGRATION)) == 'TRUE')
+
+-- ---- connection type auto-detection (ORA/OCI vs JDBC) -----------------------------------------------
+function detect_conn(cn)
+	local suc, res = pquery([[select CONNECTION_STRING from SYS.EXA_DBA_CONNECTIONS where CONNECTION_NAME = :c]], {c=cn})
+	if suc and #res == 1 then
+		if startsWith(string.upper(res[1][1]), 'JDBC') then return 'JDBC' else return 'ORA' end
+	end
+	-- fall back to trying each transport
+	if pquery([[select * from (import from ora at ]]..cn..[[ statement 'select 1 from dual')]]) then return 'ORA' end
+	if pquery([[select * from (import from jdbc at ]]..cn..[[ statement 'select 1 from dual')]]) then return 'JDBC' end
+	error('Connection '..cn..' is neither a valid ORA nor JDBC connection.')
 end
+CT = detect_conn(CONNECTION_NAME)
 
-if string.match(TABLE_FILTER, '%%') then	
-	TABLE_STR = [[like ('']]..TABLE_FILTER..[['')]]			
+-- ---- schema/table filter (comma list -> IN, wildcard -> LIKE); Oracle-maintained schemas excluded ---
+function flt(val)
+	if string.match(val, '%%') then
+		return [[ like '']]..val..[['']]
+	else
+		return [[ in ('']]..val:gsub("^%s*(.-)%s*$","%1"):gsub('%s*,%s*',"'',''")..[['')]]
+	end
+end
+SF = flt(SCHEMA_FILTER)
+TF = flt(TABLE_FILTER)
+-- only real user schemas: Oracle-maintained schemas (SYS, SYSTEM, XDB, MDSYS, CTXSYS, ...) carry ORACLE_MAINTAINED='Y';
+-- PDBADMIN is a non-maintained but Oracle-created PDB admin account -> excluded explicitly.
+usr_ok = [[owner in (select username from all_users where oracle_maintained = ''N'') and owner not in (''PDBADMIN'')]]
+
+if TARGET_SCHEMA == null or TARGET_SCHEMA == '' then tschema = [["owner"]] else tschema = [[']]..TARGET_SCHEMA..[[']] end
+sname_e = U(tschema)
+if TARGET_SCHEMA == null or TARGET_SCHEMA == '' then ref_sname_e = U('"r_owner"') else ref_sname_e = sname_e end
+
+-- ---- transport-aware source read snippets (CONNECTION_TYPE known at generation time) ----------------
+-- CLOB: JDBC streams the raw LOB (up to 2,000,000); OCI must convert with TO_CHAR (capped at 4000 chars).
+-- NCLOB: JDBC via TO_CLOB (stream); OCI via TO_CHAR. BOOLEAN: OCI accepts numeric 1/0, JDBC accepts ''true''/''false''.
+if CT == 'JDBC' then
+	clob_read  = [['"' || "column_name" || '"']]
+	nclob_read = [['to_clob("' || "column_name" || '")']]
+	bool_read  = [['case when "' || "column_name" || '" is null then null when "' || "column_name" || '" then ''true'' else ''false'' end']]
 else
-	TABLE_STR = [[in ('']]..TABLE_FILTER:gsub("^%s*(.-)%s*$", "%1"):gsub('%s*,%s*',"'',''")..[['')]]		
+	clob_read  = [['to_char("' || "column_name" || '")']]
+	nclob_read = [['to_char("' || "column_name" || '")']]
+	bool_read  = [['case when "' || "column_name" || '" is null then null when "' || "column_name" || '" then 1 else 0 end']]
+end
+if trunc then
+	clob_read  = [['substr(' || ]]..clob_read..[[ || ', 1, 2000000)']]
+	nclob_read = [['substr(' || ]]..nclob_read..[[ || ', 1, 2000000)']]
 end
 
-
-
-
--- initialize variables for parallel statement
-sql_ora_part_bin = [[]]
-t_part = {}
-s_sn = nil
-s_tn = nil
-t_bin_stat = {}
-t_sql_bin_values = {}
-
-i_bin_idx = nil
-n_bin_sum = 0
-
--- if statements should run in parallel
-if(ps > 1) then
-	-- generate the sql statement to count the number of rows per partition
-	success, sql_ora_part_res = pquery([[
-	select 	'select ''''' || table_owner || ''''' SN, ''''' || table_name || ''''' TN, ''''' || partition_name || ''''' PN , count(*) cnt from "' || table_owner || '"."' || table_name || '" partition ("' || partition_name || '")' 
-					|| case when rownum != count(*) over() then ' union all ' end SQL_PART_CNT
-	from 	(
-			import from ]] .. CONNECTION_TYPE .. [[ at ]] .. CONNECTION_NAME .. [[ statement
-			'
-			select 	table_owner, table_name, partition_name 
-			from 	all_tab_partitions
-			where 	table_owner ]] .. SCHEMA_STR .. [[ 
-			and		table_name ]] .. TABLE_STR .. [[
-			'
-	)
+-------------------------------------------------------------------------------------------------------
+-- PARALLEL_STATEMENTS: balanced bin-packing of partitions (else ORA_HASH(ROWID)). Ported and kept.
+-------------------------------------------------------------------------------------------------------
+sql_ora_part_bin = [[select cast(null as varchar(128)) sn, cast(null as varchar(128)) tn, cast(null as varchar(128)) pn, cast(null as int) cnt, cast(null as int) bin_nr from dual]]
+if ps > 1 then
+	local suc, r1 = pquery([[
+		select 'select ''''' || table_owner || ''''' SN, ''''' || table_name || ''''' TN, ''''' || partition_name || ''''' PN , count(*) cnt from "' || table_owner || '"."' || table_name || '" partition ("' || partition_name || '")'
+		       || case when rownum != count(*) over() then ' union all ' end SQL_PART_CNT
+		from (import from ]]..CT..[[ at ]]..CONNECTION_NAME..[[ statement
+		      'select table_owner, table_name, partition_name from all_tab_partitions where table_owner in (select username from all_users where oracle_maintained = ''N'') and table_owner not in (''PDBADMIN'') and table_owner ]]..flt(SCHEMA_FILTER)..[[ and table_name ]]..TF..[[')
 	]])
-	--output(sql_ora_part_res.statement_text)
-	if(not success) then
-		error(sql_ora_part_res.error_message)
-	end
-	
-	-- if there are partitions at all
-	if(#sql_ora_part_res >= 1) then 
-	
-		-- generate the import statement to count the number of rows per partition
-		sql_ora_part_res2 = [[import into (SN varchar(128), TN varchar(128), PN varchar(128), CNT decimal(36,0)) from ]] .. CONNECTION_TYPE .. [[ at ]] .. CONNECTION_NAME .. [[ statement ']]
-		for i=1, #sql_ora_part_res do
-			sql_ora_part_res2 = sql_ora_part_res2 .. sql_ora_part_res[i].SQL_PART_CNT
-		end
-		sql_ora_part_res2 = sql_ora_part_res2 .. [[']]
-		
-		-- execute the import statement to count the number of rows per partition. Empty partitions are filtered out.
-		-- NOTE: do not remove the order by clause, as it is necessary.
-		success, ora_part_res3 = pquery([[
-		select	SN, TN, PN, CNT
-		from 	(
-				]] .. sql_ora_part_res2 ..  [[
-		)
-		where CNT > 0
-		order by SN, TN, CNT desc
-		]])
-		--output(ora_part_res3.statement_text)
-		if(not success) then
-			error(ora_part_res3.error_message)
-		end
-		
-		-- populate the lua table from the userdata
-		for i=1, #ora_part_res3 do
-			t_part[#t_part +1] = {
-				['SN'] = ora_part_res3[i].SN,
-				['TN'] = ora_part_res3[i].TN,
-				['PN'] = ora_part_res3[i].PN,
-				['CNT'] = tonumber(ora_part_res3[i].CNT)
-			}
-		end
-		
-		-- iterate over all partitions and decide to which bin / statement they should be assigned to
-		for i=1, #t_part do
-		
-			-- start a new cycle and set / reset variables if a schema name or a table name is nill (initial loop) or changes
-			if(s_sn == nil or t_part[i]['SN'] ~= s_sn or s_tn == nil or t_part[i]['TN'] ~= s_tn) then 
-				s_sn = t_part[i]['SN']
-				s_tn = t_part[i]['TN']
-				t_bin_stat = {}
-				n_bin_sum = 0				
+	if not suc then error(r1.error_message) end
+	if #r1 >= 1 then
+		local q2 = [[import into (SN varchar(128), TN varchar(128), PN varchar(128), CNT decimal(36,0)) from ]]..CT..[[ at ]]..CONNECTION_NAME..[[ statement ']]
+		for i=1,#r1 do q2 = q2 .. r1[i].SQL_PART_CNT end
+		q2 = q2 .. [[']]
+		local suc3, r3 = pquery([[select SN, TN, PN, CNT from (]]..q2..[[) where CNT > 0 order by SN, TN, CNT desc]])
+		if not suc3 then error(r3.error_message) end
+		local t_part = {}
+		for i=1,#r3 do t_part[#t_part+1] = {SN=r3[i].SN, TN=r3[i].TN, PN=r3[i].PN, CNT=tonumber(r3[i].CNT)} end
+		local s_sn, s_tn, t_bin, n_sum, vals = nil, nil, {}, 0, {}
+		for i=1,#t_part do
+			if s_sn == nil or t_part[i].SN ~= s_sn or s_tn == nil or t_part[i].TN ~= s_tn then
+				s_sn = t_part[i].SN; s_tn = t_part[i].TN; t_bin = {}; n_sum = 0
 			end
-			
-			i_bin_idx = 1
-			--iterate over all bins, and save the one with the least sum of rows
-			for bin=1, ps do
-				-- if a bin is not set yet, initialize it, store the bin index and break the loop
-				if(t_bin_stat[bin] == nil) then 
-					i_bin_idx = bin
-					t_bin_stat[bin] = {['PN'] = {}, ['SUM'] = 0}
-					break
-				-- search for the new minimal bin count and set save the bin index
-				elseif(t_bin_stat[bin]['SUM'] <= n_bin_sum) then 
-					i_bin_idx = bin
-					n_bin_sum = t_bin_stat[bin]['SUM']
-				end
+			local idx = 1
+			for b=1,ps do
+				if t_bin[b] == nil then idx = b; t_bin[b] = 0; break
+				elseif t_bin[b] <= n_sum then idx = b; n_sum = t_bin[b] end
 			end
-			
-			-- update the the bin stats and partition assignment per statement for the current schema/table
-			t_bin_stat[i_bin_idx]['SUM'] = t_bin_stat[i_bin_idx]['SUM'] + t_part[i]['CNT']
-			t_bin_stat[i_bin_idx]['PN'][#t_bin_stat[i_bin_idx]['PN'] +1] = t_part[i]['PN']
-			
-			-- add the bin column to the partition table, the updated sum is the value to compare other bin counts with in the next iteration
-			t_part[i]['BIN'] = i_bin_idx
-			n_bin_sum = t_bin_stat[i_bin_idx]['SUM']
-			
-			-- this will form the basis for a "from values" clause
-			t_sql_bin_values[#t_sql_bin_values +1] = [[(']] .. 
-				t_part[i]['SN'] .. [[', ']] .. 
-				t_part[i]['TN'] .. [[', ']] .. 
-				t_part[i]['PN'] .. [[', ]] .. 
-				t_part[i]['CNT'] .. [[, ]] .. 
-				t_part[i]['BIN'] .. 
-			[[)]]
-				
+			t_bin[idx] = t_bin[idx] + t_part[i].CNT
+			n_sum = t_bin[idx]
+			vals[#vals+1] = [[(']]..t_part[i].SN..[[', ']]..t_part[i].TN..[[', ']]..t_part[i].PN..[[', ]]..t_part[i].CNT..[[, ]]..idx..[[)]]
 		end
-		
-		sql_ora_part_bin = [[select * from values ]] .. table.concat(t_sql_bin_values, ', ') .. [[ as t(sn, tn, pn, cnt, bin_nr)]]
-		
-	else 
-		sql_ora_part_bin = [[select cast(null as varchar(128)) sn, cast(null as varchar(128)) tn, cast(null as varchar(128)) pn, cast(null as int) cnt, cast(null as int) bin_nr from dual]]
+		sql_ora_part_bin = [[select * from values ]]..table.concat(vals, ', ')..[[ as t(sn, tn, pn, cnt, bin_nr)]]
 	end
-	
-else 
-	sql_ora_part_bin = [[select cast(null as varchar(128)) sn, cast(null as varchar(128)) tn, cast(null as varchar(128)) pn, cast(null as int) cnt, cast(null as int) bin_nr from dual]]
 end
 
+-------------------------------------------------------------------------------------------------------
+-- Metadata query (ALL_TAB_COLUMNS). Detect optional columns for portability across Oracle versions.
+-------------------------------------------------------------------------------------------------------
+cols_q = [[select owner, table_name, column_name, data_type, data_length, data_precision, data_scale, char_length, char_used, nullable, column_id
+           from all_tab_columns c
+           where ]]..usr_ok..[[ and owner ]]..SF..[[ and table_name ]]..TF..[[
+           and (owner, table_name) in (select owner, table_name from all_tables where ]]..usr_ok..[[ and owner ]]..SF..[[ and table_name ]]..TF..[[)]]
 
---check weather identity_column exists in all_tab_columns for this oracle version
-success, res = pquery([[
-select * from(
-		import from ]]..CONNECTION_TYPE..[[ at ::c statement
-			'
-			select 
-			COLUMN_NAME
-			 from
-			ALL_TAB_COLUMNS
-			where
-			TABLE_NAME = ''ALL_TAB_COLUMNS'' and 
-			COLUMN_NAME = ''IDENTITY_COLUMN''
-			'
-)
+pk_q = [[select acc.owner, acc.table_name, acc.column_name, acc.position pos
+         from all_constraints ac join all_cons_columns acc on ac.owner=acc.owner and ac.constraint_name=acc.constraint_name and ac.table_name=acc.table_name
+         where ac.constraint_type=''P'' and acc.owner ]]..SF..[[ and acc.table_name ]]..TF..[[]]
 
-]],{c=CONNECTION_NAME})
+fk_q = [[select acc.owner, acc.table_name, acc.constraint_name, acc.column_name, acc.position pos,
+                acc_r.owner r_owner, acc_r.table_name r_table_name, acc_r.column_name r_column_name
+         from all_constraints ac
+         join all_cons_columns acc on ac.owner=acc.owner and ac.constraint_name=acc.constraint_name and ac.table_name=acc.table_name
+         join all_cons_columns acc_r on ac.r_owner=acc_r.owner and ac.r_constraint_name=acc_r.constraint_name and acc.position=acc_r.position
+         where ac.constraint_type=''R'' and acc.owner ]]..SF..[[ and acc.table_name ]]..TF..[[]]
 
-if not success then error(res.error_message) end
-
-
-all_tab_cols = [[]]
-if #res == 0 then --no identity column
-	all_tab_cols = exa_upper_begin..[[ owner ]]..exa_upper_end..[[ as EXA_SCHEMA_NAME , owner , table_name, ]]..exa_upper_begin..[[ table_name ]]..exa_upper_end..[[ as EXA_TABLE_NAME , COLUMN_NAME, ]]..exa_upper_begin..[[column_name]]..exa_upper_end..[[  as EXA_COLUMN_NAME, data_type, cast(data_length as decimal(9,0)) data_length, cast(data_precision as decimal(9,0)) data_precision, cast(data_scale as decimal(9,0)) data_scale, cast(char_length as decimal(9,0)) char_length , nullable, cast(column_id as decimal(9,0)) column_id, null identity_column]]
+-------------------------------------------------------------------------------------------------------
+-- Exasol-side expressions building the generated statement text.
+-------------------------------------------------------------------------------------------------------
+sc = [[(case when "data_scale" is null or "data_scale" < 0 then 0 when "data_scale" > 36 then 36 else "data_scale" end)]]
+-- fixed NUMBER(p,s) target (with negative-scale and >36 handling), governed by DECIMAL_OVERFLOW
+if decof == 'DOUBLE' then num_over = [['DOUBLE']] elseif decof == 'VARCHAR' then num_over = [['VARCHAR(50) ASCII']] else num_over = [['DECIMAL(36,' || ]]..sc..[[ || ')']] end
+if decof == 'DOUBLE' then unscaled = [['DOUBLE']] elseif decof == 'VARCHAR' then unscaled = [['VARCHAR(50) ASCII']] else unscaled = [['DOUBLE']] end
+num_fixed = [[case
+	when "data_scale" < 0 then 'DECIMAL(' || (case when ("data_precision" - "data_scale") > 36 then 36 else ("data_precision" - "data_scale") end) || ',0)'
+	when "data_precision" > 36 or "data_scale" > 36 then ]]..num_over..[[
+	when "data_scale" > "data_precision" then 'DECIMAL(' || ]]..sc..[[ || ',' || ]]..sc..[[ || ')'
+	else 'DECIMAL(' || "data_precision" || ',' || ]]..sc..[[ || ')'
+end]]
+-- integer-like NUMBER (scale 0, precision maybe null): cap at 36
+num_int = [['DECIMAL(' || (case when "data_precision" is null or "data_precision" > 36 then 36 else "data_precision" end) || ',0)']]
+if ivmode == 'INTERVAL' then
+	iv_ym_t = [['INTERVAL YEAR(' || (case when "data_precision" is null or "data_precision"=0 then 2 else "data_precision" end) || ') TO MONTH']]
+	iv_ds_t = [['INTERVAL DAY(' || (case when "data_precision" is null or "data_precision"=0 then 2 else "data_precision" end) || ') TO SECOND(' || (case when "data_scale" is null or "data_scale">9 then 9 else "data_scale" end) || ')']]
 else
-  	all_tab_cols = exa_upper_begin..[[ owner ]]..exa_upper_end..[[ as EXA_SCHEMA_NAME , owner , table_name, ]]..exa_upper_begin..[[ table_name ]]..exa_upper_end..[[ as EXA_TABLE_NAME , COLUMN_NAME, ]]..exa_upper_begin..[[column_name]]..exa_upper_end..[[  as EXA_COLUMN_NAME, data_type, cast(data_length as decimal(9,0)) data_length, cast(data_precision as decimal(9,0)) data_precision, cast(data_scale as decimal(9,0)) data_scale, cast(char_length as decimal(9,0)) char_length , nullable, cast(column_id as decimal(9,0)) column_id, identity_column]]
+	iv_ym_t = [['VARCHAR(30) ASCII']]  iv_ds_t = [['VARCHAR(30) ASCII']]
+end
+if binmode == 'SKIP' then bin_t = [['VARCHAR(2000000) ASCII']] else bin_t = [['VARCHAR(' || (case when "data_length" is null or "data_length"*2 > 2000000 then 2000000 else "data_length"*2 end) || ') ASCII']] end
+
+col_t = [[case
+	when "dt" in ('CHAR','NCHAR') then case when "char_length" > 2000 then 'VARCHAR(' || "char_length" || ') UTF8' else 'CHAR(' || "char_length" || ') UTF8' end
+	when "dt" in ('VARCHAR2','NVARCHAR2','VARCHAR') then 'VARCHAR(' || (case when "char_length" is null or "char_length" > 2000000 or "char_length"=0 then 2000000 else "char_length" end) || ') UTF8'
+	when "dt" in ('CLOB','NCLOB','LONG') then 'VARCHAR(2000000) UTF8'
+	when "dt" in ('XMLTYPE','JSON') then 'VARCHAR(2000000) UTF8'
+	when "dt" = 'VECTOR' then 'VARCHAR(2000000) UTF8'
+	when "dt" = 'SDO_GEOMETRY' then 'VARCHAR(2000000) UTF8'
+	when "dt" in ('RAW','LONG RAW','BLOB') then ]]..bin_t..[[
+	when "dt" = 'NUMBER' and "data_precision" is not null and "data_scale" is not null then ]]..num_fixed..[[
+	when "dt" = 'NUMBER' and "data_scale" = 0 then ]]..num_int..[[
+	when "dt" = 'NUMBER' then ]]..unscaled..[[
+	when "dt" in ('FLOAT','BINARY_FLOAT','BINARY_DOUBLE') then 'DOUBLE'
+	when "dt" = 'DATE' then 'TIMESTAMP(0)'
+	when "dt" like 'TIMESTAMP%WITH%TIME ZONE' then 'TIMESTAMP(' || (case when "data_scale" is null or "data_scale">9 then 9 else "data_scale" end) || ')'
+	when "dt" like 'TIMESTAMP%' then 'TIMESTAMP(' || (case when "data_scale" is null or "data_scale">9 then 9 else "data_scale" end) || ')'
+	when "dt" like 'INTERVAL YEAR%' then ]]..iv_ym_t..[[
+	when "dt" like 'INTERVAL DAY%' then ]]..iv_ds_t..[[
+	when "dt" = 'BOOLEAN' then 'BOOLEAN'
+	else 'VARCHAR(2000000) UTF8'
+end]]
+
+-- source read expression (aligns positionally with the CREATE TABLE column list)
+if binmode == 'SKIP' then raw_read = [['cast(null as varchar2(10))']] else raw_read = [['rawtohex("' || "column_name" || '")']] end
+if binmode == 'SKIP' then blob_read = [['cast(null as varchar2(10))']] else blob_read = [['rawtohex(dbms_lob.substr("' || "column_name" || '", 2000, 1))']] end
+if trunc then vc_read = [['substr("' || "column_name" || '", 1, 2000000)']] else vc_read = [['"' || "column_name" || '"']] end
+-- NUMBER that overflows into a VARCHAR target (DECIMAL_OVERFLOW='VARCHAR'): read as text, lossless and with the
+-- decimal separator forced to '.' regardless of the Oracle session NLS (translate handles ','->'.'; raw NUMBER
+-- would render as scientific notation over OCI). Numbers that map to DECIMAL/DOUBLE are read raw (typed = NLS-immune).
+if decof == 'VARCHAR' then num_read_over = [['translate(to_char("' || "column_name" || '"), '','', ''.'')']] else num_read_over = [['"' || "column_name" || '"']] end
+src = [[case
+	when "dt" in ('VARCHAR2','NVARCHAR2','VARCHAR') then ]]..vc_read..[[
+	when "dt" = 'CLOB' then ]]..clob_read..[[
+	when "dt" = 'NCLOB' then ]]..nclob_read..[[
+	when "dt" = 'LONG' then 'to_char("' || "column_name" || '")'
+	when "dt" = 'RAW' then ]]..raw_read..[[
+	when "dt" in ('BLOB','LONG RAW') then ]]..blob_read..[[
+	when "dt" in ('FLOAT','BINARY_FLOAT','BINARY_DOUBLE') then 'case when "' || "column_name" || '" is infinite or "' || "column_name" || '" is nan then to_number(null) else cast("' || "column_name" || '" as number) end'
+	when "dt" like 'TIMESTAMP%WITH LOCAL TIME ZONE' then 'cast("' || "column_name" || '" as timestamp)'
+	when "dt" like 'TIMESTAMP%WITH TIME ZONE' then 'cast(sys_extract_utc("' || "column_name" || '") as timestamp)'
+	when "dt" like 'INTERVAL %' then 'to_char("' || "column_name" || '")'
+	when "dt" = 'XMLTYPE' then 'xmlserialize(content "' || "column_name" || '" as varchar2(4000))'
+	when "dt" = 'JSON' then 'json_serialize("' || "column_name" || '" returning varchar2)'
+	when "dt" = 'VECTOR' then 'from_vector("' || "column_name" || '" returning varchar2)'
+	when "dt" = 'SDO_GEOMETRY' then 'to_char(sdo_util.to_wktgeometry("' || "column_name" || '"))'
+	when "dt" = 'BOOLEAN' then ]]..bool_read..[[
+	when "dt" = 'NUMBER' and (("data_precision" is null and "data_scale" is null) or ("data_precision" is not null and "data_scale" is not null and ("data_precision" > 36 or "data_scale" > 36))) then ]]..num_read_over..[[
+	when "dt" in ('CHAR','NCHAR','NUMBER','DATE') then '"' || "column_name" || '"'
+	when "dt" like 'TIMESTAMP%' then '"' || "column_name" || '"'
+	else 'to_char("' || "column_name" || '")'
+end]]
+
+known = [["dt" in ('CHAR','NCHAR','VARCHAR2','NVARCHAR2','VARCHAR','CLOB','NCLOB','LONG','XMLTYPE','JSON','VECTOR','SDO_GEOMETRY','RAW','LONG RAW','BLOB','NUMBER','FLOAT','BINARY_FLOAT','BINARY_DOUBLE','DATE','BOOLEAN') or "dt" like 'TIMESTAMP%' or "dt" like 'INTERVAL %']]
+
+if cstate == 'FORCE_ENABLE' then sw='enable'; scomment=[[  -- forced ENABLE (Exasol re-validates the data)]]
+elseif cstate == 'SET_AS_SOURCE' then sw='enable'; scomment=[[  -- matches Oracle source (keys active)]]
+else sw='disable'; scomment=[[  -- forced DISABLE (optimizer/BI metadata only; faster)]] end
+
+main_q = [['"' || ]]..sname_e..[[ || '"."' || ]]..U('"table_name"')..[[ || '"']]
+
+-- ---- optional CTEs ----------------------------------------------------------------------------------
+comments_cte='' comments_union=''
+if gen_comments then
+	comments_cte = [[
+,vv_comments_raw as (select * from (import from ]]..CT..[[ at ]]..CONNECTION_NAME..[[ statement 'select owner, table_name, 0 as sub, cast(null as varchar2(128)) as column_name, comments from all_tab_comments where comments is not null and ]]..usr_ok..[[ and owner ]]..SF..[[ and table_name ]]..TF..[[ union all select owner, table_name, 1 as sub, column_name, comments from all_col_comments where comments is not null and ]]..usr_ok..[[ and owner ]]..SF..[[ and table_name ]]..TF..[[') c ("owner","table_name","sub","column_name","comment_text"))
+,vv_comment_tab as (select 'COMMENT ON TABLE ' || ]]..main_q..[[ || ' IS ' || '''' || replace("comment_text", '''', '''''') || '''' || ';' as sql_text from vv_comments_raw where "sub"=0)
+,vv_comment_col as (select 'COMMENT ON COLUMN ' || ]]..main_q..[[ || '."' || ]]..U('"column_name"')..[[ || '"' || ' IS ' || '''' || replace("comment_text", '''', '''''') || '''' || ';' as sql_text from vv_comments_raw where "sub">0)]]
+	comments_union = "\n"..[[UNION ALL select 41, cast('-- ### COMMENTS ###' as varchar(2000000)) SQL_TEXT
+UNION ALL select 42, sql_text from vv_comment_tab
+UNION ALL select 43, sql_text from vv_comment_col]]
 end
 
+views_cte='' views_union=''
+if gen_views then
+	views_cte = [[
+,vv_views_raw as (select * from (import from ]]..CT..[[ at ]]..CONNECTION_NAME..[[ statement 'select owner, view_name, text_vc from all_views where ]]..usr_ok..[[ and owner ]]..SF..[[ and view_name ]]..TF..[[') v ("owner","view_name","view_def"))
+,vv_views as (select '-- ' || "owner" || '.' || "view_name" || '  - Oracle view, review and adapt to Exasol SQL manually' || chr(10) || '-- ' || replace("view_def", chr(10), chr(10) || '-- ') as sql_text from vv_views_raw)]]
+	views_union = "\n"..[[UNION ALL select 90, cast('-- ### VIEWS (Oracle SQL - commented out, manual review required) ###' as varchar(2000000)) SQL_TEXT
+UNION ALL select 91, sql_text from vv_views]]
+end
 
-success, res = pquery([[
-with ora_cols as ( 
-        select  * 
-        from    (
-		import from ]]..CONNECTION_TYPE..[[ at ::c
-		statement 
-		        '
-		        select	]]..all_tab_cols..[[  
-		        from	all_tab_columns 
-		        where 	table_name in (
-                				select  table_name 
-                                from    all_tables 
-                                where   owner ]]..SCHEMA_STR..[[ 
-                                and     table_name ]]..TABLE_STR..[[
-                )
-		        and		owner ]]..SCHEMA_STR..[[ 
-		        and 	table_name ]]..TABLE_STR..[[ 
-		        and     owner || ''.'' || table_name NOT IN (
-                				select 	owner || ''.'' || view_name 
-                                from 	all_views
-		                        )
-		        '
-        )
+-- CHECK_MIGRATION: per table a wide typed-metrics row on BOTH systems; a per-schema summary flags OK/DEVIATION.
+-- Mapping-aware: exact NUMBER(<=36) MIN/MAX/SUM, DATE/plain-TIMESTAMP MIN/MAX (to the second), NULL/DISTINCT counts;
+-- excludes LOB/RAW/BLOB/XML/JSON/VECTOR/geo/INTERVAL/binary-float. NLS-safe: numbers typed, dates via numeric mask,
+-- summary TO_CHAR's both sides on Exasol (so the result is consistent under any Exasol session NLS).
+check_cte = ''  check_union = ''
+if gen_check then
+	chk_num = [["dt"='NUMBER' and "data_scale" is not null and "data_scale" between 0 and 36 and (case when "data_precision" is null then 36 else "data_precision" end) <= 36]]
+	chk_dt  = [[("dt"='DATE' or ("dt" like 'TIMESTAMP%' and "dt" not like '%ZONE%'))]]
+	dist_ok = [[("dt" in ('CHAR','NCHAR','VARCHAR2','NVARCHAR2','VARCHAR','BOOLEAN') or ]]..chk_dt..[[ or (]]..chk_num..[[))]]
+	check_cte = [[
+,vv_chk_cols as (select x.*, min("ordinal_position") over (partition by "exa_schema","exa_table") as "min_ord" from vv_columns x
+	where (]]..known..[[) and "dt" not in ('CLOB','NCLOB','LONG','XMLTYPE','JSON','VECTOR','SDO_GEOMETRY','RAW','LONG RAW','BLOB','FLOAT','BINARY_FLOAT','BINARY_DOUBLE') and "dt" not like 'INTERVAL %')
+,vv_chk_x as (
+	select c.*, sysrow."db_system", mid."metric_id",
+	       case when sysrow."db_system"='Exasol' then '"' || c."exa_col" || '"' else '"' || c."column_name" || '"' end as "ref"
+	from vv_chk_cols c
+	cross join (select 'Exasol' as "db_system" union all select 'ORACLE' as "db_system") sysrow
+	cross join (select level-1 as "metric_id" from dual connect by level <= 6) mid
 )
-
-, ora_base as (
-        SELECT  EXA_SCHEMA_NAME, 
-                OWNER, 
-                TABLE_NAME, 
-                EXA_TABLE_NAME, 
-                COLUMN_NAME, 
-                EXA_COLUMN_NAME, 
-                DATA_TYPE, 
-                cast(DATA_LENGTH as integer) DATA_LENGTH, 
-                cast(DATA_PRECISION as integer) DATA_PRECISION, 
-                cast(DATA_SCALE as integer) DATA_SCALE, 
-                cast(CHAR_LENGTH as integer) CHAR_LENGTH, 
-                NULLABLE, 
-                cast(COLUMN_ID as integer) COLUMN_ID, 
-                IDENTITY_COLUMN
-        FROM    ora_cols
+,vv_chk_e as (
+	select "exa_schema","exa_table","owner","table_name","exa_col","column_name","ordinal_position","db_system","metric_id", "exa_table" || '_MIG_CHK' as "wide",
+	   (case
+	      when "metric_id"=0 and "ordinal_position"="min_ord" then (case when "db_system"='Exasol' then 'cast(count(*) as decimal(36,0))' else 'cast(count(*) as number)' end)
+	      when "metric_id"=1 and "not_null"=0 then (case when "db_system"='Exasol' then 'cast(count(case when ' || "ref" || ' is null then 1 end) as decimal(36,0))' else 'cast(count(case when ' || "ref" || ' is null then 1 end) as number)' end)
+	      when "metric_id"=2 and (]]..chk_num..[[) then (case when "db_system"='Exasol' then 'cast(min(' || "ref" || ') as decimal(36,' || ]]..sc..[[ || '))' else 'cast(min(' || "ref" || ') as number)' end)
+	      when "metric_id"=2 and ]]..chk_dt..[[ then 'to_char(min(' || "ref" || '),''YYYY-MM-DD HH24:MI:SS'')'
+	      when "metric_id"=3 and (]]..chk_num..[[) then (case when "db_system"='Exasol' then 'cast(max(' || "ref" || ') as decimal(36,' || ]]..sc..[[ || '))' else 'cast(max(' || "ref" || ') as number)' end)
+	      when "metric_id"=3 and ]]..chk_dt..[[ then 'to_char(max(' || "ref" || '),''YYYY-MM-DD HH24:MI:SS'')'
+	      when "metric_id"=4 and (]]..chk_num..[[) then (case when "db_system"='Exasol' then 'cast(sum(' || "ref" || ') as decimal(36,' || ]]..sc..[[ || '))' else 'cast(sum(' || "ref" || ') as number)' end)
+	      when "metric_id"=5 and ]]..dist_ok..[[ then (case when "db_system"='Exasol' then 'cast(count(distinct ' || "ref" || ') as decimal(36,0))' else 'cast(count(distinct ' || "ref" || ') as number)' end)
+	    end) as "mexpr",
+	   (case "metric_id" when 0 then 'ROW_CNT' when 1 then "exa_col" || '_NULLS' when 2 then "exa_col" || '_MIN' when 3 then "exa_col" || '_MAX' when 4 then "exa_col" || '_SUM' when 5 then "exa_col" || '_DISTINCT' end) as "mname"
+	from vv_chk_x
 )
-
-, ora_cons_pk as (
-        select  pk.*, count(*) over(partition by owner, table_name) cnt_pk
-        from    (
-                import from ]]..CONNECTION_TYPE..[[ at ::c
-				statement 
-                        '
-                    	select  acc.owner, acc.table_name, acc.column_name, acc.position as pos, ac.status, acc.constraint_name,
-                                ]] .. exa_upper_begin .. [[acc.owner]]          .. exa_upper_end .. [[ as EXA_SCHEMA_NAME,
-                                ]] .. exa_upper_begin .. [[acc.table_name]]     .. exa_upper_end .. [[ as EXA_TABLE_NAME,
-                                ]] .. exa_upper_begin .. [[acc.column_name]]    .. exa_upper_end .. [[ as EXA_COLUMN_NAME
-                        from    all_tables ta
-                        join    all_cons_columns acc 
-                        on      ta.owner ]]..SCHEMA_STR..[[ 
-                        and     ta.table_name ]]..TABLE_STR..[[
-                        and     ta.owner = acc.owner
-                        and     ta.table_name = acc.table_name
-                        join    all_constraints ac 
-                        on      acc.owner = ac.owner
-                        and     acc.table_name = ac.table_name
-                        and     acc.constraint_name = ac.constraint_name
-                        and     ac.constraint_type = ''P''
-                        ' 
-        ) pk
+,vv_chk_named as (select * from vv_chk_e where "mexpr" is not null)
+,vv_chk_sys as (
+	select "exa_schema","exa_table","owner","table_name","wide","db_system",
+	   case when "db_system"='Exasol'
+	     then 'select ''Exasol'' as "DB_SYSTEM", ' || group_concat("mexpr" || ' as "' || "mname" || '"' order by "ordinal_position","metric_id" separator ', ') || ' from "' || "exa_schema" || '"."' || "exa_table" || '"'
+	     else 'select ''ORACLE'' as "DB_SYSTEM", x.* from (import from ]]..CT..[[ at ]]..CONNECTION_NAME..[[ statement ' || '''' || replace('select ' || group_concat("mexpr" order by "ordinal_position","metric_id" separator ', ') || ' from "' || "owner" || '"."' || "table_name" || '"', '''', '''''') || '''' || ') x'
+	   end as "sel"
+	from vv_chk_named group by "exa_schema","exa_table","owner","table_name","wide","db_system"
 )
-
-, ora_cons_fk as (
-        select  *
-        from    (
-                import from ]]..CONNECTION_TYPE..[[ at ::c
-				statement 
-                        '
-                        select  acc.owner, acc.table_name, acc.column_name, acc.position as pos, ac.status, acc.constraint_name,
-                                acc_r.owner as r_owner, acc_r.table_name as r_table_name, acc_r.column_name as r_column_name,
-                                ]] .. exa_upper_begin .. [[acc.owner]]          .. exa_upper_end .. [[ as EXA_SCHEMA_NAME,
-                                ]] .. exa_upper_begin .. [[acc.table_name]]     .. exa_upper_end .. [[ as EXA_TABLE_NAME,
-                                ]] .. exa_upper_begin .. [[acc.column_name]]    .. exa_upper_end .. [[ as EXA_COLUMN_NAME,
-                                ]] .. exa_upper_begin .. [[acc_r.owner]]        .. exa_upper_end .. [[ as EXA_REFERENCED_SCHEMA_NAME,
-                                ]] .. exa_upper_begin .. [[acc_r.table_name]]   .. exa_upper_end .. [[ as EXA_REFERENCED_TABLE_NAME,
-                                ]] .. exa_upper_begin .. [[acc_r.column_name]]  .. exa_upper_end .. [[ as EXA_REFERENCED_COLUMN_NAME
-                        from    all_tables ta
-                        join    all_cons_columns acc 
-                        on      ta.owner ]]..SCHEMA_STR..[[ 
-                        and     ta.table_name ]]..TABLE_STR..[[
-                        and     ta.owner = acc.owner
-                        and     ta.table_name = acc.table_name
-                        join    all_constraints ac 
-                        on      acc.owner = ac.owner
-                        and     acc.table_name = ac.table_name
-                        and     acc.constraint_name = ac.constraint_name
-                        and     ac.constraint_type = ''R''
-                        join    all_cons_columns acc_r
-                        on      ac.r_owner = acc_r.owner
-                        and     ac.r_constraint_name = acc_r.constraint_name
-                        and     acc.position = acc_r.position
-                        '
-        )
+,vv_chk_create as (
+	select 'create or replace table "' || "exa_schema" || '"."' || "wide" || '" as ' || "sel" || ';' as sql_text
+	from vv_chk_sys where "db_system"='Exasol'
 )
-
-, nls_format as (
-        select * 
-        from    (
-				import from ]]..CONNECTION_TYPE..[[ at ::c 
-                statement 
-                        'select * 
-                        from    nls_database_parameters 
-                        where   parameter in (''NLS_TIMESTAMP_FORMAT'',''NLS_DATE_FORMAT'',''NLS_DATE_LANGUAGE'',''NLS_CHARACTERSET'', ''NLS_NCHAR_CHARACTERSET'')
-                        '
-        )
+,vv_chk_insert as (
+	select 'insert into "' || "exa_schema" || '"."' || "wide" || '" ' || "sel" || ';' as sql_text
+	from vv_chk_sys where "db_system"='ORACLE'
 )
-
-, cr_schema as (
-        with EXA_SCHEMAS as (
-                select  distinct EXA_SCHEMA_NAME as EXA_SCHEMA 
-                from    ora_base 
-        )
-        select  'create schema if not exists "' ||  EXA_SCHEMA || '";' as cr_schema 
-        from    EXA_SCHEMAS
+,vv_chk_unpiv as (
+	select "exa_schema","exa_table","ordinal_position","metric_id","db_system","wide","mname",
+	   'select ''' || "exa_table" || ''' as "TABLE_NAME", ''' || "mname" || ''' as "METRIC", to_char("' || "mname" || '") as "VAL" from "' || "exa_schema" || '"."' || "wide" || '" where "DB_SYSTEM" = ''' || "db_system" || '''' as "frag"
+	from vv_chk_named
 )
+,vv_chk_summary as (
+	select 'create or replace table "DATABASE_MIGRATION"."' || "exa_schema" || '_MIG_CHK" as select e."TABLE_NAME", e."METRIC", e."VAL" as "EXASOL_METRIC", o."VAL" as "ORACLE_METRIC", case when coalesce(e."VAL", ''~NULL~'') = coalesce(o."VAL", ''~NULL~'') then ''OK'' else ''DEVIATION'' end as "STATUS" from (' || group_concat(case when "db_system"='Exasol' then "frag" end order by "exa_table","ordinal_position","metric_id" separator ' union all ') || ') e join (' || group_concat(case when "db_system"='ORACLE' then "frag" end order by "exa_table","ordinal_position","metric_id" separator ' union all ') || ') o on e."TABLE_NAME"=o."TABLE_NAME" and e."METRIC"=o."METRIC" order by "STATUS" desc, e."TABLE_NAME", e."METRIC";' as sql_text
+	from vv_chk_unpiv group by "exa_schema"
+)]]
+	check_union = "\n".. [[UNION ALL select 70, cast('-- ### DATA VALIDATION (CHECK_MIGRATION) - run AFTER the IMPORTs; compares source vs target metrics ###' as varchar(2000000)) SQL_TEXT
+UNION ALL select 71, sql_text from vv_chk_create
+UNION ALL select 72, sql_text from vv_chk_insert
+UNION ALL select 73, cast('-- per-schema validation summary - one row per metric, STATUS = OK / DEVIATION' as varchar(2000000))
+UNION ALL select 74, sql_text from vv_chk_summary
+UNION ALL select 75, cast('-- review deviations with:  select * from "DATABASE_MIGRATION"."<schema>_MIG_CHK" where "STATUS" = ''DEVIATION'';' as varchar(2000000))]]
+end
 
-, cr_tables as (
-        select  'create or replace table "' || EXA_SCHEMA_NAME || '"."' || EXA_TABLE_NAME || '" (' || cols || '); ' || cols2 || '' as tbls 
-        from    (select EXA_SCHEMA_NAME, EXA_TABLE_NAME, 
-                        group_concat( 
-                            	case 
-                                        when data_type in ('CHAR', 'NCHAR') then 																		'"' || EXA_COLUMN_NAME || '"' || ' ' || 'char(' || char_length || ')'
-                                        when data_type in ('VARCHAR','VARCHAR2', 'NVARCHAR2') then 														'"' || EXA_COLUMN_NAME || '"' || ' ' || 'varchar(' || char_length || ')'
-                                        when data_type in ('CLOB', 'NCLOB') then																		'"' || EXA_COLUMN_NAME || '"' || ' ' || 'varchar(2000000)'
-                                        when data_type = 'XMLTYPE' then 																				'"' || EXA_COLUMN_NAME || '"' || ' ' || 'varchar(2000000)'
-										when data_type = 'RAW' 
-												then 																									'"' || EXA_COLUMN_NAME || '"' || ' ' ||
-														case 	when data_length <= 1024 then 																'hashtype(' || data_length || ' byte)'
-																else 																						'varchar(' || (data_length * 2) || ') ascii'
-														end
-                                        when data_type in ('DECIMAL') and (data_precision is not null and data_scale is not null) 
-                                                then 																									'"' || EXA_COLUMN_NAME || '"' || ' ' ||  
-                                                        case    when data_scale > 36 then 																	'decimal(' || 36 || ',' || 36 || ')' 
-                                                                when data_precision > 36 and data_scale <= 36 then 											'decimal(' || 36 || ',' || data_scale || ')' 
-                                                                when data_precision <= 36 and data_scale > data_precision then  							'decimal(' || data_scale || ',' || data_scale || ')' 
-                                                                else 																						'decimal(' || data_precision || ',' || data_scale || ')' 
-                                                        end
-                                        when data_type = 'NUMBER' and (data_precision is not null and data_scale is not null) 
-                                                then 																									'"' || EXA_COLUMN_NAME || '"' || ' ' ||  
-                                                        case    when data_scale > 36 then 																	'decimal(' || 36 || ',' || 36 || ')' 
-                                                                when data_precision > 36 and data_scale <= 36 then 											'decimal(' || 36 || ',' || data_scale || ')' 
-                                                                when data_precision <= 36 and data_scale > data_precision then  							'decimal(' || data_scale || ',' || data_scale || ')' 
-                                                                else 																						'decimal(' || data_precision || ',' || data_scale || ')' 
-                                                        end
-                                        when data_type = 'NUMBER' and (	data_length is not null and 
-																		data_precision is null and 
-																		data_scale is not null) then 													'"' || EXA_COLUMN_NAME || '"' || ' ' || 'integer' 
-                                        when data_type = 'NUMBER' and (data_precision is null and data_scale is null) then 								'"' || EXA_COLUMN_NAME || '"' || ' ' || 'double precision'
-                                        when data_type in ('DOUBLE PRECISION', 'FLOAT', 'BINARY_FLOAT', 'BINARY_DOUBLE') then 							'"' || EXA_COLUMN_NAME || '"' || ' ' || 'double precision'
-                                        when data_type = 'DATE' then 																					'"' || EXA_COLUMN_NAME || '"' || ' ' || 'timestamp'
-                                        when data_type like 'TIMESTAMP(%)%' or data_type like 'TIMESTAMP%' then											'"' || EXA_COLUMN_NAME || '"' || ' ' || 'timestamp'
-                                        when data_type like 'TIMESTAMP%WITH%TIME%ZONE%' then 															'"' || EXA_COLUMN_NAME || '"' || ' ' || 'timestamp' 
-                                        when data_type like 'INTERVAL YEAR%TO MONTH%' then 																'"' || EXA_COLUMN_NAME || '"' || ' ' || 'interval year(' || case when data_precision = 0 then 1 else data_precision end || ') to month'
-                                        when data_type like 'INTERVAL DAY%TO SECOND%' then 																'"' || EXA_COLUMN_NAME || '"' || ' ' || 'interval day(' || case when data_precision = 0 then 1 else data_precision end || ') to second(' || data_scale || ')'
-                                        when data_type = 'BOOLEAN' then 																				'"' || EXA_COLUMN_NAME || '"' || ' ' || 'boolean'
-                                        -- Fallback for unsupported data types
-                                        -- else '"' || EXA_COLUMN_NAME || '"' || ' ' ||  'varchar(2000000) /* UNSUPPORTED DATA TYPE : ' || data_type
-                                end || 
-                                case    when 	identity_column='YES' and 
-												data_type = 'NUMBER' and 
-												data_precision is not null and 
-												data_scale is not null then 																			' identity' 
-								end || 
-                                case when nullable= 'N' then 																							' not null' 
-									 else ''
-								end
-
-                                order by column_id 
-                                SEPARATOR ', '
-                        ) as cols,
-                        group_concat( 
-                                case    when data_type not in ( 
-													'CHAR', 'NCHAR', 'VARCHAR', 'VARCHAR2', 'NVARCHAR2', 'CLOB', 'NCLOB', 'XMLTYPE', 
-                                                    'DECIMAL', 'NUMBER', 'DOUBLE PRECISION', 'FLOAT', 'BINARY_FLOAT', 'BINARY_DOUBLE', 
-                                                    'DATE', 'BOOLEAN', 'TIMESTAMP', 'RAW') 
-                                        		and data_type not like 'TIMESTAMP(%)%' 
-                                            	and data_type not like 'TIMESTAMP%WITH%TIME%ZONE%' 
-												and data_type not like 'INTERVAL YEAR%TO MONTH%' 
-												and data_type not like 'INTERVAL DAY%TO SECOND%' 
-										then chr(13) || '--UNSUPPORTED DATA TYPE : "' || EXA_COLUMN_NAME || '" ' || data_type
-                                end
-                        ) as cols2 
-                from    ora_base 
-                group   by EXA_SCHEMA_NAME, EXA_TABLE_NAME
-        )
+suc, res = pquery([[
+with vv_columns as (
+	select ]]..sname_e..[[ as "exa_schema", ]]..U('"table_name"')..[[ as "exa_table", ]]..U('"column_name"')..[[ as "exa_col",
+	       upper(trim("data_type")) as "dt",
+	       case when "nullable" = 'N' then 1 else 0 end as "not_null",
+	       cast("data_length" as decimal(18,0)) as "data_length", cast("data_precision" as decimal(18,0)) as "data_precision",
+	       cast("data_scale" as decimal(18,0)) as "data_scale", cast("char_length" as decimal(18,0)) as "char_length",
+	       "owner","table_name","column_name","data_type", cast("column_id" as decimal(9,0)) as "ordinal_position"
+	from (import from ]]..CT..[[ at ]]..CONNECTION_NAME..[[ statement ']]..cols_q..[[') t ("owner","table_name","column_name","data_type","data_length","data_precision","data_scale","char_length","char_used","nullable","column_id")
 )
-
-, cr_constraints_pk as (
-        select  'alter table "' || EXA_SCHEMA_NAME || '"."' || EXA_TABLE_NAME || '" add primary key (' || listagg('"' || EXA_COLUMN_NAME ||'"', ', ') within group(order by pos) || ') enable;' as EXA_CONSTRAINT
-        from    ora_cons_pk
-        group   by EXA_SCHEMA_NAME, EXA_TABLE_NAME
+,vv_catchall as (
+	select '-- NOTE: column "' || "owner" || '"."' || "table_name" || '"."' || "column_name" || '" has unmapped Oracle type ' || "data_type" || ' -> migrated via VARCHAR(2000000) catch-all (please review).' as sql_text
+	from vv_columns where not (]]..known..[[)
 )
-
-, cr_constraints_fk as (
-        select  'alter table "' || EXA_SCHEMA_NAME || '"."' || EXA_TABLE_NAME || '" add foreign key (' || listagg('"' || EXA_COLUMN_NAME || '"', ', ') within group(order by pos) || ') references "' || EXA_REFERENCED_SCHEMA_NAME || '"."' || EXA_REFERENCED_TABLE_NAME || '"(' || listagg('"' || EXA_REFERENCED_COLUMN_NAME ||'"', ', ') within group(order by pos) || ') enable;' as EXA_CONSTRAINT
-        from    ora_cons_fk
-        group   by EXA_SCHEMA_NAME, EXA_TABLE_NAME, EXA_REFERENCED_SCHEMA_NAME, EXA_REFERENCED_TABLE_NAME, constraint_name
+,vv_pk_raw as (select p.* from (import from ]]..CT..[[ at ]]..CONNECTION_NAME..[[ statement ']]..pk_q..[[') p ("owner","table_name","column_name","pos") where exists (select 1 from vv_columns c where c."owner"=p."owner" and c."table_name"=p."table_name" and c."column_name"=p."column_name"))
+,vv_pk as (
+	select 'ALTER TABLE "' || ]]..sname_e..[[ || '"."' || ]]..U('"table_name"')..[[ || '" ADD CONSTRAINT "' || ]]..U('"table_name"')..[[ || '_PK" PRIMARY KEY (' || group_concat('"' || ]]..U('"column_name"')..[[ || '"' order by "pos") || ') DISABLE;' as sql_text
+	from vv_pk_raw group by "owner","table_name"
 )
-
-, cr_import_stmts as(
-		with cl as (
-				select	exa_schema_name, owner, exa_table_name, table_name,
-						listagg(
-								case 
-		                                when data_type in ('CHAR', 'NCHAR') then 																				'"' || EXA_COLUMN_NAME || '"' 
-		                                when data_type in ('VARCHAR','VARCHAR2', 'NVARCHAR2') then 																'"' || EXA_COLUMN_NAME || '"' 
-		                                when data_type in ('CLOB', 'NCLOB') then 																				'"' || EXA_COLUMN_NAME || '"' 
-		                                when data_type = 'XMLTYPE' then 																						'"' || EXA_COLUMN_NAME || '"'
-										when data_type = 'RAW' then																								'"' || EXA_COLUMN_NAME || '"'
-		                                when data_type in ('DECIMAL') and (data_precision is not null and data_scale is not null) then 							'"' || EXA_COLUMN_NAME || '"' 
-		                                when data_type = 'NUMBER' and (data_precision is not null and data_scale is not null) then 								'"' || EXA_COLUMN_NAME || '"'  
-		                                when data_type = 'NUMBER' and (data_length is not null and data_precision is null and data_scale is not null) then 		'"' || EXA_COLUMN_NAME || '"' 
-		                                when data_type = 'NUMBER' and (data_precision is null and data_scale is null) then 										'"' || EXA_COLUMN_NAME || '"' 
-		                                when data_type in ('DOUBLE PRECISION', 'FLOAT', 'BINARY_FLOAT', 'BINARY_DOUBLE') then 									'"' || EXA_COLUMN_NAME || '"' 
-		                                when data_type = 'DATE' then 																							'"' || EXA_COLUMN_NAME || '"' 
-		                                when data_type like 'TIMESTAMP(%)%' or data_type like 'TIMESTAMP' then 													'"' || EXA_COLUMN_NAME || '"' 
-		                                when data_type like 'TIMESTAMP%WITH%TIME%ZONE%' then 																	'"' || EXA_COLUMN_NAME || '"'
-		                                when data_type like 'INTERVAL YEAR%TO MONTH%' then 																		'"' || EXA_COLUMN_NAME || '"'
-		                                when data_type like 'INTERVAL DAY%TO SECOND%' then 																		'"' || EXA_COLUMN_NAME || '"' 
-		                                when data_type = 'BOOLEAN' then 																						'"' || EXA_COLUMN_NAME || '"' 
-		                                -- else '--UNSUPPORTED DATATYPE IN COLUMN ' || COLUMN_NAME || ' Oracle Datatype: ' || data_type 
-                        		end
-								, ', '
-						) within group(order by column_id) exa_col_list,
-						
-						listagg(
-		                		case 
-		                                when data_type in ('CHAR', 'NCHAR') then 																				'"' || column_name || '"' 
-		                                when data_type in ('VARCHAR','VARCHAR2', 'NVARCHAR2') then 																'"' || column_name || '"' 
-		                                when data_type = 'CLOB' then 																							'"' || column_name || '"'
-										when data_type = 'NCLOB' then 																							'to_clob("' || column_name || '")' 
-		                                when data_type = 'XMLTYPE' then 																						'"' || column_name || '"'
-										when data_type = 'RAW' then																								'rawtohex("' || column_name || '")'
-		                                when data_type in ('DECIMAL') and (data_precision is not null and data_scale is not null) then 							'"' || column_name || '"' 
-		                                when data_type = 'NUMBER' and (data_precision is not null and data_scale is not null) then 								'"' || column_name || '"'  
-		                                when data_type = 'NUMBER' and (data_length is not null and data_precision is null and data_scale is not null) then 		'"' || column_name  || '"'
-		                                when data_type = 'NUMBER' and (data_precision is null and data_scale is null) then 										'"' || column_name || '"' 
-		                                when data_type in ('DOUBLE PRECISION', 'FLOAT', 'BINARY_FLOAT', 'BINARY_DOUBLE') then 									'cast("' || column_name || '" as DOUBLE PRECISION)' 
-		                                when data_type = 'DATE' then 																							'"' || column_name || '"' 
-		                                when data_type like 'TIMESTAMP(%)' or data_type like 'TIMESTAMP' then 													'"' || column_name || '"' 
-		                                when data_type like 'TIMESTAMP%WITH%TIME%ZONE%' then 																	'cast("' || column_name || '" at time zone ''''00:00'''' as TIMESTAMP)'
-		                                when data_type like 'INTERVAL YEAR%TO MONTH%' then 																		
-												case 	when data_precision > 0 then																			'to_char("' || column_name || '")'
-														else																									'substr(cast("' || column_name || '" as varchar2(30)), 10, 5)'
-												end
-		                                when data_type like 'INTERVAL DAY%TO SECOND%' then 																		'to_char("' || column_name || '")'
-		                                when data_type = 'BOOLEAN' then '"' || column_name || '"' 
-		                                -- else '--UNSUPPORTED DATATYPE IN COLUMN ' || column_name || ' Oracle Datatype: ' || data_type  
-		                        end
-		                        , ', '
-		                )  within group (order by column_id) ora_col_list
-						
-		        from    ora_base 
-		        group   by exa_schema_name, owner, exa_table_name, table_name 
-		)
-		, ora_bin_part as (
-				]] .. sql_ora_part_bin .. [[
-
-		)
-		, ora_stmt_part as (
-				select	exa_schema_name, owner, exa_table_name, table_name, bin_nr, 
-						listagg('select /*+parallel*/ ' || ora_col_list || ' from "' || owner || '"."' || table_name || '"' || case when bin_nr is not null then ' partition("' || pn ||'")' end, ' union all ') stmt
-				from 	cl 
-				left 	join ora_bin_part bp
-				on 		cl.owner = bp.sn
-				and 	cl.table_name = bp.tn
-				group	by exa_schema_name, owner, exa_table_name, table_name, bin_nr
-		)
-		, ora_stmt_part_oh as (
-				select 	exa_schema_name, owner, exa_table_name, table_name, 
-						case when sp.bin_nr is null and ]] .. ps .. [[ > 1 then stmt || ' where ora_hash(rowid, ' || ml || ') = ' || l else stmt end stmt
-				from 	ora_stmt_part sp 
-				left 	join (select null bin_nr, level -1 l, ]] .. ps .. [[ -1 ml from dual connect by level <= ]] .. ps .. [[) oh 
-				on  	sp.bin_nr is null and oh.bin_nr is null
-		)
-		, ora_stmt_part_oh_agg as (
-				select	exa_schema_name, owner, exa_table_name, table_name,
-						listagg(' statement ''' || stmt || '''', ' ') stmt_agg
-				from 	ora_stmt_part_oh
-				group 	by exa_schema_name, owner, exa_table_name, table_name
-		)
-		select 	'import into "' || e.exa_schema_name || '"."' || e.exa_table_name || '" (' || e.exa_col_list || ') from  ]]..CONNECTION_TYPE..[[ at ]] .. CONNECTION_NAME .. [[ ' || o.stmt_agg || ';' import_stmt
-		from 	cl e
-		join 	ora_stmt_part_oh_agg o
-		on 		e.owner = o.owner
-		and 	e.table_name = o.table_name		
+,vv_fk_raw as (select f.* from (import from ]]..CT..[[ at ]]..CONNECTION_NAME..[[ statement ']]..fk_q..[[') f ("owner","table_name","fk_name","column_name","pos","r_owner","r_table_name","r_column_name") where exists (select 1 from vv_columns c where c."owner"=f."r_owner" and c."table_name"=f."r_table_name"))
+,vv_fk as (
+	select 'ALTER TABLE "' || ]]..sname_e..[[ || '"."' || ]]..U('"table_name"')..[[ || '" ADD CONSTRAINT "' || ]]..U('"fk_name"')..[[ || '" FOREIGN KEY (' || group_concat('"' || ]]..U('"column_name"')..[[ || '"' order by "pos") || ') REFERENCES "' || ]]..ref_sname_e..[[ || '"."' || ]]..U('"r_table_name"')..[[ || '" (' || group_concat('"' || ]]..U('"r_column_name"')..[[ || '"' order by "pos") || ') DISABLE;' as sql_text
+	from vv_fk_raw group by "owner","table_name","fk_name","r_owner","r_table_name"
 )
-
-, check_expr as (
-		select 	db_system,	
-				exa_schema_name,
-				exa_table_name,
-				exa_column_name,
-				owner,
-				table_name,
-				case 	when db_system = 'Exasol' then exa_schema_name
-						else owner
-				end sn, -- schema name
-				case 	when db_system = 'Exasol' then exa_table_name
-						else table_name
-				end tn, -- table name
-				case 	when db_system = 'Exasol' then exa_column_name
-						else column_name
-				end cn, -- column name
-		      	case    when db_system = 'Exasol' then '"' || exa_column_name || '"'
-		                else '"' || column_name || '"'
-		        end qcn, -- quoted column name
-			  	case	when db_system = 'Exasol' then '"' || exa_schema_name || '"."' || exa_table_name || '"'
-		                else '"' || owner || '"."' || table_name || '"'
-		        end qstn, -- quoted schema table name
-		        case    when db_system = 'Exasol' then '"' || exa_table_name || '"."' || exa_column_name || '"'
-		                else '"' || table_name || '"."' || column_name || '"'
-		        end qtcn, -- quoted table column name
-	
-				column_id,
-				data_type,
-				case 	when data_type = 'NUMBER' then 	
-								case 	when data_precision IS NULL AND data_scale IS NULL then 										'double precision'
-				        				when data_precision IS NULL AND data_scale = 0 then 											'decimal(36,0)'
-				        				when data_scale > 36 then 																		'decimal(' || 36 || ',' || 36 || ')'
-										when data_precision > 36 AND data_scale <= 36 then 												'decimal(' || 36 || ',' || data_scale || ')'
-				                    	when data_precision <= 36 AND data_precision >= data_scale then 								'decimal(' || data_precision || ',' || data_scale || ')'
-				            	end
-		            	when data_type in ('BINARY_DOUBLE', 'BINARY_FLOAT', 'FLOAT') then 												'double precision'
-		    	end trg_num_dt,
-				nullable,
-				
-	        	metric_id,
-	        	'DATABASE_MIGRATION' as metric_schema_name,
-	        	exa_table_name || '_MIG_CHK' as metric_table_name,
-	        	
-	        	case	when metric_id = 0 and column_id = 1 then																		'cast(count(*) as decimal(36,0))'
-	        			when metric_id = 1 and nullable = 'Y' and (
-								data_type in ('CHAR', 'NCHAR', 'VARCHAR','VARCHAR2', 'NVARCHAR2', 'RAW', 'DECIMAL', 'NUMBER', 'DATE') or
-								data_type like 'TIMESTAMP(%)%' or 
-								data_type like 'TIMESTAMP%' or
-								data_type like 'TIMESTAMP%WITH%TIME%ZONE%' or
-								data_type like 'INTERVAL YEAR%TO MONTH%' or
-								data_type like 'INTERVAL DAY%TO SECOND%') then															'cast(sum(case when ' || local.qtcn ||' is null then 1 end) as decimal(36,0))'
-	        			when metric_id = 2 and (
-								data_type in ('CHAR', 'NCHAR', 'VARCHAR','VARCHAR2', 'NVARCHAR2', 'RAW', 'DECIMAL', 'NUMBER', 'DATE') or
-								data_type like 'TIMESTAMP(%)%' or 
-								data_type like 'TIMESTAMP%' or
-								data_type like 'TIMESTAMP%WITH%TIME%ZONE%' or
-								data_type like 'INTERVAL YEAR%TO MONTH%' or
-								data_type like 'INTERVAL DAY%TO SECOND%') then															'cast(count(distinct ' || local.qtcn || ') as decimal(36,0))'
-	        			
-	        			when data_type in ('CHAR', 'VARCHAR', 'VARCHAR2', 'NCHAR', 'NVARCHAR2') then 
-	        					case	when metric_id = 3 then																			'min("C_' || local.cn ||'"."' || local.cn || '_TOP")'
-		                        		when metric_id = 4 then																			'min("C_' || local.cn ||'"."' || local.cn || '_OCC")' 
-				            			when metric_id = 5 then																			'cast(min(length(' || local.qtcn || ')) as decimal(36,0))'
-	        							when metric_id = 6 then																			'cast(avg(length(' || local.qtcn || ')) as double precision)'
-	        							when metric_id = 7 then																			'cast(median(length(' || local.qtcn || ')) as decimal(36,0))'
-	        							when metric_id = 8 then																			'cast(max(length(' || local.qtcn || ')) as decimal(36,0))'
-								end
-						
-						when data_type in ('BINARY_DOUBLE', 'BINARY_FLOAT', 'FLOAT', 'NUMBER') then 
-								case	when metric_id = 3 then																			'cast(min(' || local.qtcn || ') as ' || local.trg_num_dt || ')'
-										when metric_id = 4 then																			'cast(avg(' || local.qtcn || ') as ' || local.trg_num_dt || ')'
-										when metric_id = 5 then																			'cast(median(' || local.qtcn || ') as ' || local.trg_num_dt || ')'
-										when metric_id = 6 then																			'cast(max(' || local.qtcn || ') as ' || local.trg_num_dt || ')'
-								end
-						
-						when data_type = 'DATE' or data_type like 'TIMESTAMP(%)' or (data_type like 'TIMESTAMP%WITH%TIME%ZONE%' and db_system = 'exasol') then 
-								case	when metric_id = 3 then																			'cast(min(' || local.qtcn || ') as timestamp)'
-										when metric_id = 4 then																			'cast(median(' || local.qtcn || ') as timestamp)'
-										when metric_id = 5 then																			'cast(max(' || local.qtcn || ') as timestamp)'
-								end
-						when data_type like 'TIMESTAMP%WITH%TIME%ZONE%' and db_system = 'oracle' then 
-								case	when metric_id = 3 then																			'cast(min(cast(' || local.qtcn || ' at time zone ''00:00'' as timestamp with time zone)) at time zone ''00:00'' as timestamp)'
-										when metric_id = 4 then																			'cast(median(cast(' || local.qtcn || ' at time zone ''00:00'' as timestamp with time zone)) at time zone ''00:00'' as timestamp)'
-										when metric_id = 5 then																			'cast(max(cast(' || local.qtcn || ' at time zone ''00:00'' as timestamp with time zone)) at time zone ''00:00'' as timestamp)'
-								end
-								
-						when data_type like 'INTERVAL DAY% TO SECOND%' or (data_type like 'INTERVAL YEAR% TO MONTH' and data_precision > 0) then 
-								case	when metric_id = 3 then																			'to_char(min(' || local.qtcn || '))'
-										when metric_id = 4 then																			'to_char(median(' || local.qtcn || '))'
-										when metric_id = 5 then																			'to_char(max(' || local.qtcn || '))'
-								end
-						when data_type like 'INTERVAL YEAR% TO MONTH' and data_precision = 0 then
-								case	when metric_id = 3 then																			'substr(cast(min(' || local.qtcn || ') as varchar2(30)), 10, 5)'
-										when metric_id = 4 then																			'substr(cast(median(' || local.qtcn || ') as varchar2(30)), 10, 5)'
-										when metric_id = 5 then																			'substr(cast(max(' || local.qtcn || ') as varchar2(30)), 10, 5)'
-								end
-	        	end metric_column_expression,
-
-	        	case 	when metric_id = 0 and column_id = 1 then																		'"CNT_' || local.tn || '"'
-	        			when metric_id = 1 and nullable = 'Y' and (
-								data_type in ('CHAR', 'NCHAR', 'VARCHAR','VARCHAR2', 'NVARCHAR2', 'RAW', 'DECIMAL', 'NUMBER', 'DATE') or
-								data_type like 'TIMESTAMP(%)%' or 
-								data_type like 'TIMESTAMP%' or
-								data_type like 'TIMESTAMP%WITH%TIME%ZONE%' or
-								data_type like 'INTERVAL YEAR%TO MONTH%' or
-								data_type like 'INTERVAL DAY%TO SECOND%') then															'"' || local.cn || '_CNT_NULL"'
-	        			when metric_id = 2 and  (
-								data_type in ('CHAR', 'NCHAR', 'VARCHAR','VARCHAR2', 'NVARCHAR2', 'RAW', 'DECIMAL', 'NUMBER', 'DATE') or
-								data_type like 'TIMESTAMP(%)%' or 
-								data_type like 'TIMESTAMP%' or
-								data_type like 'TIMESTAMP%WITH%TIME%ZONE%' or
-								data_type like 'INTERVAL YEAR%TO MONTH%' or
-								data_type like 'INTERVAL DAY%TO SECOND%') then															'"' || local.cn || '_CNT_DST"'
-	        			
-	        			when data_type in ('CHAR', 'VARCHAR', 'VARCHAR2', 'NCHAR', 'NVARCHAR2') then 
-	        					case	when metric_id = 3 then																			'"' || local.cn || '_TOP"' 
-		                        		when metric_id = 4 then																			'"' || local.cn || '_OCC"'
-				            			when metric_id = 5 then																			'"' || local.cn || '_MIN"'
-	        							when metric_id = 6 then																			'"' || local.cn || '_AVG"'
-	        							when metric_id = 7 then																			'"' || local.cn || '_MED"'
-	        							when metric_id = 8 then																			'"' || local.cn || '_MAX"'
-								end
-						
-						when data_type in ('BINARY_DOUBLE', 'BINARY_FLOAT', 'FLOAT', 'NUMBER') then 
-								case	when metric_id = 3 then																			'"' || local.cn || '_MIN"'
-										when metric_id = 4 then																			'"' || local.cn || '_AVG"'
-										when metric_id = 5 then																			'"' || local.cn || '_MED"'
-										when metric_id = 6 then																			'"' || local.cn || '_MAX"'
-								end
-						
-						when data_type = 'DATE' or data_type like 'TIMESTAMP(%)' or (data_type like 'TIMESTAMP%WITH%TIME%ZONE%' and db_system = 'exasol') then 
-								case	when metric_id = 3 then																			'"' || local.cn || '_MIN"'
-										when metric_id = 4 then																			'"' || local.cn || '_MED"'
-										when metric_id = 5 then																			'"' || local.cn || '_MAX"'
-								end
-						when data_type like 'TIMESTAMP%WITH%TIME%ZONE%' and db_system = 'oracle' then 
-								case	when metric_id = 3 then																			'"' || local.cn || '_MIN"'
-										when metric_id = 4 then																			'"' || local.cn || '_MED"'
-										when metric_id = 5 then																			'"' || local.cn || '_MAX"'
-								end
-								
-						when data_type like 'INTERVAL DAY% TO SECOND%' or (data_type like 'INTERVAL YEAR% TO MONTH' and data_precision > 0) then 
-								case	when metric_id = 3 then																			'"' || local.cn || '_MIN"'
-										when metric_id = 4 then																			'"' || local.cn || '_MED"'
-										when metric_id = 5 then																			'"' || local.cn || '_MAX"'
-								end
-						when data_type like 'INTERVAL YEAR% TO MONTH' and data_precision = 0 then
-								case	when metric_id = 3 then																			'"' || local.cn || '_MIN"'
-										when metric_id = 4 then																			'"' || local.cn || '_MED"'
-										when metric_id = 5 then																			'"' || local.cn || '_MAX"'
-								end
-	        	end metric_column_name,
-	        	case 	when data_type in ('CHAR', 'VARCHAR', 'VARCHAR2', 'NCHAR', 'NVARCHAR2')  and metric_id = 1 then
-		                		'(select substr(listagg(' || local.qtcn || ', ' || case when db_system = 'Exasol' then ''',''' else ''''',''''' end || ') within group(order by ' || local.qtcn || '), 1, 2000) as "' || local.cn || '_TOP", cast(min(cnt) as decimal(36,0)) as "' || local.cn || '_OCC" ' ||
-						        'from (' ||
-		                			'select ' || local.qtcn || ', count(*) cnt, max(count(*)) over() max_cnt ' ||
-		                			'from ' || local.qstn || ' ' || 
-		                			'group by ' || local.qtcn || 
-	                			') "' || local.tn || '" ' ||
-		                        'where cnt = max_cnt) "C_' || local.cn || '"' 
-	        	end metric_column_subselect
-		from	ora_base
-		, 		(select 'Oracle' db_system union all select 'Exasol' db_system)
-		,		(select level -1 metric_id from dual connect by level <= 9)
-		where 	local.metric_column_expression is not null
-		and		]] .. tostring(CHECK_MIGRATION) .. [[
+,vv_create_schemas as (select distinct 'CREATE SCHEMA IF NOT EXISTS "' || "exa_schema" || '";' as sql_text from vv_columns)
+,vv_create_tables as (
+	select 'CREATE OR REPLACE TABLE "' || "exa_schema" || '"."' || "exa_table" || '" (' || group_concat('"' || "exa_col" || '" ' || (]]..col_t..[[) || (case when "not_null"=1 and (]]..known..[[) and "dt" not in ('CLOB','NCLOB','LONG','XMLTYPE','JSON','VECTOR','SDO_GEOMETRY','FLOAT','BINARY_FLOAT','BINARY_DOUBLE','RAW','LONG RAW','BLOB') then ' NOT NULL' else '' end) order by "ordinal_position" separator ', ') || ');' as sql_text
+	from vv_columns group by "exa_schema","exa_table"
 )
-
-, cr_check_table as (
-	select  db_system, exa_schema_name, exa_table_name, metric_table_name,
-			listagg(metric_column_subselect, ', ') within group(order by column_id, metric_id) sql_subselect,
-			'create or replace table "' || exa_schema_name || '"."' || metric_table_name || '" as ' ||
-	        'select cast(''' || db_system || ''' as varchar2(20)) as "DB_SYSTEM", ' || 
-	        listagg(metric_column_expression || ' as ' || metric_column_name, ', ') within group(order by column_id, metric_id) || 
-	        ' from ' || qstn || case when local.sql_subselect is not null then ', ' || local.sql_subselect end || ';' as sql_text
-	from 	check_expr
-	where 	db_system = 'Exasol'
-	group by db_system, qstn, exa_schema_name, exa_table_name, owner, table_name, metric_table_name
-
+,vv_cl as (
+	select "exa_schema","owner","exa_table","table_name",
+	       group_concat('"' || "exa_col" || '"' order by "ordinal_position" separator ', ') as exa_col_list,
+	       group_concat((]]..src..[[) order by "ordinal_position" separator ', ') as ora_col_list
+	from vv_columns group by "exa_schema","owner","exa_table","table_name"
 )
-
-, ins_check_table as (
-	select  listagg(metric_column_subselect, ', ') within group(order by column_id, metric_id) sql_subselect,
-			'insert into "' || exa_schema_name || '"."' || metric_table_name || '" ' ||
-			'select * from (import from ]]..CONNECTION_TYPE..[[ at ]] .. CONNECTION_NAME .. [[ statement '''  ||
-	        'select cast(''''' || db_system || ''''' as varchar2(20)) as "DB_SYSTEM", ' || 
-	        listagg(metric_column_expression || ' as ' || metric_column_name, ', ') within group(order by column_id, metric_id) || 
-	        ' from ' || qstn || case when local.sql_subselect is not null then ', ' || local.sql_subselect end ||
-	        case when db_system != 'Exasol' then ''');' end as sql_text
-	from 	check_expr
-	where 	db_system != 'Exasol'
-	group by db_system, qstn, exa_schema_name, exa_table_name, owner, table_name, metric_table_name
+,vv_bin as (]]..sql_ora_part_bin..[[)
+,vv_stmt_part as (
+	select cl."exa_schema", cl."owner", cl."exa_table", cl."table_name", bp.bin_nr,
+	       group_concat('select ' || cl.ora_col_list || ' from "' || cl."owner" || '"."' || cl."table_name" || '"' || case when bp.pn is not null then ' partition("' || bp.pn || '")' end separator ' union all ') stmt
+	from vv_cl cl left join vv_bin bp on cl."owner"=bp.sn and cl."table_name"=bp.tn
+	group by cl."exa_schema", cl."owner", cl."exa_table", cl."table_name", bp.bin_nr
 )
-
-, cr_check_summary as (
-    select 	1 ord2, 'create or replace table "' || metric_schema_name || '"."' || exa_schema_name || '_MIG_CHK" (schema_name varchar(128), table_name varchar(128), column_name varchar(128), metric_schema varchar(128), metric_table varchar(128),  metric_name varchar(128), exasol_metric varchar(2000), oracle_metric varchar(2000), check_timestamp timestamp default current_timestamp);' as sql_text
-    from 	check_expr
-    group by metric_schema_name, exa_schema_name
-    union all
-    select 2 ord2, 'insert into "' || metric_schema_name || '"."' || exa_schema_name || '_MIG_CHK" (schema_name, table_name, column_name, metric_schema, metric_table, metric_name, exasol_metric, oracle_metric) ' 
-            || listagg(sql_text, '') within group(order by case when db_system = 'Exasol' then 1 else 2 end) || ' '
-            || 'select e.schema_name, e.table_name, e.column_name, e.metric_schema, e.metric_table, e.metric_name, e.exasol_metric, o.oracle_metric from exasol e join oracle o on e.schema_name = o.schema_name and e.table_name = o.table_name and e.metric_name = o.metric_name; ' as sql_text
-    from (
-    
-            select  db_system, exa_schema_name, exa_table_name, metric_schema_name,
-                    case when db_system = 'Exasol' then 'with ' else ', ' end || db_system || ' as ( '
-                    || listagg(
-                    	'select ''' || exa_schema_name || ''' as schema_name, ''' || exa_table_name || ''' as table_name,  ''' || exa_column_name || ''' column_name, ''' || metric_schema_name || ''' metric_schema, ''' || metric_table_name || ''' metric_table, ''' || metric_column_name || ''' as metric_name, to_char(' || metric_column_name || ') as ' || db_system || '_metric from "' || exa_schema_name || '"."' || metric_table_name || '" where DB_SYSTEM = ''' || db_system || '''', ' union all ')
-                    || ' )'  as sql_text
-            from check_expr
-            group by db_system, exa_schema_name, exa_table_name, metric_schema_name, metric_table_name
-            order by case when db_system = 'Exasol' then 1 else 2 end
-    )
-    group by exa_schema_name, exa_table_name, metric_schema_name
-
+,vv_stmt_oh as (
+	select sp."exa_schema", sp."owner", sp."exa_table", sp."table_name",
+	       case when sp.bin_nr is null and ]]..ps..[[ > 1 then sp.stmt || ' where ora_hash(rowid, ' || (]]..ps..[[ - 1) || ') = ' || oh.l else sp.stmt end stmt
+	from vv_stmt_part sp left join (select level-1 l from dual connect by level <= ]]..ps..[[) oh on sp.bin_nr is null and ]]..ps..[[ > 1
 )
-select  sql_text 
-from    (
-        select 1 as ord_hlp,'-- session parameter values are being taken from Oracle systemwide database_parameters and converted. However these should be confirmed before use.' as sql_text
-        union all
-        select 2, '-- Oracle DB''s NLS_CHARACTERSET is set to : ' || "VALUE" from nls_format where "PARAMETER"='NLS_CHARACTERSET'
-		union all
-		select 2.1, '-- Oracle DB''s NLS_NCHAR_CHARACTERSET is set to : ' || "VALUE" from nls_format where "PARAMETER"='NLS_NCHAR_CHARACTERSET'
-        union all
-        select 3,'-- ALTER SESSION SET NLS_DATE_LANGUAGE=''' || "VALUE" || ''';' from nls_format where "PARAMETER"='NLS_DATE_LANGUAGE'
-        union all
-        select 4,'-- ALTER SESSION SET NLS_DATE_FORMAT=''' || replace("VALUE",'R','Y') || ''';' from nls_format where "PARAMETER"='NLS_DATE_FORMAT'
-        union all
-        select 5,'-- ALTER SESSION SET NLS_TIMESTAMP_FORMAT=''' || replace(regexp_replace("VALUE",'XF+','.FF6'),'R','Y') || ''';' from nls_format where "PARAMETER"='NLS_TIMESTAMP_FORMAT'
-		union all
-		select 6, '-- ALTER SESSION SET NLS_NUMERIC_CHARACTERS=''' || session_value || ''';' from exa_parameters where parameter_name = 'NLS_NUMERIC_CHARACTERS'
-        union all
-        select 7, a.* from cr_schema a
-        union all
-        select 8, b.* from cr_tables b where b.TBLS not like '%();%'
-        union all
-        select 9, import_stmt from cr_import_stmts
-		union all
-        select 10, case when not ]] .. tostring(CREATE_PK) .. [[ then '-- ' end || EXA_CONSTRAINT from cr_constraints_pk
-        union all
-        select 11, case when not ]] .. tostring(CREATE_FK) .. [[ then '-- ' end || EXA_CONSTRAINT from cr_constraints_fk
-		union all
-		select 12, sql_text from cr_check_table
-		union all
-		select 13, sql_text from ins_check_table
-		union all
-		select 14, sql_text from cr_check_summary
-) 
-order by ord_hlp
-]],{c=CONNECTION_NAME, s=SCHEMA_FILTER, t=TABLE_FILTER})
+,vv_imports as (
+	select 'IMPORT INTO "' || cl."exa_schema" || '"."' || cl."exa_table" || '" (' || cl.exa_col_list || ') FROM ]]..CT..[[ AT ]]..CONNECTION_NAME..[[' || group_concat(' STATEMENT ''' || replace(o.stmt,'''','''''') || '''' separator '') || ';' as sql_text
+	from vv_cl cl join vv_stmt_oh o on cl."owner"=o."owner" and cl."table_name"=o."table_name"
+	group by cl."exa_schema",cl."exa_table",cl.exa_col_list
+)
+,vv_nls as (select * from (import from ]]..CT..[[ at ]]..CONNECTION_NAME..[[ statement 'select parameter, value from nls_database_parameters where parameter in (''NLS_CHARACTERSET'',''NLS_NCHAR_CHARACTERSET'',''NLS_NUMERIC_CHARACTERS'',''NLS_DATE_FORMAT'')') n ("parameter","value"))]]..comments_cte..views_cte..check_cte..[[
+select sql_text from (
+	select -3 ord, cast('-- ### NLS / ENCODING (informational - this migration is NLS-independent) ###' as varchar(2000000)) SQL_TEXT
+	UNION ALL select -2, '-- source Oracle ' || "parameter" || ' = ' || "value" from vv_nls
+	UNION ALL select -1, cast('-- character data -> Exasol UTF8; NUMBER/DATE/TIMESTAMP transferred TYPED (NLS-immune); number/interval text normalized to ''.'' decimal separator (translate/to_char).' as varchar(2000000))
+	UNION ALL select 0, sql_text from vv_catchall
+	UNION ALL select 1, cast('-- ### SCHEMAS ###' as varchar(2000000))
+	UNION ALL select 2, sql_text from vv_create_schemas
+	UNION ALL select 3, cast('-- ### TABLES ###' as varchar(2000000))
+	UNION ALL select 4, sql_text from vv_create_tables where sql_text not like '%();%'
+	UNION ALL select 5, cast('-- ### PRIMARY KEYS (DISABLED) ###' as varchar(2000000))
+	UNION ALL select 6, sql_text from vv_pk
+	UNION ALL select 7, cast('-- ### FOREIGN KEYS (DISABLED) ###' as varchar(2000000))
+	UNION ALL select 8, sql_text from vv_fk]]..comments_union..[[
+	UNION ALL select 50, cast('-- ### IMPORTS ###' as varchar(2000000))
+	UNION ALL select 51, sql_text from vv_imports
+	UNION ALL select 60, cast('-- ### CONSTRAINT STATE - run AFTER the data load ###' as varchar(2000000))
+	UNION ALL select 61, 'ALTER TABLE "' || ]]..sname_e..[[ || '"."' || ]]..U('"table_name"')..[[ || '" MODIFY CONSTRAINT "' || ]]..U('"table_name"')..[[ || '_PK" ]]..sw..[[;]]..scomment..[[' from vv_pk_raw group by "owner","table_name"
+	UNION ALL select 62, 'ALTER TABLE "' || ]]..sname_e..[[ || '"."' || ]]..U('"table_name"')..[[ || '" MODIFY CONSTRAINT "' || ]]..U('"fk_name"')..[[ || '" ]]..sw..[[;]]..scomment..[[' from vv_fk_raw group by "owner","table_name","fk_name"]]..views_union..check_union..[[
+) order by ord
+]],{})
 
---output(res.statement_text)
-if not success then error(res.error_message) end
+if not suc then error('"'..res.error_message..'" caught while executing: "'..res.statement_text..'"') end
 return(res)
-
 /
-;
 
+-- ===================================================================================================
+-- CONNECTION SETUP
+-- ===================================================================================================
+-- Exasol recommends the ORA (OCI) connection with the Oracle Instant Client - it is the fastest way to migrate
+-- from Oracle. A JDBC connection also works (and is the documented fallback for large CLOB / INTERVAL columns);
+-- this script auto-detects which one CONNECTION_NAME is.
+--
+-- ORACLE INSTANT CLIENT (for the ORA/OCI connection) - VERSION COMPATIBILITY MATTERS:
+--   The required Instant Client version depends on your EXASOL version (see the table in Exasol's docs):
+--     https://docs.exasol.com/db/latest/administration/on-premise/manage_drivers/oracle_instant_client.htm
+--     Exasol <= 8.31.0            -> instantclient 12.1.0.2.0
+--     Exasol 8.32.0 .. 2025.1.8   -> instantclient 23.5.0.24.07
+--     Exasol 2025.1.9 and higher  -> instantclient-basic-linux.x64-23.9.0.25.07.zip
+--   Upload the matching Instant Client zip to BucketFS.
+--
+-- ORACLE JDBC DRIVER (for the JDBC connection): download the latest driver ojdbc11 from Maven
+--   (https://mvnrepository.com/artifact/com.oracle.database.jdbc/ojdbc11) and, with a settings.cfg,
+--   upload both to BucketFS as described here:
+--     https://docs.exasol.com/db/latest/loading_data/connect_sources/oracle.htm#OracleJDBC
+--
+-- Oracle to Exasol migration guide: https://docs.exasol.com/db/latest/migration_guides/oracle/oracle_exasol.htm
+--
+--
+-- Create a connection to the Oracle database (adjust host, database name and credentials),
+-- then run the accompanying test query.
+--
+-- ORA (OCI) connection (fast, recommended):
+CREATE OR REPLACE CONNECTION ORACLE_OCI
+    TO 'oracle_host:1521/oracle_db_service'
+    USER 'username' IDENTIFIED BY 'password';
+SELECT * FROM (IMPORT FROM ORA AT ORACLE_OCI STATEMENT 'select ''Connection works'' from dual');
 
+-- JDBC connection (fallback, e.g. for large CLOB / INTERVAL columns):
+CREATE OR REPLACE CONNECTION ORACLE_JDBC
+    TO 'jdbc:oracle:thin:@//oracle_host:1521/oracle_db_service'
+    USER 'username' IDENTIFIED BY 'password';
+SELECT * FROM (IMPORT FROM JDBC AT ORACLE_JDBC STATEMENT 'select ''Connection works'' from dual');
 
-create or replace connection oracle_jdbc	to	'jdbc:oracle:thin:@192.168.56.106:1521/cdb2' user 'C##DB_MIG' identified by 'C##DB_MIG';
-create or replace connection oracle_oci		to					  '192.168.56.106:1521/cdb2' user 'C##DB_MIG' identified by 'C##DB_MIG';
-import from JDBC at ORACLE_JDBC statement 	'select ''Connection works'' from dual';
-import from ORA at ORACLE_OCI statement 	'select ''Connection works'' from dual';
-
-
-execute script database_migration.oracle_to_exasol(
-	'ORACLE_OCI', 	-- connection name
-	true, 			-- case insensitivity flag
-	'C##DB_MIG', 	-- schema name filter
-	'%',			-- table name filter
-	4, 				-- degree of parallelism for the import statements.
-	false, 			-- flag for primary key generation.
-	false, 			-- flag for foreign key generation.
-	false			-- flag for creation and loading of checking tables
-)
---with output
-;
+-- ===================================================================================================
+-- GENERATE THE MIGRATION STATEMENTS (recommended defaults shown)
+-- ===================================================================================================
+EXECUTE SCRIPT DATABASE_MIGRATION.ORACLE_TO_EXASOL(
+    'ORACLE_OCI',       -- CONNECTION_NAME: Oracle connection (ORA/OCI or JDBC - auto-detected)
+    true,               -- IDENTIFIER_CASE_INSENSITIVE: true (recommended) => fold ALL identifiers to UPPER so Exasol queries never need quotes; false => keep verbatim/quoted
+    'MYSCHEMA',         -- SCHEMA_FILTER: source schema(s)/owner(s): 'MYSCHEMA', 'APP%', 'S1, S2', '%' (all; Oracle-maintained schemas always excluded)
+    '%',                -- TABLE_FILTER: table(s): 'MY_TABLE', 'MY%', 'T1, T2', '%' (all)
+    '',                 -- TARGET_SCHEMA: Exasol target schema; '' (recommended) => use the source schema name
+    4,                  -- PARALLEL_STATEMENTS: 1 = one IMPORT per table; N>1 = N parallel statements (partition bin-packing else ORA_HASH(ROWID))
+    'FORCE_DISABLE',    -- CONSTRAINT_STATE: 'FORCE_DISABLE' (recommended; PK/FK kept as metadata only - faster, order-independent imports), 'SET_AS_SOURCE' or 'FORCE_ENABLE' (all keys enabled = Exasol re-validates the data)
+    true,               -- GENERATE_COMMENTS: true (recommended) => migrate Oracle comments as COMMENT ON; false => skip
+    true,               -- GENERATE_VIEWS: true => emit source views as a commented manual-review section; false => skip
+    'CAP',              -- DECIMAL_OVERFLOW: 'CAP' (recommended; NUMBER>36 -> DECIMAL(36,s), unscaled NUMBER -> DOUBLE), 'DOUBLE' (~15 digits) or 'VARCHAR' (lossless text)
+    'HEX',              -- BINARY_HANDLING: 'HEX' (recommended; RAW/BLOB as hex text; BLOB capped ~2000 bytes) or 'SKIP' (load NULL)
+    'VARCHAR',          -- INTERVAL_HANDLING: 'VARCHAR' (recommended; lossless text, both transports) or 'INTERVAL' (native Exasol INTERVAL - JDBC connection only)
+    false,              -- TRUNCATE_LONG_STRINGS: false (recommended) => import fails on a value > 2,000,000 chars; true => cut such values to 2,000,000 chars and import
+    false               -- CHECK_MIGRATION: false (recommended default) => skip; true => also build <table>_MIG_CHK metric tables + a <schema>_MIG_CHK summary (source vs target) for post-load validation
+);
