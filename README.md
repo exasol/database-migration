@@ -994,45 +994,111 @@ See the header of [saphana_to_exasol.sql](saphana_to_exasol.sql) for more inform
 
 ### Snowflake
 
-The first thing you need to do is add the Snowflake JDBC driver to Exasol. The JDBC driver can be downloaded from the [Snowflake website](https://docs.snowflake.com/developer-guide/jdbc/jdbc-download).
+The [snowflake_to_exasol.sql](snowflake_to_exasol.sql) script generates the statements to migrate a **Snowflake**
+database (verified on Snowflake 10.24, JDBC driver 4.3.2) to Exasol v8. It runs on the **target** Exasol database,
+reads the **source** metadata through a Snowflake **JDBC** connection, and **returns** the statements to recreate and
+load the source. It changes nothing itself — you review the output and run it, in the order returned.
 
-In database versions prior to v8, in order to add the driver to Exasol log into your EXAoperation, select the 'Software', then 'JDBC Drivers'-Tab.
+Snowflake is three-level (`database.schema.table`); Exasol is two-level (`schema.table`). `FLATTEN_DB_TO_SCHEMA=false`
+maps a Snowflake schema to an Exasol schema of the same name; `=true` maps it to `"<database>_<schema>"`
+(collision-safe when migrating several databases whose schema names overlap). `DB_FILTER` selects databases by
+name/pattern against every database the connection's role can see — including shares / imported / personal databases
+(e.g. `SNOWFLAKE_SAMPLE_DATA`). Snowflake's internal `SNOWFLAKE` application DB is skipped automatically (it is not
+listed in `INFORMATION_SCHEMA.DATABASES`), and every `INFORMATION_SCHEMA` schema is always excluded.
 
-Click Add then specify the following details:
+**Step by step**
+* **Install** the script on the **target** database (run [snowflake_to_exasol.sql](snowflake_to_exasol.sql) once; it
+  creates `DATABASE_MIGRATION.SNOWFLAKE_TO_EXASOL`).
+* **Install the Snowflake JDBC driver in BucketFS** — `snowflake-jdbc` **4.3.1 or higher** from Maven
+  ([net.snowflake:snowflake-jdbc](https://mvnrepository.com/artifact/net.snowflake/snowflake-jdbc)); create a
+  `settings.cfg` and upload both to BucketFS per the
+  [Exasol driver setup guide](https://docs.exasol.com/db/latest/loading_data/connect_sources/snowflake.htm) (for the
+  connection-string options see [Snowflake's JDBC configuration docs](https://docs.snowflake.com/en/developer-guide/jdbc/jdbc-configure)).
+* **Create a connection** on the target pointing at the Snowflake source. A ready-to-edit `CREATE CONNECTION` example
+  and a test are at the bottom of the script.
+* **Adapt the `EXECUTE SCRIPT` parameters** to your scenario and run it.
+* **Copy the result set** into another session and execute the statements **in the output order** (the CONSTRAINT
+  STATE section, and — if enabled — the DATA VALIDATION section, run after the IMPORTs).
 
-* Driver Name: `Snowflake`
-* Main Class: `net.snowflake.client.jdbc.SnowflakeDriver`
-* Prefix: `jdbc:snowflake:`
-* Disable Security Manager: `Check this box`
-
-After clicking Apply, you will see the newly added driver's details on the top section of the driver list. Select the Snowflake driver by locating the corresponding jar and upload it. When done the .jar file should be listed in the files column for the Snowflake driver.
-
-For Exasol v8 or newer follow [Load data from Snowflake](https://docs.exasol.com/db/latest/loading_data/connect_sources/snowflake.htm).
-
-You can find a detailed information about configuring the Snowflake driver at the following link:
-https://docs.snowflake.com/en/developer-guide/jdbc/jdbc-configure
-
-To test the connectivity of Exasol to Snowflake create the following connection in your SQL-client:
-
-```SQL
-CREATE OR REPLACE CONNECTION SNOWFLAKE_CONNECTION TO
-  'jdbc:snowflake://<myorganization>-<myaccount>.snowflakecomputing.com/?warehouse=<my_compute_wh>&role=<my_role>&CLIENT_SESSION_KEEP_ALIVE=true'
-  USER '<sfuser>' IDENTIFIED BY '<sfpwd>';
-```
-
-You need to have CREATE CONNECTION privilege granted to the user used to do this. Replace the placeholders including <> with your account information.
-
-Now, test the connectivity with a simple query like:
-
-```SQL
-
-SELECT * FROM 
-(
-IMPORT FROM JDBC AT SNOWFLAKE_CONNECTION
-STATEMENT 'select ''Connection works!'' as connection_status'
+```sql
+EXECUTE SCRIPT DATABASE_MIGRATION.SNOWFLAKE_TO_EXASOL(
+    'SNOWFLAKE_JDBC',       -- CONNECTION_NAME: Snowflake JDBC connection
+    true,                   -- IDENTIFIER_CASE_INSENSITIVE: true (recommended) => fold ALL identifiers to UPPER so Exasol queries never need quotes; false => keep verbatim/quoted
+    '%',                    -- DB_FILTER: Snowflake database(s): 'MYDB', 'DB%', 'D1, D2', '%' (every database the role can see, incl. shares; internal SNOWFLAKE app DB skipped)
+    '%',                    -- SCHEMA_FILTER: schema(s): 'MYSCHEMA', 'APP%', 'S1, S2', '%' (all; INFORMATION_SCHEMA excluded)
+    '%',                    -- TABLE_FILTER: table(s): 'MY_TABLE', 'MY%', 'T1, T2', '%' (all base tables)
+    '',                     -- TARGET_SCHEMA: Exasol target schema; '' (recommended) => derive from source (see FLATTEN_DB_TO_SCHEMA)
+    false,                  -- FLATTEN_DB_TO_SCHEMA: false (recommended) => Exasol schema = <schema>; true => <database>_<schema> (multi-DB collision-safe)
+    'AUTO',                 -- PARALLEL_STATEMENTS: 'AUTO' (Exasol VCPU/NODES/2, even, 4..64), a positive integer, or 1 (no split). Split per table via HASH(*) bucketing (exact 1:1). Best on multi-node Exasol + large tables.
+    'FORCE_DISABLE',        -- CONSTRAINT_STATE: 'FORCE_DISABLE' (recommended; PK/FK metadata only), 'SET_AS_SOURCE' or 'FORCE_ENABLE' (Exasol validates the data)
+    true,                   -- GENERATE_COMMENTS: true (recommended) => migrate Snowflake comments as COMMENT ON; false => skip
+    true,                   -- GENERATE_VIEWS: true => emit source views as a commented manual-review section; false => skip
+    'CAP',                  -- DECIMAL_OVERFLOW: 'CAP' (recommended; NUMBER>36 -> DECIMAL(36,s)), 'DOUBLE' (~15 digits) or 'VARCHAR' (lossless text)
+    'HEX',                  -- BINARY_HANDLING: 'HEX' (recommended; BINARY as hex text) or 'SKIP' (load NULL)
+    false,                  -- TRUNCATE_LONG_STRINGS: false (recommended) => import fails on a value > 2,000,000 chars; true => cut such values to 2,000,000 chars and import
+    false                   -- CHECK_MIGRATION: false (recommended default) => skip; true => also build "<table>_MIG_CHK" metric tables + a "<schema>_MIG_CHK" summary (source vs target) for post-load validation
 );
 ```
-For the actual data-migration, see script [snowflake_to_exasol.sql](snowflake_to_exasol.sql)
+
+This script generates, in this order: an informational header; `CREATE SCHEMA` / `CREATE TABLE` (every type mapped,
+plus `NOT NULL`); `PRIMARY KEY`s and `FOREIGN KEY`s (created disabled, composite supported); table & column
+`COMMENT`s; the `IMPORT`s; a **CONSTRAINT STATE** section to run after the load; the source views as a **commented**
+review section; and (with `CHECK_MIGRATION`) a **DATA VALIDATION** section.
+
+**Data types & limitations.** *Every* Snowflake 10.24 type was CREATE-probed live and its transfer verified through
+`IMPORT FROM JDBC`. `NUMBER(p,s)` → `DECIMAL(p,s)` (`p>36` → `DECIMAL_OVERFLOW`; Snowflake's default for
+`INT`/`BIGINT`/… is `NUMBER(38,0)`, which therefore goes through `DECIMAL_OVERFLOW`); `FLOAT` → `DOUBLE`
+(**`inf`/`-inf`/`NaN` → `NULL`**, Exasol has none); `TEXT` → `VARCHAR(min(len,2000000)) UTF8`; `BINARY` → `VARCHAR`
+**hex** (`BINARY_HANDLING`); `BOOLEAN` → `BOOLEAN`; `DATE` → `DATE`; **`TIME(p)` → `VARCHAR`** (Exasol has no TIME
+type); `TIMESTAMP_NTZ`/`DATETIME(p)` → `TIMESTAMP(min(p,9))`; **`TIMESTAMP_LTZ`/`TIMESTAMP_TZ(p)` → `TIMESTAMP`
+normalized to UTC**; `VARIANT`/`OBJECT`/`ARRAY`/`MAP` → `VARCHAR` **JSON** text (compact, via `TO_JSON`);
+`GEOGRAPHY`/`GEOMETRY` → `VARCHAR` (**WKT**, via `ST_ASTEXT`); `VECTOR` → `VARCHAR` (JSON array). Anything else (e.g.
+the preview `FILE` type) → `VARCHAR(2000000)` catch-all (never silently dropped). The IMPORT **fails loudly rather than
+corrupting data** when a `NUMBER` needs more than 36 digits under `DECIMAL_OVERFLOW='CAP'`, or a text/JSON/hex value
+exceeds 2,000,000 chars (unless `TRUNCATE_LONG_STRINGS=true`). Sub-second timestamps preserve **full nanosecond**
+precision (Exasol `TIMESTAMP(9)`).
+
+**Why some columns are read with a function on the source.** Verified live: several Snowflake types do not transfer
+raw over JDBC, so the generated IMPORT converts them on the Snowflake side — `NUMBER` via `TO_VARCHAR` (the Exasol
+`DECIMAL` target re-parses it; this also side-steps a JDBC limit where integer values beyond ~18 digits fail to
+transfer raw); `BINARY` via `HEX_ENCODE`; `TIMESTAMP_LTZ`/`TIMESTAMP_TZ` via `CONVERT_TIMEZONE('UTC', …)`; `TIME` via
+`TO_CHAR(…, 'HH24:MI:SS.FF9')`; `VARIANT`/`OBJECT`/`ARRAY`/`MAP` via `TO_JSON(CAST(… AS VARIANT))`;
+`GEOGRAPHY`/`GEOMETRY` via `ST_ASTEXT`; `VECTOR` via `TO_JSON(…::ARRAY)`; `FLOAT` via a finite guard (`inf`/`NaN` →
+`NULL`). Everything else (`DECIMAL`s that fit, `TEXT`, `BOOLEAN`, `DATE`, `TIMESTAMP_NTZ`) transfers directly.
+
+**Constraints.** Snowflake `PRIMARY KEY` / `FOREIGN KEY` are **informational** (not enforced) and their columns are not
+exposed in `INFORMATION_SCHEMA`; the script reads them via `SHOW PRIMARY KEYS` / `SHOW IMPORTED KEYS`, migrates them
+(composite supported), creates them **disabled**, and a final CONSTRAINT STATE section sets them per `CONSTRAINT_STATE`.
+Identity/autoincrement columns are migrated as plain columns.
+
+**Multiple databases.** With `DB_FILTER` matching several databases, use `FLATTEN_DB_TO_SCHEMA=true` if the same schema
+name occurs in more than one database (otherwise both would map to the same Exasol schema and collide).
+
+**Parallel import (`PARALLEL_STATEMENTS`).** Each table's `IMPORT` is split into N parallel `STATEMENT` clauses, each
+reading a disjoint `HASH(*)` bucket of the source (`mod(mod(hash(*),N)+N,N)=k`). The split is **exhaustive and
+disjoint**, so the migration is **exactly 1:1** (no row lost or duplicated — verified live, and additionally validated
+by `CHECK_MIGRATION`'s row-count comparison). `'AUTO'` sizes N from the Exasol cluster (`VCPU/NODES/2`, rounded to an
+even number, clamped to 4..64); you can also pass a fixed integer, or `1` to disable splitting. Because Snowflake has
+no `ROWID`/user partitions, each of the N statements re-scans the whole table, so parallelism **pays off on multi-node
+Exasol clusters and large tables**; on a single node or for small tables it can be slower than `1` — benchmark for your
+setup. The generated output states the resolved N in a header comment. (Size the Snowflake warehouse to match N.)
+
+**Not migrated (out of scope):** indexes, `UNIQUE`/`CHECK` constraints, sequences, column defaults, stages, streams,
+tasks, procedures/functions. **Always excluded:** Snowflake's internal `SNOWFLAKE` application DB (not listed in
+`INFORMATION_SCHEMA.DATABASES`) and every `INFORMATION_SCHEMA` schema. Shares / imported / personal databases are
+migrated when they match `DB_FILTER`.
+
+**Migration check (`CHECK_MIGRATION=true`).** For every migrated table the script builds a `"<table>_MIG_CHK"` table of
+standardized, cross-database-comparable metrics (row count, per-column NULL counts, exact `NUMBER(≤36)` MIN/MAX/SUM,
+`DATE` MIN/MAX (to the day) and `TIMESTAMP_NTZ` MIN/MAX (to the **nanosecond**), DISTINCT counts) computed on **both**
+Snowflake and Exasol, plus a
+`DATABASE_MIGRATION."<schema>_MIG_CHK"` summary flagging each metric **`OK` / `DEVIATION`**. Review with
+`SELECT * FROM DATABASE_MIGRATION."<schema>_MIG_CHK" WHERE "STATUS" = 'DEVIATION';`.
+
+**Privileges/visibility:** the source metadata is read **through the connection's user/role**, so the script sees only
+the objects that user may access. **To migrate everything, use a role with sufficient privileges on the source.**
+
+See the header of [snowflake_to_exasol.sql](snowflake_to_exasol.sql) for more information!
 
 
 ### SQL Server
