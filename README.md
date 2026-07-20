@@ -1015,7 +1015,9 @@ listed in `INFORMATION_SCHEMA.DATABASES`), and every `INFORMATION_SCHEMA` schema
   [Exasol driver setup guide](https://docs.exasol.com/db/latest/loading_data/connect_sources/snowflake.htm) (for the
   connection-string options see [Snowflake's JDBC configuration docs](https://docs.snowflake.com/en/developer-guide/jdbc/jdbc-configure)).
 * **Create a connection** on the target pointing at the Snowflake source. A ready-to-edit `CREATE CONNECTION` example
-  and a test are at the bottom of the script.
+  and a test are at the bottom of the script. **The connection string must contain `JDBC_QUERY_RESULT_FORMAT=JSON`**
+  — the JSON result format is required (the `ARROW` default is not usable with this Exasol / Snowflake-JDBC combination,
+  and the script's type and numeric handling assume JSON). Keep this option in the URL.
 * **Adapt the `EXECUTE SCRIPT` parameters** to your scenario and run it.
 * **Copy the result set** into another session and execute the statements **in the output order** (the CONSTRAINT
   STATE section, and — if enabled — the DATA VALIDATION section, run after the IMPORTs).
@@ -1030,10 +1032,12 @@ EXECUTE SCRIPT DATABASE_MIGRATION.SNOWFLAKE_TO_EXASOL(
     '',                     -- TARGET_SCHEMA: Exasol target schema; '' (recommended) => derive from source (see FLATTEN_DB_TO_SCHEMA)
     false,                  -- FLATTEN_DB_TO_SCHEMA: false (recommended) => Exasol schema = <schema>; true => <database>_<schema> (multi-DB collision-safe)
     'AUTO',                 -- PARALLEL_STATEMENTS: 'AUTO' (Exasol VCPU/NODES/2, even, 4..64), a positive integer, or 1 (no split). Split per table via HASH(*) bucketing (exact 1:1). Best on multi-node Exasol + large tables.
+    100000,                 -- PARALLEL_MIN_ROWS: split only tables with >= this many source rows (default 100000); smaller tables import as a single statement even when PARALLEL_STATEMENTS>1. 0 => always split.
     'FORCE_DISABLE',        -- CONSTRAINT_STATE: 'FORCE_DISABLE' (recommended; PK/FK metadata only), 'SET_AS_SOURCE' or 'FORCE_ENABLE' (Exasol validates the data)
     true,                   -- GENERATE_COMMENTS: true (recommended) => migrate Snowflake comments as COMMENT ON; false => skip
     true,                   -- GENERATE_VIEWS: true => emit source views as a commented manual-review section; false => skip
     'CAP',                  -- DECIMAL_OVERFLOW: 'CAP' (recommended; NUMBER>36 -> DECIMAL(36,s)), 'DOUBLE' (~15 digits) or 'VARCHAR' (lossless text)
+    true,                   -- NUMBER_FAST_RAW: true (default, ~3-4x faster) => read NUMBER raw; a value with > ~18 significant digits fails loudly (ETL-5402, never corrupts). false => safe (raw for precision<=18, TO_VARCHAR for 19..36)
     'HEX',                  -- BINARY_HANDLING: 'HEX' (recommended; BINARY as hex text) or 'SKIP' (load NULL)
     false,                  -- TRUNCATE_LONG_STRINGS: false (recommended) => import fails on a value > 2,000,000 chars; true => cut such values to 2,000,000 chars and import
     false                   -- CHECK_MIGRATION: false (recommended default) => skip; true => also build "<table>_MIG_CHK" metric tables + a "<schema>_MIG_CHK" summary (source vs target) for post-load validation
@@ -1059,12 +1063,26 @@ exceeds 2,000,000 chars (unless `TRUNCATE_LONG_STRINGS=true`). Sub-second timest
 precision (Exasol `TIMESTAMP(9)`).
 
 **Why some columns are read with a function on the source.** Verified live: several Snowflake types do not transfer
-raw over JDBC, so the generated IMPORT converts them on the Snowflake side — `NUMBER` via `TO_VARCHAR` (the Exasol
-`DECIMAL` target re-parses it; this also side-steps a JDBC limit where integer values beyond ~18 digits fail to
-transfer raw); `BINARY` via `HEX_ENCODE`; `TIMESTAMP_LTZ`/`TIMESTAMP_TZ` via `CONVERT_TIMEZONE('UTC', …)`; `TIME` via
-`TO_CHAR(…, 'HH24:MI:SS.FF9')`; `VARIANT`/`OBJECT`/`ARRAY`/`MAP` via `TO_JSON(CAST(… AS VARIANT))`;
-`GEOGRAPHY`/`GEOMETRY` via `ST_ASTEXT`; `VECTOR` via `TO_JSON(…::ARRAY)`; `FLOAT` via a finite guard (`inf`/`NaN` →
-`NULL`). Everything else (`DECIMAL`s that fit, `TEXT`, `BOOLEAN`, `DATE`, `TIMESTAMP_NTZ`) transfers directly.
+raw over JDBC, so the generated IMPORT converts them on the Snowflake side — `BINARY` via `HEX_ENCODE`;
+`TIMESTAMP_LTZ`/`TIMESTAMP_TZ` via `CONVERT_TIMEZONE('UTC', …)`; `TIME` via `TO_CHAR(…, 'HH24:MI:SS.FF9')`;
+`VARIANT`/`OBJECT`/`ARRAY`/`MAP` via `TO_JSON(CAST(… AS VARIANT))`; `GEOGRAPHY`/`GEOMETRY` via `ST_ASTEXT`; `VECTOR`
+via `TO_JSON(…::ARRAY)`; `FLOAT` via a finite guard (`inf`/`NaN` → `NULL`). Everything else — `NUMBER` (see below),
+`TEXT`, `BOOLEAN`, `DATE`, `TIMESTAMP_NTZ` — transfers directly. The `FLOAT` finite guard is **always on**: it was
+benchmarked at ~0 % overhead (1M rows × 8 `FLOAT`: 6.9 s raw vs 5.9 s guarded, within noise), so there is no reason to
+make it optional.
+
+**Numeric read performance (`NUMBER_FAST_RAW`, default `true`).** Exasol reads the Snowflake JDBC result in JSON
+format, which transfers integers as int64 — a value with more than ~18 significant digits then fails to transfer raw
+(`ETL-5402`). Snowflake's default for `INT`/`BIGINT`/… is `NUMBER(38,0)`, so a *conservative* reader would wrap every
+`NUMBER` in `TO_VARCHAR` and let the Exasol `DECIMAL` re-parse it — but on numeric-heavy tables that coercion measured
+**~3–4× slower** (1M rows × 8 `NUMBER`: 6.8 s raw vs 24.4 s coerced). In practice almost all real data (keys, amounts,
+counts) stays well under 18 significant digits, so the default `NUMBER_FAST_RAW=true` reads every `NUMBER` **raw** for
+maximum speed and **fails loudly** (`ETL-5402`, never corrupts) on the rare value that exceeds the int64 range. Set
+`NUMBER_FAST_RAW=false` for the safe path: values with `precision ≤ 18` are still read raw, `19 ≤ precision ≤ 36` are
+read via `TO_VARCHAR`. Columns with `precision > 36` always follow `DECIMAL_OVERFLOW` (independent of this switch); for
+genuinely huge values use `NUMBER_FAST_RAW=false` and/or `DECIMAL_OVERFLOW='VARCHAR'`. All four combinations were
+verified live (raw exact on normal data; fail-loud on 30- and 38-digit values; safe path lossless for 30-digit values;
+`DECIMAL_OVERFLOW='VARCHAR'` lossless for 38-digit values in both modes).
 
 **Constraints.** Snowflake `PRIMARY KEY` / `FOREIGN KEY` are **informational** (not enforced) and their columns are not
 exposed in `INFORMATION_SCHEMA`; the script reads them via `SHOW PRIMARY KEYS` / `SHOW IMPORTED KEYS`, migrates them
@@ -1082,6 +1100,12 @@ even number, clamped to 4..64); you can also pass a fixed integer, or `1` to dis
 no `ROWID`/user partitions, each of the N statements re-scans the whole table, so parallelism **pays off on multi-node
 Exasol clusters and large tables**; on a single node or for small tables it can be slower than `1` — benchmark for your
 setup. The generated output states the resolved N in a header comment. (Size the Snowflake warehouse to match N.)
+
+Because that per-statement re-scan is wasteful on small tables, **`PARALLEL_MIN_ROWS` (default `100000`)** gates the
+split by source size: a table is only split when its `INFORMATION_SCHEMA.TABLES.ROW_COUNT` is **≥ the threshold**
+(or unknown/`NULL`, which is treated as large); smaller tables are imported as a single, unbucketed statement even when
+`PARALLEL_STATEMENTS>1`. Set it to `0` to always split, or raise it if you only want your biggest tables parallelized.
+The decision is per table, so one `EXECUTE` over a mixed schema splits the big tables and single-streams the small ones.
 
 **Not migrated (out of scope):** indexes, `UNIQUE`/`CHECK` constraints, sequences, column defaults, stages, streams,
 tasks, procedures/functions. **Always excluded:** Snowflake's internal `SNOWFLAKE` application DB (not listed in
