@@ -50,10 +50,12 @@ create or replace script database_migration.SNOWFLAKE_TO_EXASOL(
   ,TARGET_SCHEMA                -- target schema on Exasol; '' = derive from the source (see FLATTEN_DB_TO_SCHEMA)
   ,FLATTEN_DB_TO_SCHEMA         -- false (recommended) => Exasol schema = <schema>; true => Exasol schema = <database>_<schema> (multi-DB collision-safe)
   ,PARALLEL_STATEMENTS          -- 'AUTO' (Exasol VCPU/NODES/2, even, clamped 4..64), a positive integer, or 1 (no split). Each table's IMPORT is split into that many parallel STATEMENT clauses via HASH(*) bucketing (exact 1:1). Best on multi-node Exasol + large tables.
+  ,PARALLEL_MIN_ROWS            -- row-count threshold for the split (default 100000): a table with fewer source rows imports as a SINGLE statement even when PARALLEL_STATEMENTS>1 (Snowflake has no ROWID, so a split re-scans the whole table N times - not worth it for small tables). 0 => always split. Source count from INFORMATION_SCHEMA.TABLES.ROW_COUNT (an unknown/NULL count is treated as large => split).
   ,CONSTRAINT_STATE             -- 'FORCE_DISABLE' (recommended), 'SET_AS_SOURCE' or 'FORCE_ENABLE'; PK/FK always created DISABLED, then set after the IMPORTs
   ,GENERATE_COMMENTS            -- true/false: migrate Snowflake table/column comments as COMMENT ON
   ,GENERATE_VIEWS               -- true/false: emit source views as a commented manual-review section
   ,DECIMAL_OVERFLOW             -- 'CAP' (recommended; NUMBER>36 -> DECIMAL(36,s), fail-loud on real overflow), 'DOUBLE' (~15 digits) or 'VARCHAR' (lossless text)
+  ,NUMBER_FAST_RAW              -- true (default, fastest): read NUMBER raw (no TO_VARCHAR) => ~3-4x faster on numeric-heavy tables, but a value with > ~18 significant digits fails loudly (ETL-5402, no corruption). false: safe (raw for precision<=18, TO_VARCHAR for 19..36). For huge values use false and/or DECIMAL_OVERFLOW='VARCHAR'.
   ,BINARY_HANDLING              -- 'HEX' (recommended; BINARY migrated as hex text via HEX_ENCODE) or 'SKIP' (load NULL)
   ,TRUNCATE_LONG_STRINGS        -- true: text/JSON/hex values > 2,000,000 chars are cut to 2,000,000 and imported; false: the IMPORT fails on such a value
   ,CHECK_MIGRATION              -- true/false: additionally emit data-validation metrics (per-table "<table>_MIG_CHK" + a "<schema>_MIG_CHK" summary). Run AFTER the IMPORTs.
@@ -73,6 +75,8 @@ decof = string.upper(tostring(DECIMAL_OVERFLOW))
 if decof ~= 'DOUBLE' and decof ~= 'VARCHAR' then decof = 'CAP' end
 binmode = string.upper(tostring(BINARY_HANDLING))
 if binmode ~= 'SKIP' then binmode = 'HEX' end
+-- NUMBER_FAST_RAW: default TRUE (read numbers raw; fastest). Only an explicit false/'FALSE' turns on the safe TO_VARCHAR path.
+fast_raw = not (NUMBER_FAST_RAW == false or string.upper(tostring(NUMBER_FAST_RAW)) == 'FALSE')
 
 -- ---- PARALLEL_STATEMENTS: 'AUTO' (Exasol VCPU/NODES/2, even, clamped 4..64), a positive integer, or 1 (no split) ----
 ps = 1
@@ -98,10 +102,17 @@ do
 		else ps = 1; ps_note = 'fixed -> 1 (no split)' end
 	end
 end
--- SQL fragment for the IMPORT source: ps=1 -> plain table; ps>1 -> HASH(*) bucket k of ps (exhaustive + disjoint).
+-- ---- PARALLEL_MIN_ROWS: only split a table whose source row count reaches this threshold (default 100000; 0 => always split) ----
+pmin = tonumber(PARALLEL_MIN_ROWS)
+if pmin == nil then pmin = 100000 end
+if pmin < 0 then pmin = 0 end
+pmin = math.floor(pmin)
+
+-- SQL fragment for the IMPORT source: ps=1 -> plain table; ps>1 -> per table, HASH(*) bucket k of ps (exhaustive + disjoint)
+-- but only when the source row count is unknown or >= PARALLEL_MIN_ROWS; smaller tables stay a single, unbucketed statement.
 -- MOD(MOD(HASH(*),ps)+ps,ps) keeps the bucket in [0,ps) and avoids the ABS(min int64) overflow.
 if ps > 1 then
-	imp_from = [['(select *, hash(*) as "__PBKT__" from "' || "db_name" || '"."' || "schema_name" || '"."' || "table_name" || '") where mod(mod("__PBKT__", ]]..ps..[[) + ]]..ps..[[, ]]..ps..[[) = ' || "k"]]
+	imp_from = [[case when "row_count" is null or "row_count" >= ]]..pmin..[[ then '(select *, hash(*) as "__PBKT__" from "' || "db_name" || '"."' || "schema_name" || '"."' || "table_name" || '") where mod(mod("__PBKT__", ]]..ps..[[) + ]]..ps..[[, ]]..ps..[[) = ' || "k" else '"' || "db_name" || '"."' || "schema_name" || '"."' || "table_name" || '"' end]]
 else
 	imp_from = [['"' || "db_name" || '"."' || "schema_name" || '"."' || "table_name" || '"']]
 end
@@ -156,7 +167,7 @@ if #res1 < 1 then error('No Snowflake database matched DB_FILTER = '..tostring(D
 mq = ''
 for i=1,#res1 do
 	local db = res1[i][1]
-	local piece = [[select '']]..db..[['' as db_name, c.table_schema, c.table_name, cast(c.ordinal_position as number(9,0)) as ordinal_position, c.column_name, c.data_type, cast(c.numeric_precision as number(9,0)) as numeric_precision, cast(c.numeric_scale as number(9,0)) as numeric_scale, cast(c.character_maximum_length as number(18,0)) as character_maximum_length, cast(c.datetime_precision as number(9,0)) as datetime_precision, c.is_nullable, coalesce(c.comment,'''') as col_comment from "]]..db..[[".information_schema.columns c join "]]..db..[[".information_schema.tables t on t.table_schema = c.table_schema and t.table_name = c.table_name where t.table_type = ''BASE TABLE'' and c.table_schema ]]..SF..[[ and c.table_name ]]..TF..[[ and c.table_schema <> ''INFORMATION_SCHEMA'']]
+	local piece = [[select '']]..db..[['' as db_name, c.table_schema, c.table_name, cast(c.ordinal_position as number(9,0)) as ordinal_position, c.column_name, c.data_type, cast(c.numeric_precision as number(9,0)) as numeric_precision, cast(c.numeric_scale as number(9,0)) as numeric_scale, cast(c.character_maximum_length as number(18,0)) as character_maximum_length, cast(c.datetime_precision as number(9,0)) as datetime_precision, c.is_nullable, coalesce(c.comment,'''') as col_comment, cast(t.row_count as number(18,0)) as row_count from "]]..db..[[".information_schema.columns c join "]]..db..[[".information_schema.tables t on t.table_schema = c.table_schema and t.table_name = c.table_name where t.table_type = ''BASE TABLE'' and c.table_schema ]]..SF..[[ and c.table_name ]]..TF..[[ and c.table_schema <> ''INFORMATION_SCHEMA'']]
 	if i > 1 then mq = mq..[[ union all ]] end
 	mq = mq..piece
 end
@@ -217,9 +228,16 @@ if #fk_vals==0 then fk_src=[[select cast(null as varchar(2000000)) "s_schema", c
 else fk_src=[[select * from values ]]..table.concat(fk_vals,', ')..[[ as t("s_schema","s_table","sql_text","state_text")]] end
 
 -- ---- type mapping (Exasol target) and Snowflake-side read expressions -------------------------------
+num_raw = [['"' || "column_name" || '"']]
+num_tvc = [['to_varchar("' || "column_name" || '")']]
 if decof == 'DOUBLE' then num_over_t=[['DOUBLE']] num_over_src=[['to_double("' || "column_name" || '")']]
-elseif decof == 'VARCHAR' then num_over_t=[['VARCHAR(50) ASCII']] num_over_src=[['to_varchar("' || "column_name" || '")']]
-else num_over_t=[['DECIMAL(36,' || least("numeric_scale",36) || ')']] num_over_src=[['to_varchar("' || "column_name" || '")']] end
+elseif decof == 'VARCHAR' then num_over_t=[['VARCHAR(50) ASCII']] num_over_src=num_tvc
+else num_over_t=[['DECIMAL(36,' || least("numeric_scale",36) || ')']]
+	if fast_raw then num_over_src=num_raw else num_over_src=num_tvc end
+end
+-- NUMBER read for precision <= 36: fast_raw => raw (int64-safe up to ~18 digits, fail-loud beyond); safe => raw for precision <= 18, TO_VARCHAR for 19..36
+if fast_raw then num_norm_src = num_raw
+else num_norm_src = [[case when "numeric_precision" <= 18 then '"' || "column_name" || '"' else 'to_varchar("' || "column_name" || '")' end]] end
 
 col_t = [[case "dt"
 	when 'NUMBER' then case when "numeric_precision" > 36 then ]]..num_over_t..[[ else 'DECIMAL(' || "numeric_precision" || ',' || "numeric_scale" || ')' end
@@ -249,7 +267,7 @@ if trunc then text_src=[['substr("' || "column_name" || '", 1, 2000000)']] else 
 if trunc then json_wrap_a='substr(' json_wrap_b=', 1, 2000000)' else json_wrap_a='' json_wrap_b='' end
 
 src = [[case "dt"
-	when 'NUMBER' then case when "numeric_precision" > 36 then ]]..num_over_src..[[ else 'to_varchar("' || "column_name" || '")' end
+	when 'NUMBER' then case when "numeric_precision" > 36 then ]]..num_over_src..[[ else ]]..num_norm_src..[[ end
 	when 'FLOAT' then 'case when "' || "column_name" || '" = ''inf''::float or "' || "column_name" || '" = ''-inf''::float or "' || "column_name" || '" != "' || "column_name" || '" then null else "' || "column_name" || '" end'
 	when 'TEXT' then ]]..text_src..[[
 	when 'BINARY' then ]]..bin_src..[[
@@ -276,7 +294,7 @@ notnull_ok = [["dt" in ('NUMBER','BOOLEAN','DATE','TIMESTAMP_NTZ','TIMESTAMP_LTZ
 comments_cte='' comments_union=''
 if gen_comments then
 	comments_cte = [[
-,vv_tabcomm_raw as (select * from (]]..meta_import..[[) t ("db_name","schema_name","table_name","ordinal_position","column_name","data_type","numeric_precision","numeric_scale","character_maximum_length","datetime_precision","is_nullable","comment_text"))
+,vv_tabcomm_raw as (select * from (]]..meta_import..[[) t ("db_name","schema_name","table_name","ordinal_position","column_name","data_type","numeric_precision","numeric_scale","character_maximum_length","datetime_precision","is_nullable","comment_text","row_count"))
 ,vv_comment_col as (select 'COMMENT ON COLUMN "' || ]]..sname_sql..[[ || '"."' || ]]..U('"table_name"')..[[ || '"."' || ]]..U('"column_name"')..[[ || '" IS ''' || replace("comment_text", '''', '''''') || ''';' as sql_text from vv_tabcomm_raw where "comment_text" is not null and "comment_text" <> '')]]
 	comments_union = "\n"..[[UNION ALL select 41, cast('-- ### COLUMN COMMENTS ###' as varchar(2000000)) SQL_TEXT
 UNION ALL select 43, sql_text from vv_comment_col]]
@@ -370,8 +388,9 @@ with vv_columns as (
 	       cast("character_maximum_length" as decimal(18,0)) as "char_len",
 	       cast("datetime_precision" as decimal(18,0)) as "dtp",
 	       cast("ordinal_position" as decimal(9,0)) as "ordinal_position",
+	       cast("row_count" as decimal(18,0)) as "row_count",
 	       "db_name","schema_name","table_name","column_name"
-	from (]]..meta_import..[[) t ("db_name","schema_name","table_name","ordinal_position","column_name","data_type","numeric_precision","numeric_scale","character_maximum_length","datetime_precision","is_nullable","comment_text")
+	from (]]..meta_import..[[) t ("db_name","schema_name","table_name","ordinal_position","column_name","data_type","numeric_precision","numeric_scale","character_maximum_length","datetime_precision","is_nullable","comment_text","row_count")
 )
 ,vv_catchall as (
 	select '-- NOTE: column "' || "db_name" || '"."' || "schema_name" || '"."' || "table_name" || '"."' || "column_name" || '" has type ' || "dt" || ' -> migrated via VARCHAR(2000000) catch-all (please review).' as sql_text
@@ -385,7 +404,7 @@ with vv_columns as (
 	from vv_columns group by "exa_schema","exa_table"
 )
 ,vv_cl as (
-	select "exa_schema","db_name","schema_name","exa_table","table_name",
+	select "exa_schema","db_name","schema_name","exa_table","table_name", max("row_count") as "row_count",
 	       group_concat('"' || "exa_col" || '"' order by "ordinal_position" separator ', ') as collist,
 	       group_concat((]]..src..[[) order by "ordinal_position" separator ', ') as srclist
 	from vv_columns group by "exa_schema","db_name","schema_name","exa_table","table_name"
@@ -395,12 +414,13 @@ with vv_columns as (
 	select 'IMPORT INTO "' || "exa_schema" || '"."' || "exa_table" || '" (' || min(collist) || ') FROM JDBC AT ]]..CONNECTION_NAME..[[' ||
 	       group_concat(' STATEMENT ' || '''' || replace('select ' || srclist || ' from ' || ]]..imp_from..[[, '''', '''''') || '''' order by "k" separator '') || ';' as sql_text
 	from vv_cl cross join vv_nums
+	where "k" = 0 or "row_count" is null or "row_count" >= ]]..pmin..[[
 	group by "exa_schema","exa_table","db_name","schema_name","table_name"
 )]]..comments_cte..views_cte..check_cte..[[
 select sql_text from (
 	select -3 ord, cast('-- ### Snowflake -> Exasol migration.  TIMESTAMP_TZ/LTZ normalized to UTC; full nanosecond precision preserved (TIMESTAMP(9)). ###' as varchar(2000000)) SQL_TEXT
 	UNION ALL select -2, cast('-- character data -> Exasol UTF8; semi-structured (VARIANT/OBJECT/ARRAY/MAP) -> JSON text; GEOGRAPHY/GEOMETRY -> WKT; VECTOR -> JSON array; BINARY -> hex.' as varchar(2000000))
-	UNION ALL select (-1.5), cast('-- PARALLEL_STATEMENTS = ]]..ps_note..[[  -> each table IMPORT is split into ]]..ps..[[ parallel STATEMENT clause(s) via HASH(*) bucketing (exact 1:1; verify with CHECK_MIGRATION). Fastest on multi-node Exasol + large tables.' as varchar(2000000))
+	UNION ALL select (-1.5), cast('-- PARALLEL_STATEMENTS = ]]..ps_note..[[  -> a table with >= ]]..pmin..[[ rows (PARALLEL_MIN_ROWS) is split into ]]..ps..[[ parallel STATEMENT clause(s) via HASH(*) bucketing (exact 1:1; verify with CHECK_MIGRATION); smaller tables import as a single statement. Fastest on multi-node Exasol + large tables.' as varchar(2000000))
 	UNION ALL select 0, sql_text from vv_catchall
 	UNION ALL select 1, cast('-- ### SCHEMAS ###' as varchar(2000000))
 	UNION ALL select 2, sql_text from vv_create_schemas
@@ -410,7 +430,7 @@ select sql_text from (
 	UNION ALL select 6, sql_text from vv_pk
 	UNION ALL select 7, cast('-- ### FOREIGN KEYS (DISABLED) ###' as varchar(2000000))
 	UNION ALL select 8, sql_text from vv_fk]]..comments_union..[[
-	UNION ALL select 50, cast('-- ### IMPORTS ( ]]..ps..[[ parallel STATEMENT(s) per table ) ###' as varchar(2000000))
+	UNION ALL select 50, cast('-- ### IMPORTS ( up to ]]..ps..[[ parallel STATEMENT(s) per table; single statement below ]]..pmin..[[ rows ) ###' as varchar(2000000))
 	UNION ALL select 51, sql_text from vv_imports
 	UNION ALL select 60, cast('-- ### CONSTRAINT STATE - run AFTER the data load ###' as varchar(2000000))
 	UNION ALL select 61, state_text from vv_pk
@@ -457,10 +477,12 @@ EXECUTE SCRIPT DATABASE_MIGRATION.SNOWFLAKE_TO_EXASOL(
 	'',                     -- TARGET_SCHEMA: Exasol target schema; '' (recommended) => derive from source (see FLATTEN_DB_TO_SCHEMA)
 	false,                  -- FLATTEN_DB_TO_SCHEMA: false (recommended) => Exasol schema = <schema>; true => <database>_<schema> (multi-DB collision-safe)
 	'AUTO',                 -- PARALLEL_STATEMENTS: 'AUTO' (Exasol VCPU/NODES/2, even, 4..64), a positive integer, or 1 (no split). Split per table via HASH(*) bucketing (exact 1:1). Best on multi-node Exasol + large tables.
+	100000,                 -- PARALLEL_MIN_ROWS: only tables with >= this many source rows are split (default 100000); smaller tables import as a single statement. 0 => always split.
 	'FORCE_DISABLE',        -- CONSTRAINT_STATE: 'FORCE_DISABLE' (recommended; PK/FK metadata only), 'SET_AS_SOURCE' or 'FORCE_ENABLE' (Exasol validates the data)
 	true,                   -- GENERATE_COMMENTS: true (recommended) => migrate Snowflake comments as COMMENT ON; false => skip
 	true,                   -- GENERATE_VIEWS: true => emit source views as a commented manual-review section; false => skip
 	'CAP',                  -- DECIMAL_OVERFLOW: 'CAP' (recommended; NUMBER>36 -> DECIMAL(36,s)), 'DOUBLE' (~15 digits) or 'VARCHAR' (lossless text)
+	true,                   -- NUMBER_FAST_RAW: true (default, ~3-4x faster) => read NUMBER raw; a value > ~18 significant digits fails loudly (ETL-5402). false => safe TO_VARCHAR for precision > 18.
 	'HEX',                  -- BINARY_HANDLING: 'HEX' (recommended; BINARY as hex text) or 'SKIP' (load NULL)
 	false,                  -- TRUNCATE_LONG_STRINGS: false (recommended) => import fails on a value > 2,000,000 chars; true => cut such values to 2,000,000 chars and import
 	false                   -- CHECK_MIGRATION: false (recommended default) => skip; true => also build "<table>_MIG_CHK" metric tables + a "<schema>_MIG_CHK" summary (source vs target) for post-load validation
