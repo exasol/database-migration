@@ -793,7 +793,7 @@ See the header of [oracle_to_exasol.sql](oracle_to_exasol.sql) for more informat
 ### PostgreSQL
 
 The [postgresql_to_exasol.sql](postgresql_to_exasol.sql) script generates the statements to migrate a PostgreSQL
-database (**PostgreSQL 18**, backward compatible with earlier versions) to Exasol v8. It runs on the **target**
+database (**PostgreSQL 12 or newer**; tested with 14, 15, 16, 17 and 18) to Exasol v8. It runs on the **target**
 Exasol database, reads the **source** metadata through a JDBC connection and **returns** the statements to
 recreate and load the source. It changes nothing itself — you review the output and run it, in the order
 returned. *(This script was previously named `postgres_to_exasol.sql`.)*
@@ -807,83 +807,151 @@ returned. *(This script was previously named `postgres_to_exasol.sql`.)*
 * **Create a connection** on the target pointing at the source database. A ready-to-edit `CREATE CONNECTION`
   example and a connection test are at the bottom of the script.
 * **Adapt the `EXECUTE SCRIPT` parameters** to your scenario and run it (a few seconds, depending on the number
-  of tables).
-* **Copy the result set** into another session and execute the statements **in the output order** (the
-  CONSTRAINT STATE section, and — if enabled — the DATA VALIDATION section, run after the IMPORTs).
+  of tables). Invalid parameter values stop the script with a clear error.
+* **Run the result set in ONE session, in the output order** — ideally with stop-on-error (EXAplus `-x`;
+  EXAplus continues after errors by default). In EXAplus run `SET DEFINE OFF;` first when the output contains
+  the character `&` (an `EXAPLUS` note says so); otherwise EXAplus treats `&name` as a substitution variable. The output switches the session to `TIME_ZONE = 'UTC'` before the
+  IMPORTs and restores it at the end (see *Time zones*). Re-running the output replaces the target tables.
 
 ```sql
 EXECUTE SCRIPT DATABASE_MIGRATION.POSTGRESQL_TO_EXASOL(
     'POSTGRESQL_JDBC',  -- CONNECTION_NAME: name of the JDBC connection created at the bottom of the script
-    true,               -- IDENTIFIER_CASE_INSENSITIVE: true (recommended) => fold ALL identifiers to UPPER so Exasol queries never need quotes (PostgreSQL folds unquoted names to lower-case, so nothing is lost); false => keep verbatim/quoted
-    '%',                -- SCHEMA_FILTER: source schema(s): 'public', 'sales_%', '%' (all; system schemas always excluded)
-    '%',                -- TABLE_FILTER: table(s)/view(s): 'my_table', 'my_%', '%' (all)
+    true,               -- IDENTIFIER_CASE_INSENSITIVE: true (recommended) => fold all identifiers to UPPER case (PostgreSQL folds unquoted names to lower case, so nothing is lost); false => keep them as in PostgreSQL (quoted)
+    '%',                -- SCHEMA_FILTER: source schema(s) as a LIKE pattern: 'public', 'sales%', '%' (all; system schemas always excluded). '_' is a wildcard too
+    '%',                -- TABLE_FILTER: table(s) as a LIKE pattern: 'orders', 'fact%', '%' (all)
     '',                 -- TARGET_SCHEMA: Exasol target schema; '' (recommended) => use the source schema name
-    'FORCE_DISABLE',    -- CONSTRAINT_STATE: 'FORCE_DISABLE' (recommended; PK/FK kept as metadata only - faster, order-independent imports, still used by BI tools), 'SET_AS_SOURCE' or 'FORCE_ENABLE' (all keys enabled = Exasol re-validates the data)
-    true,               -- GENERATE_COMMENTS: true (recommended) => migrate PostgreSQL comments as COMMENT ON; false => skip
-    true,               -- GENERATE_VIEWS: true => emit source views as a commented manual-review section; false => skip
-    true,               -- GENERATE_PARTITION_BY: true => add a best-effort PARTITION BY from the PostgreSQL partition key (single column); complex partitioning is listed as a commented manual-review note; false => skip
-    'BASE64',           -- BINARY_HANDLING: 'BASE64' (recommended; bytea migrated losslessly as base64 text - Exasol has no general binary type) or 'SKIP' (load NULL)
-    'CAP',              -- DECIMAL_OVERFLOW: 'CAP' (recommended; numeric>36 -> DECIMAL(36,s), unconstrained -> DECIMAL(36,18); IMPORT fails for values needing > 36 digits), 'DOUBLE' (~15 significant digits) or 'VARCHAR' (lossless text)
-    false,              -- TRUNCATE_LONG_STRINGS: false (recommended) => import fails on a value > 2,000,000 chars; true => cut such values to 2,000,000 chars and import
-    'VARCHAR',          -- INTERVAL_HANDLING: 'VARCHAR' (recommended; interval as lossless text) or 'INTERVAL' (native Exasol INTERVAL DAY TO SECOND, best-effort)
-    'FAIL',             -- TEMPORAL_OUT_OF_RANGE: 'FAIL' (recommended; IMPORT fails on a date/timestamp outside 0001..9999), 'NULL' (load NULL) or 'CLAMP' (clamp to the Exasol min/max)
-    false               -- CHECK_MIGRATION: false (recommended default) => skip; true => also build per-table "<table>_MIG_CHK" metric tables and a "<schema>_MIG_CHK" summary that compares source vs. target (run after the IMPORTs)
+    'AUTO',             -- PARALLEL_STATEMENTS: 'AUTO' (recommended; Exasol VCPU/NODES/2, even, 4..64, at most half of the free PostgreSQL connections), a number >= 1, or 1 = no parallel reading (PostgreSQL 14+; each STATEMENT is a separate transaction - do not write to the source during the load)
+    1000000,            -- PARALLEL_MIN_ROWS: tables with fewer estimated rows are read with one STATEMENT (default 1000000); 0 => always split
+    'FORCE_DISABLE',    -- CONSTRAINT_STATE: 'FORCE_DISABLE' (recommended; keys stay metadata for the optimizer and BI tools), 'SET_AS_SOURCE' (enable the keys that are valid and enforced in PostgreSQL) or 'FORCE_ENABLE' (Exasol validates all keys)
+    true,               -- GENERATE_COMMENTS: true (recommended) => migrate schema, table and column comments
+    true,               -- GENERATE_VIEWS: true => list the source views as a commented manual-review section
+    false,              -- MIGRATE_MATERIALIZED_VIEWS: false (default) => materialized views are only listed for review; true => migrate them as tables with their current content
+    true,               -- GENERATE_PARTITION_BY: true => best-effort PARTITION BY from a single-column PostgreSQL partition key
+    'BASE64',           -- BINARY_HANDLING: 'BASE64' (recommended; bytea as base64 text, up to 1,500,000 bytes) or 'SKIP' (load NULL)
+    'CAP',              -- DECIMAL_OVERFLOW: 'CAP' (recommended; numeric(p > 36, s) -> DECIMAL(36, s') keeping the integer digits and rounding surplus fractional digits, unconstrained numeric -> DECIMAL(36,18) = at most 18 integer digits; larger values fail), 'DOUBLE' (nearest double) or 'VARCHAR' (lossless text)
+    false,              -- TRUNCATE_LONG_STRINGS: false (recommended) => the IMPORT fails on a value > 2,000,000 characters; true => cut such values (json/array text may become invalid)
+    'VARCHAR',          -- INTERVAL_HANDLING: 'VARCHAR' (recommended; lossless text) or 'INTERVAL' (native INTERVAL DAY TO SECOND(3) - millisecond precision, best-effort; month/year intervals fail)
+    'FAIL',             -- TEMPORAL_OUT_OF_RANGE: 'FAIL' (recommended; the IMPORT fails on a value outside the Exasol range, incl. infinity and BC), 'NULL' (load NULL) or 'CLAMP' (clamp to the Exasol min/max)
+    false               -- CHECK_MIGRATION: true => also generate the data validation (summary table "<schema>_MIG_CHK" in the script schema)
 );
 ```
 
 This script generates, in this order:
-* a prominent **`-- !!! UNSUPPORTED TYPE`** warning for any column the target cannot represent (only pseudo-types)
-* `CREATE SCHEMA` and `CREATE TABLE` — every data type mapped to a sensible Exasol type, plus `NOT NULL`,
-  column `DEFAULT`s and the `PRIMARY KEY` (created disabled)
-* `ALTER TABLE … ADD … FOREIGN KEY` (created disabled; composite keys supported; keys to tables outside the
-  migration scope are skipped)
-* with `GENERATE_PARTITION_BY`: `ALTER TABLE … PARTITION BY` from the PostgreSQL partition key (best-effort)
-* table & column `COMMENT`s (with `GENERATE_COMMENTS`)
-* `IMPORT` of the data (typed transfer — differing source/target NLS does not affect the data)
-* a **CONSTRAINT STATE** section to run after the IMPORTs (keys created disabled for a fast, order-independent
-  load; this section then sets them per `CONSTRAINT_STATE`)
-* with `GENERATE_VIEWS`: the source views as a **commented** manual-review section (PostgreSQL SQL is not
-  auto-translated)
-* with `CHECK_MIGRATION`: a **DATA VALIDATION** section (see below)
+* a header and **notes** (`-- !!! …` = attention, `-- NOTE …` = information), e.g. renamed columns, row-level
+  security, inheritance, foreign tables, materialized views, skipped defaults/keys, reserved column names
+* `CREATE SCHEMA`, and per table `DROP TABLE IF EXISTS … CASCADE CONSTRAINTS` + `CREATE TABLE` (every type mapped,
+  `NOT NULL`, column `DEFAULT`s)
+* `PRIMARY KEY`s and `FOREIGN KEY`s (created disabled; composite keys supported; a key whose parent is not
+  migrated is skipped with a note)
+* with `GENERATE_PARTITION_BY`: `ALTER TABLE … PARTITION BY` (best-effort)
+* schema, table and column `COMMENT`s (with `GENERATE_COMMENTS`)
+* the **TIME ZONE** block (`ALTER SESSION SET TIME_ZONE = 'UTC'`) and the `IMPORT`s (typed transfer, parallel
+  where configured)
+* a **CONSTRAINT STATE** section for `SET_AS_SOURCE` / `FORCE_ENABLE`
+* with `CHECK_MIGRATION`: a **DATA VALIDATION** section
+* the restore of the session time zone
+* with `GENERATE_VIEWS`: the source views as a **commented** manual-review section
+* with `MIGRATE_MATERIALIZED_VIEWS`: the definitions of the migrated materialized views as comments (to rebuild the
+  refresh logic), also when `GENERATE_VIEWS = false`
 
-**Data types & limitations.** Mapping is by PostgreSQL type category, so **every type is covered** (no silent
-drops) and **domains (including nested domains) resolve to their base type** automatically. Integers map to `DECIMAL(5/10/19,0)`,
-`numeric(p,s)` to `DECIMAL(p,s)`, `real`/`double precision` to `DOUBLE`, `money` to `DECIMAL(20,2)`, `boolean`
-to `BOOLEAN`. Character columns are mapped to **`UTF8`**; `char > 2000` becomes `VARCHAR`. `date` maps exactly;
-`timestamp(p)` keeps full precision; **`timestamp with time zone → TIMESTAMP(p) WITH LOCAL TIME ZONE`** (stored
-as the correct UTC instant); `time`/`time with time zone → VARCHAR` (lossless text). `uuid → CHAR(36)`;
-**`bytea` → base64 text** (`BINARY_HANDLING`, lossless, decode downstream); `json`/`jsonb`/`xml`, arrays,
-ranges/multiranges, enums, geometric, network, bit, `tsvector`, composite → `VARCHAR` (faithful text).
-**`interval`** → `VARCHAR` (lossless) or native Exasol `INTERVAL` (`INTERVAL_HANDLING`; best-effort - a
-PostgreSQL interval can mix months and days/seconds, which no single Exasol interval type can hold, so native
-mode supports pure day-time intervals only). **`numeric` with > 36 digits or no declared precision** is handled
-via `DECIMAL_OVERFLOW` (`CAP` / `DOUBLE` / `VARCHAR`). The IMPORT **fails loudly rather than corrupting data**
-when a value needs more than 36 decimal digits (`DECIMAL_OVERFLOW='CAP'`), exceeds 2,000,000 characters (unless
-`TRUNCATE_LONG_STRINGS=true`), or a date/timestamp falls outside Exasol's `0001-01-01 … 9999-12-31` range
-(`TEMPORAL_OUT_OF_RANGE='FAIL'`; `NULL` or `CLAMP` are available). **Always excluded** (so only real user data
-appears): the PostgreSQL **system schemas** (`pg_catalog`, `information_schema`, `pg_toast`, `pg_temp*`, any
-`pg_*`) and **extension-owned tables** (e.g. PostGIS `spatial_ref_sys`). Not migrated (out of scope): indexes,
-`UNIQUE`/`CHECK`/exclusion constraints, sequences, functions/procedures/triggers, users/roles/privileges.
+**Time zones.** `timestamp with time zone` is migrated **losslessly** to `TIMESTAMP(p) WITH LOCAL TIME ZONE`.
+Exasol interprets values written into such a column in the **session** time zone, so the output switches the
+session to `TIME_ZONE = 'UTC'` before the IMPORTs (with a prominent comment block) and restores the original zone
+at the end; IMPORTs of tables with `timestamptz` carry the comment `-- requires session TIME_ZONE = 'UTC'`.
+**Run the `ALTER SESSION` and the IMPORTs in the same session.** Afterwards every session sees the values in its
+own time zone. The usable `timestamptz` range is `0001-01-02 … 9999-12-30 UTC` (values on the outermost day
+cannot be displayed in every session time zone).
 
-**Partitioning.** PostgreSQL declarative-partition **child** tables are skipped — the partitioned **parent** is
-migrated as a single Exasol table holding all rows, so data is never migrated twice. A single-column partition
-key is mapped best-effort to an Exasol `PARTITION BY` on that column; multi-column or expression partitioning is
-emitted as a commented manual-review note. (PostgreSQL has no distribution/clustering-key concept, so no
-`DISTRIBUTE BY` is generated.)
+**Data types & limitations.** Mapping is by PostgreSQL type category, so **every type is covered**; built-in
+types are recognised in `pg_catalog` only, and **domains (including nested domains) resolve to their base type**.
+Integers map to `DECIMAL(5/10/19,0)`, `numeric(p,s)` to `DECIMAL(p,s)` (negative scale and scale > precision
+included), `real`/`double precision` to `DOUBLE` (a `real` value arrives as the double nearest its PostgreSQL text, e.g. `0.1`), `money` to `DECIMAL(20,2)`, `boolean` to `BOOLEAN`. Character
+columns are mapped to **`UTF8`**; `char > 2000` becomes `VARCHAR(n)`. `date` maps exactly, `timestamp(p)` keeps
+full precision; `time`/`time with time zone → VARCHAR` (lossless text). `uuid → CHAR(36)`; **`bytea` → base64
+text** (`BINARY_HANDLING`, strict base64, up to 1,500,000 bytes); `inet` → its output format; enums →
+`VARCHAR(63)`; `json`/`jsonb`/`xml`, arrays, ranges, geometric, bit, `tsvector`, composite and extension types →
+`VARCHAR` (faithful text). **`interval`** → `VARCHAR` (lossless) or native `INTERVAL DAY TO SECOND(3)`
+(`INTERVAL_HANDLING`; millisecond precision, pure day-time intervals only; beyond 999,999,999 days a value follows
+`TEMPORAL_OUT_OF_RANGE` like `infinity`). **`numeric` with > 36 digits or no declared precision** is
+handled via `DECIMAL_OVERFLOW` (`CAP` rounds surplus fractional digits, `DOUBLE` stores the nearest double,
+`VARCHAR` keeps the text). `NaN` and `±Infinity` become `NULL` (Exasol has no such values; columns under
+`DECIMAL_OVERFLOW='VARCHAR'` keep the text `NaN` / `Infinity`).
+**Exasol stores an empty string as `NULL`**: empty character values, empty `bytea` and other empty text values
+become `NULL`. `NOT NULL` is therefore kept only on integer, money, date, timestamp and boolean columns - not on
+`numeric` (a `NaN` becomes `NULL`) and not on date/timestamp columns under `TEMPORAL_OUT_OF_RANGE='NULL'`. Columns named `LEVEL`,
+`ROWNUM`, `ROWID`, `CONNECT_BY_ISLEAF` or `CONNECT_BY_ISCYCLE` (not allowed in Exasol) get a trailing underscore.
+Many PostgreSQL column names (`DATE`, `TIME`, `YEAR`, `VALUE`, `USER`, …) are **reserved words in Exasol** and
+must be quoted in queries even after upper-casing; the output lists them. The IMPORT **fails loudly rather than
+corrupting data** on a value > 2,000,000 characters (unless `TRUNCATE_LONG_STRINGS=true`), a numeric value with
+more integer digits than its `CAP` column holds (`numeric(p > 36, s)` keeps up to 36 integer digits, `numeric`
+without precision becomes `DECIMAL(36,18)` with 18 integer digits - use `DOUBLE` or `VARCHAR` for larger values), a date/timestamp outside the Exasol range incl. `infinity` and BC values
+(`TEMPORAL_OUT_OF_RANGE='FAIL'`; `NULL` or `CLAMP` are available), and on values that are not valid UTF-8
+(`SQL_ASCII` databases). **Always excluded**: the PostgreSQL **system schemas** (`pg_catalog`,
+`information_schema` and every schema whose name starts with `pg_`) and **extension-owned tables** (e.g. PostGIS
+`spatial_ref_sys`, listed as a note). Not migrated (out of scope): indexes, `UNIQUE`/`CHECK`/exclusion
+constraints, sequences, identity behaviour (identity columns carry their values, inserts must supply them),
+functions/procedures/triggers, foreign tables, users/roles/privileges.
 
-**Migration check (`CHECK_MIGRATION=true`).** For every migrated table the script builds a `"<table>_MIG_CHK"`
-table holding standardized, cross-database-comparable metrics (row count, per-column NULL counts, distinct
-counts, numeric MIN/MAX/SUM, character length MIN/MAX) computed on **both** PostgreSQL and Exasol, plus a
-`DATABASE_MIGRATION."<schema>_MIG_CHK"` summary that lists every metric side by side with an **`OK` / `DEVIATION`**
-status. Review deviations with
-`SELECT * FROM DATABASE_MIGRATION."<schema>_MIG_CHK" WHERE "STATUS" = 'DEVIATION';`.
+**Parallel import.** From PostgreSQL 14 on, a table with at least `PARALLEL_MIN_ROWS` (estimated) rows is read
+by up to `PARALLEL_STATEMENTS` parallel `STATEMENT` clauses, each reading a **disjoint `ctid` block range** of
+the table (exact 1:1, verified with `CHECK_MIGRATION`). Each STATEMENT is a separate PostgreSQL transaction:
+**do not write to the source during the load** (or read from a hot standby with replay paused), otherwise rows
+can be duplicated or missed. `PARALLEL_STATEMENTS = 1` reads every table with one STATEMENT. On PostgreSQL 12/13
+every table is read with one STATEMENT. `AUTO` uses half the vCPUs of one Exasol node (`VCPU/NODES/2`), even,
+4..64 - the same rule as `snowflake_to_exasol.sql` - and at most half of the free PostgreSQL connections. Each stream
+is one PostgreSQL backend (about one CPU core) and needs temporary memory in Exasol: for a **weak PostgreSQL server**
+set `PARALLEL_STATEMENTS` to at most about twice its CPU cores; on Exasol nodes with little memory use fewer streams
+for very large tables. `PARALLEL_MIN_ROWS` defaults to **1,000,000**: every stream starts with a delay of about one
+second, so smaller tables load faster with one STATEMENT (measured on a single node: 200,000 rows 5 s with 1 vs 10 s
+with 8 STATEMENTs; 1,000,000 rows 20 s vs 12 s with 4; 20,000,000 rows 369 s vs 95 s with 8). The row estimate comes from the PostgreSQL statistics (`reltuples` scaled to
+the current table size); a table without statistics (never analyzed) is estimated at one row per 80 bytes. Each
+running STATEMENT keeps a source transaction open, which holds back `VACUUM` on the source for that time.
+Every `STATEMENT` clause repeats the table's full select list, and one generated row holds at most 2,000,000
+characters. For a **very wide table** the script therefore reduces the number of STATEMENTs for that table
+automatically, so that its `IMPORT` fits into one row, and names the table in a `PARALLEL` note. Even in the worst
+case at least 7 STATEMENTs fit: a STATEMENT is accepted only below 131,072 bytes, its quoted form is at most twice as
+long, and PostgreSQL allows at most 1,600 columns. Typical wide tables keep far more. All other tables keep
+the full number.
 
-**Privileges/visibility:** the source metadata is read **through the connection's user**, so the script sees —
-and generates statements for — only the objects that user may access. **To migrate everything, use a user with
-sufficient privileges on the source.**
+**Partitioning and inheritance.** Declarative partitions are read through their partitioned **parent**, which
+becomes one Exasol table. A single-column partition key on a partitionable Exasol type (numeric, date,
+timestamp, boolean, interval) becomes `ALTER TABLE … PARTITION BY`; other keys are listed as a note. Legacy
+`INHERITS` hierarchies are read with `FROM ONLY`, so every table keeps exactly its own rows (a note names the
+children; a query on the parent no longer includes the children rows in Exasol).
+
+**Materialized views (`MIGRATE_MATERIALIZED_VIEWS=true`).** Materialized views are migrated as tables with
+their current content — a snapshot as of the last `REFRESH`; Exasol does not refresh it. The definition is kept
+in the view review section.
+
+**Migration check (`CHECK_MIGRATION=true`).** For every migrated table the output computes standardized,
+cross-database-comparable metrics on **both** PostgreSQL and Exasol (row count, per-column NULL and distinct
+counts, numeric MIN/MAX/SUM, date/timestamp MIN/MAX, timestamptz MIN/MAX in UTC, character length MIN/MAX,
+rounded values, invalid JSON) and inserts them into the summary table `"<schema>_MIG_CHK"` **in the script
+schema** (`DATABASE_MIGRATION`), one row per metric with an **`OK` / `DEVIATION`** status. Re-running the output
+replaces the rows of the re-migrated tables only. Review deviations with
+`SELECT * FROM DATABASE_MIGRATION."<schema>_MIG_CHK" WHERE "STATUS" = 'DEVIATION';`. The section sets
+`TIME_ZONE = 'UTC'` itself, so it can be re-run on its own (together with the final restore row). It computes `count(distinct)` per column on the source
+(a full scan per table) and needs `CREATE TABLE`, `INSERT` and `DELETE` on the script schema for non-DBA users.
+Known false positive: `json` (not `jsonb`) values with invalid unicode escapes count as `INVALID_JSON` in Exasol.
+
+**Known limits.** Dates/timestamps between 1582-10-05 and 1582-10-14 (Julian/Gregorian gap) arrive shifted by the
+JDBC transfer. `citext` columns and columns with a nondeterministic collation compare case-insensitively in
+PostgreSQL but binary in Exasol (a note names them; foreign keys on them may not be enable-able). TimescaleDB
+hypertables are not migrated as one table (a note says so). A `TABLE_FILTER` that names a single partition matches
+nothing, because partitions are migrated through their parent. Exasol `DOUBLE` rejects the largest IEEE values (about 1.7977e308) and
+`DECIMAL_OVERFLOW='DOUBLE'` cannot hold a `numeric` beyond that range - such a value makes the IMPORT fail. A primary
+key on a text column that contains an empty string, or a `numeric` key that holds `NaN`, loads but cannot be enabled
+in Exasol (both become `NULL`), and Exasol also
+refuses to enable a primary key whose values differ only by trailing blanks (`'a'` / `'a '`), although `=` and
+`DISTINCT` treat them as different. Summary tables
+`<table>_MIG_CHK` that older releases of this script created in the target schemas are not removed - drop them
+manually.
+
+**Privileges / visibility:** the source metadata and data are read **through the connection user**. Tables the
+user may not read fail at IMPORT; **row-level security filters rows silently** — use a user with `BYPASSRLS`,
+or add `options=-c%20row_security%3Doff` to the JDBC URL so that filtering makes the IMPORT fail instead.
 
 See the header of [postgresql_to_exasol.sql](postgresql_to_exasol.sql) for more information!
-
 
 ### Redshift
 
