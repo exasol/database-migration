@@ -1195,91 +1195,173 @@ See the header of [snowflake_to_exasol.sql](snowflake_to_exasol.sql) for more in
 
 ### SQL Server
 
-The [sqlserver_to_exasol.sql](sqlserver_to_exasol.sql) script generates the statements to migrate a Microsoft
-SQL Server **or Azure SQL** database (SQL Server 2016–2025, including the new `json` and `vector` types) to
-Exasol v8. It runs on the **target** Exasol database, reads the **source** metadata through a JDBC connection
-and **returns** the statements to recreate and load the source. It changes nothing itself — you review the
-output and run it, in the order returned. *(This script replaces the former `azure_sql_to_exasol.sql`.)*
+The [sqlserver_to_exasol.sql](sqlserver_to_exasol.sql) script generates the statements to migrate Microsoft
+SQL Server **or Azure SQL** databases (**SQL Server 2017, 2019, 2022 and 2025** tested; SQL Server 2016 best
+effort; Azure SQL Managed Instance and Azure SQL Database) to Exasol v8. It runs on the **target** Exasol database,
+reads the **source** metadata through a JDBC connection and **returns** the statements to recreate and load the
+source. It changes nothing itself — you review the output and run it, in the order returned. *(This script
+replaces the former `azure_sql_to_exasol.sql`.)*
 
 **Step by step**
 * **Install** the script on the **target** database (run [sqlserver_to_exasol.sql](sqlserver_to_exasol.sql)
   once; it creates `DATABASE_MIGRATION.SQLSERVER_TO_EXASOL`).
-* **Install the JDBC driver** in BucketFS: always use the latest Microsoft **`mssql-jdbc`** driver
+* **Install the JDBC driver** in BucketFS: use the latest Microsoft **`mssql-jdbc`** driver (13.6.0 or higher)
   ([Maven](https://mvnrepository.com/artifact/com.microsoft.sqlserver/mssql-jdbc)). **Do not use the obsolete
-  jTDS driver** — it is unstable with current SQL Server versions and with Azure. For Azure
-  `authentication=ActiveDirectoryPassword`, also install
-  [`azure-identity`](https://mvnrepository.com/artifact/com.azure/azure-identity) (with dependencies). See
+  jTDS driver.** For Microsoft Entra ID authentication also install
+  [`azure-identity`](https://mvnrepository.com/artifact/com.azure/azure-identity) with its dependencies. See
   [Load data from SQL Server](https://docs.exasol.com/db/latest/loading_data/connect_sources/sql_server.htm).
-* **Create a connection** on the target pointing at the source database. Ready-to-edit `CREATE CONNECTION`
-  examples and a connection test (on-prem, Azure, and Azure Entra ID / `ActiveDirectoryPassword`) are at the
-  bottom of the script.
-* **Adapt the `EXECUTE SCRIPT` parameters** to your scenario and run it (a few seconds, depending on the
-  number of tables).
-* **Copy the result set** into another session and execute the statements **in the output order** (the
-  CONSTRAINT STATE section runs after the IMPORTs).
+* **Create a connection** on the target pointing at the source. Ready-to-edit `CREATE CONNECTION` examples
+  (on premises, Azure SQL, Entra ID service principal) and a connection test are at the bottom of the script.
+* **Adapt the `EXECUTE SCRIPT` parameters** to your scenario and run it (about 15-20 seconds, hardly depending on the number
+  of tables: it reads the source catalog with a series of JDBC queries). Invalid parameter values stop the script
+  with a clear error.
+* **Run the result set in ONE session, in the output order** — ideally with stop-on-error (EXAplus `-x`;
+  EXAplus continues after errors by default). In EXAplus run `SET DEFINE OFF;` first when the output contains
+  the character `&` (a note says so). The output switches the session to `TIME_ZONE = 'UTC'` before the IMPORTs
+  and restores it at the end (see *Time zones*). Re-running the output replaces the target tables.
 
 ```sql
 EXECUTE SCRIPT DATABASE_MIGRATION.SQLSERVER_TO_EXASOL(
     'SQLSERVER_JDBC',   -- CONNECTION_NAME: name of the JDBC connection created at the bottom of the script
-    false,              -- DB2SCHEMA: false (recommended) => "schema"."table"; true => "database"."schema_table" (migrate several databases at once)
-    'mydemo',           -- DB_FILTER: SQL Server database(s): 'mydemo', 'ma%', 'db1, db2', '%' (all)
-    '%',                -- SCHEMA_FILTER: schema(s): 'dbo', 'my%', 'schema1, schema2', '%' (all)
-    '',                 -- TARGET_SCHEMA: Exasol target schema; '' (recommended) => use the source schema (or database) name
-    '%',                -- TABLE_FILTER: table(s)/view(s): 'my_table', 'my%', 't1, t2', '%' (all)
-    true,               -- IDENTIFIER_CASE_INSENSITIVE: true (recommended for SQL Server) => fold ALL identifiers to UPPER so Exasol queries never need quotes (SQL Server identifiers are case-insensitive, so nothing is lost); false => keep verbatim/quoted (preserves lower/MixedCase, but every query must quote them)
-    'FORCE_DISABLE',    -- CONSTRAINT_STATE: 'FORCE_DISABLE' (recommended; PK/FK kept as metadata only - faster, order-independent imports, still used by BI tools), 'SET_AS_SOURCE' (each key ends in its SQL Server state) or 'FORCE_ENABLE' (all keys enabled = Exasol re-validates the data)
-    true,               -- GENERATE_COMMENTS: true (recommended) => migrate MS_Description as COMMENT ON; false => skip
-    true,               -- GENERATE_VIEWS: true => emit source views as a commented manual-review section; false => skip
-    true,               -- GENERATE_PARTITION_BY: true => add a best-effort PARTITION BY (from the SQL Server partitioning column) inside the CREATE TABLE; false => skip
-    'HASHTYPE',         -- BINARY_HANDLING: 'HASHTYPE' (recommended; fixed binary -> HASHTYPE, variable -> hex), 'HEX' (always hex VARCHAR) or 'SKIP' (load NULL)
-    'CAP',              -- DECIMAL_OVERFLOW: 'CAP' (recommended; DECIMAL(36,s), import fails for values needing > 36 digits) or 'DOUBLE' (loads with ~15 significant digits)
-    false,              -- TRUNCATE_LONG_STRINGS: false (recommended) => import fails on a value > 2,000,000 chars; true => cut such values to 2,000,000 chars and import
-    false               -- CHECK_MIGRATION: false (recommended default) => skip; true => also build "<table>_MIG_CHK" metric tables + a "<schema>_MIG_CHK" summary (source vs target) for post-load validation
+    false,              -- DB2SCHEMA: false (recommended) => "schema"."table"; true => "database"."schema_table" (several databases at once)
+    'my_database',      -- DB_FILTER: database name(s) or LIKE pattern(s), comma separated: 'sales', 'db1, db2', 'dwh%' (system databases only when named exactly)
+    '%',                -- SCHEMA_FILTER: schema name(s) or LIKE pattern(s): 'dbo', 'sales%', '%' (all; '_' and '%' are wildcards)
+    '',                 -- TARGET_SCHEMA: Exasol target schema; '' (recommended) => use the source schema (or database) name; '"MySchema"' => this exact name; at most 128 characters
+    '%',                -- TABLE_FILTER: table name(s) or LIKE pattern(s): 'orders', 'fact%', '%' (all)
+    true,               -- IDENTIFIER_CASE_INSENSITIVE: true (recommended) => fold all identifiers to UPPER case; false => keep them as in SQL Server (quoted)
+    'AUTO',             -- PARALLEL_STATEMENTS: 'AUTO' (recommended; Exasol VCPU/NODES/2, even, 4..64, at most the SQL Server processor count), a number >= 1, or 1 = one STATEMENT per table. Do not write to the source during the load
+    1000000,            -- PARALLEL_MIN_ROWS: tables with fewer rows are read with one STATEMENT (default 1000000); 0 => split every table that can be split
+    'FORCE_DISABLE',    -- CONSTRAINT_STATE: 'FORCE_DISABLE' (recommended; keys stay metadata for BI tools), 'SET_AS_SOURCE' (enable keys that are enabled and trusted in SQL Server) or 'FORCE_ENABLE' (Exasol validates all keys)
+    true,               -- GENERATE_COMMENTS: true (recommended) => migrate MS_Description comments of schemas, tables and columns
+    true,               -- GENERATE_VIEWS: true => list the source views as a commented manual-review section
+    false,              -- MIGRATE_INDEXED_VIEWS: false (default) => indexed views are only listed; true => migrate their stored rows as tables (a snapshot - Exasol does not maintain them)
+    true,               -- GENERATE_PARTITION_BY: true => PARTITION BY from the SQL Server partitioning column when its Exasol type allows it
+    'HASHTYPE',         -- BINARY_HANDLING: 'HASHTYPE' (recommended; binary(n <= 1024) and rowversion -> HASHTYPE, other binary -> hex text), 'HEX' (all binary as hex text) or 'SKIP' (binary columns are not migrated)
+    'CAP',              -- DECIMAL_OVERFLOW: 'CAP' (recommended; decimal(p > 36, s) -> DECIMAL(36, s), a scale above 35 is rounded to 35; values with more than 36 - s integer digits fail), 'DOUBLE' (nearest double) or 'VARCHAR' (lossless text)
+    false,              -- TRUNCATE_LONG_STRINGS: false (recommended) => the IMPORT fails on a value > 2,000,000 characters; true => cut such values (xml/json may become invalid)
+    'FAIL',             -- TEMPORAL_OUT_OF_RANGE: 'FAIL' (recommended; the IMPORT fails on a datetimeoffset value outside 0001-01-02 .. 9999-12-30 UTC), 'NULL' (load NULL) or 'CLAMP' (clamp to that range)
+    false               -- CHECK_MIGRATION: true => also generate the data validation (summary table "<schema>_MIG_CHK" in the script schema)
 );
 ```
 
 This script generates, in this order:
-* a prominent **`-- !!! UNSUPPORTED TYPE`** warning for any column the target cannot represent (see below)
-* `CREATE SCHEMA` and `CREATE TABLE` — every data type mapped to a sensible Exasol type, plus `NOT NULL`,
-  `IDENTITY`, column `DEFAULT`s, the `PRIMARY KEY` (created disabled), and — with `GENERATE_PARTITION_BY` — a
-  best-effort `PARTITION BY`
-* `ALTER TABLE … ADD … FOREIGN KEY` (created disabled; composite keys supported)
-* table & column `COMMENT`s (from `MS_Description`, with `GENERATE_COMMENTS`)
-* `IMPORT` of the data (typed transfer — differing source/target NLS does not affect the data; `datetime2`
-  fractional precision and `datetimeoffset` as a UTC instant are preserved)
-* a **CONSTRAINT STATE** section to run after the IMPORTs (keys are created disabled for a fast,
-  order-independent load; this section then sets them per `CONSTRAINT_STATE`)
-* with `GENERATE_VIEWS`: the source views as a **commented** manual-review section (T-SQL is not
-  auto-translated)
-* with `CHECK_MIGRATION`: a **DATA VALIDATION** section — per-table `"<table>_MIG_CHK"` metric tables and a
-  `"<schema>_MIG_CHK"` summary (run after the IMPORTs)
+* a header and **notes** (`-- !!! …` = attention, `-- NOTE …` = information), e.g. skipped tables or columns,
+  row-level security, data masking, graph / ledger / temporal / memory-optimized tables, indexed views,
+  defaults that cannot be migrated, reserved column names
+* `CREATE SCHEMA`, and per table `DROP TABLE IF EXISTS … CASCADE CONSTRAINTS` + `CREATE TABLE` (every type mapped,
+  `NOT NULL`, column `DEFAULT`s)
+* `PRIMARY KEY`s and `FOREIGN KEY`s (created disabled; composite and cross-schema keys supported)
+* with `GENERATE_PARTITION_BY`: `ALTER TABLE … PARTITION BY` (best-effort)
+* schema, table and column `COMMENT`s (with `GENERATE_COMMENTS`)
+* the **TIME ZONE** block (`ALTER SESSION SET TIME_ZONE = 'UTC'`) and the `IMPORT`s (typed transfer, parallel
+  where configured)
+* a **CONSTRAINT STATE** section for `SET_AS_SOURCE` / `FORCE_ENABLE`
+* with `CHECK_MIGRATION`: a **DATA VALIDATION** section
+* the restore of the session time zone
+* with `GENERATE_VIEWS`: the source views as a **commented** manual-review section (T-SQL is not translated)
 
-**Data types & limitations.** Mapping is by base system type, so **alias user-defined types resolve to their
-base type automatically**; **CLR/assembly UDTs and unknown types are skipped with a prominent warning**.
-Character columns are mapped to **`UTF8`** (lossless for any code page). Most types map exactly
-(`datetime2(n)` keeps full precision); a few map with a small, documented difference — `float/real → DOUBLE`,
-`smalldatetime → TIMESTAMP(0)`, `datetimeoffset → TIMESTAMP(n) WITH LOCAL TIME ZONE` (UTC instant),
-`time → VARCHAR`, `rowversion/binary/varbinary/image → HASHTYPE/hex`, `xml/json/vector/sql_variant → VARCHAR`,
-`geometry/geography → GEOMETRY` (WKT, SRID not kept), `char/nchar > 2000 → VARCHAR`. The IMPORT **fails
-loudly rather than corrupting data** when a value needs more than 36 decimal digits (`DECIMAL_OVERFLOW='CAP'`)
-or exceeds 2,000,000 characters (unless `TRUNCATE_LONG_STRINGS=true`). **Always excluded** (so only real user
-data/structures appear): the built-in **system schemas** (`sys`, `INFORMATION_SCHEMA`, `guest`, the fixed
-`db_*` role schemas), **Microsoft-shipped objects** (`is_ms_shipped`, e.g. `sysdiagrams`, `dtproperties`,
-`spt_*`, replication/CDC) and **external/"virtual" tables** (`is_external`); the user's own schemas (incl.
-`dbo`) are kept. Not migrated (out of scope): indexes, `UNIQUE`/`CHECK` constraints,
-functions/procedures/triggers, users/roles/permissions. See the script header for the full mapping table.
+**Time zones.** `datetimeoffset(n)` is migrated to `TIMESTAMP(n) WITH LOCAL TIME ZONE`: the **instant** is kept
+exactly, the original offset (`+02:00`) is not. The values are transferred as UTC; Exasol interprets values written
+into such a column in the **session** time zone, so the output switches the session to `TIME_ZONE = 'UTC'` before
+the IMPORTs (with a prominent comment block) and restores the original zone at the end. **Run the `ALTER SESSION`
+and the IMPORTs in the same session.** Afterwards every session sees the values in its own time zone. `date`,
+`datetime`, `datetime2` and `smalldatetime` have no time zone; their full range (up to `9999-12-31`) is transferred
+unchanged. The usable `datetimeoffset` range is `0001-01-02 … 9999-12-30 UTC` (values on the outermost day cannot be
+displayed in every session time zone); `TEMPORAL_OUT_OF_RANGE` applies to values outside it: `FAIL` (the IMPORT fails
+and names the column and the value), `NULL` or `CLAMP` (the nearest value of the range - e.g. for a `9999-12-31` "open
+end"). Under `CLAMP` or `NULL` a primary key on such a column cannot be enabled when out-of-range values exist (a note
+says so).
 
-**Migration check (`CHECK_MIGRATION=true`).** For every migrated table the script builds a `"<table>_MIG_CHK"`
-table of standardized, cross-database-comparable metrics (row count, per-column NULL counts, numeric MIN/MAX/SUM
-on exact integer/decimal types, date/datetime MIN/MAX to the second, DISTINCT counts) computed on **both** SQL
-Server and Exasol, plus a `DATABASE_MIGRATION."<schema>_MIG_CHK"` summary flagging each metric **`OK` /
-`DEVIATION`**. The metric set is mapping-aware (float/real and binary/LOB/CLR/`json`/`vector` are excluded from
-value metrics) so faithful data yields zero deviations. Review with
-`SELECT * FROM DATABASE_MIGRATION."<schema>_MIG_CHK" WHERE "STATUS" = 'DEVIATION';`.
+**Data types & limitations.** Mapping is by the base system type, so **alias types resolve to their base type**.
+Integers map to `DECIMAL(3/5/10/19,0)`, `bit` to `DECIMAL(1,0)`, `decimal/numeric(p ≤ 36, s)` to `DECIMAL(p,s)`,
+`money`/`smallmoney` to `DECIMAL(19,4)`/`DECIMAL(10,4)`, `float`/`real` to `DOUBLE`. `date → DATE`,
+`datetime → TIMESTAMP(3)`, `smalldatetime → TIMESTAMP(0)`, `datetime2(n) → TIMESTAMP(n)`; `time(n) → VARCHAR(16)`
+(Exasol has no TIME type). Character columns are mapped to **`UTF8`**; non-UTF-8 code-page columns are converted
+by SQL Server itself, so every character arrives as SQL Server shows it; `char/nchar > 2000` becomes `VARCHAR(n)`.
+`uniqueidentifier → CHAR(36)`. `binary(n ≤ 1024)` and `rowversion` → `HASHTYPE`, other binary types → hex text
+(`BINARY_HANDLING`, at most 1,000,000 bytes per value). `xml`, `json`, `vector`, `sql_variant` (its value as text,
+numbers with full precision) and `hierarchyid` (`/1/2/`) → `VARCHAR`. `geometry`/`geography` → `GEOMETRY`
+(2-D WKT: Z/M values and SRIDs are not kept, curves become line approximations, a geography `FULLGLOBE` becomes
+`NULL`). **Exasol stores an empty string as `NULL`**: `NOT NULL` is therefore kept only on numeric, date,
+timestamp, hashtype and uniqueidentifier columns (not on `datetimeoffset` under `TEMPORAL_OUT_OF_RANGE='NULL'`). **Identity columns** are migrated as plain columns carrying
+their values (no `IDENTITY` in Exasol — inserts must supply the value), **computed columns** as plain columns with
+their current values. `DEFAULT`s are migrated when Exasol can represent them with the same meaning (literals,
+`getdate()`/`sysdatetime()` → `CURRENT_TIMESTAMP`, the UTC functions → the UTC time); the others are listed as
+notes. Columns named `LEVEL`, `ROWNUM`, `ROWID`, `CONNECT_BY_ISLEAF` or `CONNECT_BY_ISCYCLE` get a trailing
+underscore. The IMPORT **fails loudly rather than corrupting data** on a value > 2,000,000 characters (unless
+`TRUNCATE_LONG_STRINGS=true`), a binary value > 1,000,000 bytes, a decimal value with more integer digits than its
+`CAP` column holds (`decimal(p > 36, s)` keeps `36 - s` integer digits, e.g. `decimal(38,2) → DECIMAL(36,2)`; a
+scale above 35 is rounded to 35), a `float` beyond ±1.7976e308, and a `datetimeoffset` outside
+`0001-01-02 … 9999-12-30 UTC` under `TEMPORAL_OUT_OF_RANGE='FAIL'`. **Always excluded**: system databases (unless
+`DB_FILTER` names them exactly), system schemas, Microsoft-shipped objects, external and temporary tables. Not
+migrated (out of scope): indexes, `UNIQUE`/`CHECK` constraints, sequences, synonyms, rules,
+functions/procedures/triggers, users/roles/permissions.
 
-**Privileges/visibility:** the source metadata is read **through the connection's user**, so the script sees
-— and generates statements for — only the objects that user may access. **To migrate everything, use a user
-with sufficient privileges on the source (e.g. `db_owner` / `VIEW DEFINITION`).**
+**Parallel import.** A table with at least `PARALLEL_MIN_ROWS` rows is read by up to `PARALLEL_STATEMENTS`
+parallel `STATEMENT` clauses, each reading a **disjoint part** of the table (exact 1:1, verified with
+`CHECK_MIGRATION`), chosen in this order: the **partitions** of a partitioned table (`$PARTITION`), **key ranges
+of the clustered index** (boundaries from the statistics histogram), or **physical row locations** of a heap or
+columnstore table. `AUTO` uses half the vCPUs of one Exasol node (`VCPU/NODES/2`), even, 4..64 — the same rule as
+`postgresql_to_exasol.sql` and `snowflake_to_exasol.sql` — and at most the SQL Server processor count. Each
+STATEMENT is a separate SQL Server transaction: **do not write to the source during the load**; for a consistent
+copy migrate from a database snapshot (`CREATE DATABASE … AS SNAPSHOT OF …`, then `DB_FILTER` = the snapshot name
+and `TARGET_SCHEMA` set; not available on Azure SQL Database). Each stream needs temporary memory in Exasol: on
+nodes with little memory use fewer streams for very large tables. A very wide table gets fewer STATEMENTs so that
+its IMPORT fits the Exasol statement limits (a `PARALLEL` note names it).
+Clustered keys of every numeric, date/time, character, binary and GUID type are split; numeric, date and time keys
+are interpolated between the histogram steps. A clustered table whose histogram gives very uneven key ranges (e.g. a
+sequential `uniqueidentifier` key) is read by physical row locations instead, and a `PARALLEL` note names every table
+that gets fewer or uneven STATEMENTs (few partitions or distinct key values, key values very close together).
+Measured on a single machine shared by Exasol and SQL Server (16 vCPUs; on separate servers
+more streams help): 5,000,000 rows 91 s with one STATEMENT vs 38 s with 4 or 8 key ranges, 37 s with 8 partition groups,
+40 s for a heap with 8 STATEMENTs; 1,000,000 rows 18 s vs 10.5 s with 4 STATEMENTs. Each stream is one SQL Server
+session and about one CPU core: on a small or shared source server use fewer streams (16 streams were twice as slow as
+8 on the shared test machine).
+
+**Special tables.** Temporal history tables and ledger tables are migrated as plain tables (period columns in UTC,
+hidden ledger columns included; a history table named after the source object id - `MSSQL_TemporalHistoryFor_<id>` -
+is created anew after the source table was re-created, a note says so); graph tables as plain tables without the internal graph columns; memory-optimized
+tables are read `WITH (SNAPSHOT)`; a table with a disabled clustered index is created empty. **Indexed views**
+(`MIGRATE_INDEXED_VIEWS=true`) are migrated as tables with their stored rows — a snapshot; Exasol does not
+maintain them. Row-level security and dynamic data masking filter or mask the migrated data for a connection
+user without exemption / `UNMASK` (a note names the tables; `CHECK_MIGRATION` then reports DEVIATIONs for masked
+columns, because SQL Server masks the source aggregates too). **Always Encrypted** columns are not migrated (a note
+names them; the rest of the table is). Several databases with **different collations** can be migrated in one run.
+
+**Migration check (`CHECK_MIGRATION=true`).** For every migrated table the output computes standardized,
+cross-database-comparable metrics on **both** SQL Server and Exasol (row count, per-column NULL and distinct
+counts, numeric MIN/MAX/SUM, date/time MIN/MAX, datetimeoffset MIN/MAX in UTC, character length MIN/MAX, rounded
+values) and inserts them into the summary table `"<schema>_MIG_CHK"` **in the script schema**
+(`DATABASE_MIGRATION`), one row per metric with an **`OK` / `DEVIATION`** status; a table whose check did not
+finish keeps an `INCOMPLETE` row. Re-running the output replaces the rows of the re-migrated tables only. Review
+with `SELECT * FROM DATABASE_MIGRATION."<schema>_MIG_CHK" WHERE "STATUS" IN ('INCOMPLETE', 'DEVIATION');`.
+The check reads every source table again — once per group of up to 250 metrics, and the distinct count of each
+column adds a scan of its own, so on wide tables it can take much longer than the IMPORT; non-persisted computed
+columns are not compared, and under `TEMPORAL_OUT_OF_RANGE='NULL'` or `'CLAMP'` the changed `datetimeoffset` values are
+not counted (the check compares the transported values). It needs `CREATE TABLE`, `INSERT` and `DELETE` on the script
+schema for non-DBA users. The per-table `<table>_MIG_CHK` tables of the previous release are not removed — drop them
+manually.
+
+**Known limits.** Dates between 1582-10-05 and 1582-10-14 (Julian/Gregorian gap) arrive shifted by the JDBC
+transfer. If a run stops at an error before the end, the session stays in `TIME_ZONE = 'UTC'` - the banner in the
+output names the statement that restores the original zone. Under `DECIMAL_OVERFLOW='CAP'` a `decimal(38,37)` value
+that rounds up to the next integer digit (`9.99…9`) fails like any value with too many integer digits (a `DECIMAL CAP`
+note names the narrowed columns). Comments and `DEFAULT` texts are copied as they are; when they contain `?`, a colon
+before a quote or a backslash before a quote, a client such as DbVisualizer may ask for parameter values when running
+the output - disable its parameter substitution for that run. A STATEMENT of 131,072 bytes or more is rejected by Exasol (a `SIZE LIMIT` note names such very wide
+tables); a table with more than 4,096 columns is not migrated. Exasol compares strings binary: keys that hold only
+under a case-insensitive collation or trailing-blank padding may fail to enable, and a primary key with an empty
+string value cannot be enabled (`''` is `NULL`). Filters: comma separated names or LIKE patterns, as in
+`postgresql_to_exasol.sql` (`SCHEMA_FILTER` / `TABLE_FILTER`: `''`, `NULL` and `%` select all; `DB_FILTER` must not be
+empty; a list of only commas is an error); `_` and `%` are always wildcards (`'sales_2024'` also matches
+`salesX2024`), `[` and `]` are literal characters; case sensitivity follows the source collation.
+
+**Privileges / visibility:** the source metadata and data are read **through the connection user**: grant
+`VIEW DEFINITION` (otherwise defaults, view definitions and security policies are invisible, and tables the user may
+not `SELECT` are missing — a note says so) and `SELECT` on the tables (a table without `SELECT` or with a
+column-level `DENY` is skipped with a note; a database whose catalog the user may not read is skipped with a note).
+On the Exasol side the user needs the system privilege `IMPORT`, the connection granted with `GRANT CONNECTION`
+(`ACCESS ON CONNECTION` is not enough) and `CREATE SCHEMA` / `CREATE TABLE` for the target.
 
 See the header of [sqlserver_to_exasol.sql](sqlserver_to_exasol.sql) for more information!
 
