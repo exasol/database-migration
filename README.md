@@ -820,8 +820,8 @@ EXECUTE SCRIPT DATABASE_MIGRATION.POSTGRESQL_TO_EXASOL(
     '%',                -- SCHEMA_FILTER: source schema(s) as a LIKE pattern: 'public', 'sales%', '%' (all; system schemas always excluded). '_' is a wildcard too
     '%',                -- TABLE_FILTER: table(s) as a LIKE pattern: 'orders', 'fact%', '%' (all)
     '',                 -- TARGET_SCHEMA: Exasol target schema; '' (recommended) => use the source schema name
-    'AUTO',             -- PARALLEL_STATEMENTS: 'AUTO' (recommended; Exasol VCPU/NODES/2, even, 4..64, at most half of the free PostgreSQL connections), a number >= 1, or 1 = no parallel reading (PostgreSQL 14+; each STATEMENT is a separate transaction - do not write to the source during the load)
-    1000000,            -- PARALLEL_MIN_ROWS: tables with fewer estimated rows are read with one STATEMENT (default 1000000); 0 => always split
+    'AUTO',             -- PARALLEL_STATEMENTS: 'AUTO' (recommended; per table ceil(sqrt(rows / 25000)), 2..VCPU/2 (4..64), at most half of the free PostgreSQL connections, then, from the node count on, the nearest multiple of the Exasol nodes within these limits), a number >= 1 (no per-table sizing), or 1 = no parallel reading. Parallel reading needs PostgreSQL 14+; each STATEMENT is a separate transaction - do not write to the source during the load
+    250000,             -- PARALLEL_MIN_ROWS: tables with fewer estimated rows are read with one STATEMENT (default 250000); 0 => always split
     'FORCE_DISABLE',    -- CONSTRAINT_STATE: 'FORCE_DISABLE' (recommended; keys stay metadata for the optimizer and BI tools), 'SET_AS_SOURCE' (enable the keys that are valid and enforced in PostgreSQL) or 'FORCE_ENABLE' (Exasol validates all keys)
     true,               -- GENERATE_COMMENTS: true (recommended) => migrate schema, table and column comments
     true,               -- GENERATE_VIEWS: true => list the source views as a commented manual-review section
@@ -892,26 +892,27 @@ without precision becomes `DECIMAL(36,18)` with 18 integer digits - use `DOUBLE`
 constraints, sequences, identity behaviour (identity columns carry their values, inserts must supply them),
 functions/procedures/triggers, foreign tables, users/roles/privileges.
 
-**Parallel import.** From PostgreSQL 14 on, a table with at least `PARALLEL_MIN_ROWS` (estimated) rows is read
-by up to `PARALLEL_STATEMENTS` parallel `STATEMENT` clauses, each reading a **disjoint `ctid` block range** of
-the table (exact 1:1, verified with `CHECK_MIGRATION`). Each STATEMENT is a separate PostgreSQL transaction:
-**do not write to the source during the load** (or read from a hot standby with replay paused), otherwise rows
-can be duplicated or missed. `PARALLEL_STATEMENTS = 1` reads every table with one STATEMENT. On PostgreSQL 12/13
-every table is read with one STATEMENT. `AUTO` uses half the vCPUs of one Exasol node (`VCPU/NODES/2`), even,
-4..64 - the same rule as `snowflake_to_exasol.sql` - and at most half of the free PostgreSQL connections. Each stream
-is one PostgreSQL backend (about one CPU core) and needs temporary memory in Exasol: for a **weak PostgreSQL server**
-set `PARALLEL_STATEMENTS` to at most about twice its CPU cores; on Exasol nodes with little memory use fewer streams
-for very large tables. `PARALLEL_MIN_ROWS` defaults to **1,000,000**: every stream starts with a delay of about one
-second, so smaller tables load faster with one STATEMENT (measured on a single node: 200,000 rows 5 s with 1 vs 10 s
-with 8 STATEMENTs; 1,000,000 rows 20 s vs 12 s with 4; 20,000,000 rows 369 s vs 95 s with 8). The row estimate comes from the PostgreSQL statistics (`reltuples` scaled to
-the current table size); a table without statistics (never analyzed) is estimated at one row per 80 bytes. Each
-running STATEMENT keeps a source transaction open, which holds back `VACUUM` on the source for that time.
-Every `STATEMENT` clause repeats the table's full select list, and one generated row holds at most 2,000,000
-characters. For a **very wide table** the script therefore reduces the number of STATEMENTs for that table
-automatically, so that its `IMPORT` fits into one row, and names the table in a `PARALLEL` note. Even in the worst
-case at least 7 STATEMENTs fit: a STATEMENT is accepted only below 131,072 bytes, its quoted form is at most twice as
-long, and PostgreSQL allows at most 1,600 columns. Typical wide tables keep far more. All other tables keep
-the full number.
+**Parallel import.** Leave `PARALLEL_STATEMENTS = 'AUTO'` - it is the recommended setting and needs no tuning: for
+every table the script picks a number of parallel `STATEMENT` clauses close to the fastest one, from the size of the
+table, the size of the Exasol cluster and the free PostgreSQL connections (tables below `PARALLEL_MIN_ROWS`, default
+250,000 rows, are read with one STATEMENT; the exact rule is in the script header). Each STATEMENT reads its own part of
+the table (exact 1:1; PostgreSQL 14 or newer, no primary key or index needed). **Do not write to the source tables
+during the load** (or read from a hot standby with replay paused): every STATEMENT is a separate transaction, so
+changed rows could be duplicated or missed. If other applications work on the same source at the same time, it can
+be helpful to set `PARALLEL_STATEMENTS` lower.
+
+**Benchmark.** Exasol with 4 nodes (4 x AWS r8a.4xlarge, 64 vCPUs), PostgreSQL 18 on one r8a.4xlarge (16 cores) in the
+same AWS availability zone, one table with 10 columns:
+
+| Table | `AUTO` | 1 STATEMENT | faster |
+|---|---|---|---|
+| 720 million rows (93 GB) | **2 min 34 s** (32 STATEMENTs) | about 62 min (extrapolated) | 24x |
+| 72 million rows (9.3 GB) | **20.0 s** (32) | 6 min 14 s | 19x |
+| 7.2 million rows | **5.1 s** (16) | 37.7 s | 7.4x |
+| 720,000 rows | **2.1 s** (8) | 4.8 s | 2.3x |
+| 250,000 rows | **1.6 s** (4) | 2.5 s | 1.5x |
+
+A 100 GB table loads in less than 3 minutes instead of about an hour; tables without a primary key load just as fast.
 
 **Partitioning and inheritance.** Declarative partitions are read through their partitioned **parent**, which
 becomes one Exasol table. A single-column partition key on a partitionable Exasol type (numeric, date,
@@ -1229,8 +1230,8 @@ EXECUTE SCRIPT DATABASE_MIGRATION.SQLSERVER_TO_EXASOL(
     '',                 -- TARGET_SCHEMA: Exasol target schema; '' (recommended) => use the source schema (or database) name; '"MySchema"' => this exact name; at most 128 characters
     '%',                -- TABLE_FILTER: table name(s) or LIKE pattern(s): 'orders', 'fact%', '%' (all)
     true,               -- IDENTIFIER_CASE_INSENSITIVE: true (recommended) => fold all identifiers to UPPER case; false => keep them as in SQL Server (quoted)
-    'AUTO',             -- PARALLEL_STATEMENTS: 'AUTO' (recommended; Exasol VCPU/NODES/2, even, 4..64, at most the SQL Server processor count), a number >= 1, or 1 = one STATEMENT per table. Do not write to the source during the load
-    1000000,            -- PARALLEL_MIN_ROWS: tables with fewer rows are read with one STATEMENT (default 1000000); 0 => split every table that can be split
+    'AUTO',             -- PARALLEL_STATEMENTS: 'AUTO' (recommended; per table ceil(sqrt(rows / 25000)), 2..VCPU/2 (4..64), at most 2 x / 1 x the SQL Server processor count, then, from the node count on, the nearest multiple of the Exasol nodes within these limits), a number >= 1 (no per-table sizing), or 1 = one STATEMENT per table. Do not write to the source during the load
+    250000,             -- PARALLEL_MIN_ROWS: tables with fewer rows are read with one STATEMENT (default 250000); 0 => split every table that can be split
     'FORCE_DISABLE',    -- CONSTRAINT_STATE: 'FORCE_DISABLE' (recommended; keys stay metadata for BI tools), 'SET_AS_SOURCE' (enable keys that are enabled and trusted in SQL Server) or 'FORCE_ENABLE' (Exasol validates all keys)
     true,               -- GENERATE_COMMENTS: true (recommended) => migrate MS_Description comments of schemas, tables and columns
     true,               -- GENERATE_VIEWS: true => list the source views as a commented manual-review section
@@ -1297,26 +1298,31 @@ scale above 35 is rounded to 35), a `float` beyond ±1.7976e308, and a `datetime
 migrated (out of scope): indexes, `UNIQUE`/`CHECK` constraints, sequences, synonyms, rules,
 functions/procedures/triggers, users/roles/permissions.
 
-**Parallel import.** A table with at least `PARALLEL_MIN_ROWS` rows is read by up to `PARALLEL_STATEMENTS`
-parallel `STATEMENT` clauses, each reading a **disjoint part** of the table (exact 1:1, verified with
-`CHECK_MIGRATION`), chosen in this order: the **partitions** of a partitioned table (`$PARTITION`), **key ranges
-of the clustered index** (boundaries from the statistics histogram), or **physical row locations** of a heap or
-columnstore table. `AUTO` uses half the vCPUs of one Exasol node (`VCPU/NODES/2`), even, 4..64 — the same rule as
-`postgresql_to_exasol.sql` and `snowflake_to_exasol.sql` — and at most the SQL Server processor count. Each
-STATEMENT is a separate SQL Server transaction: **do not write to the source during the load**; for a consistent
-copy migrate from a database snapshot (`CREATE DATABASE … AS SNAPSHOT OF …`, then `DB_FILTER` = the snapshot name
-and `TARGET_SCHEMA` set; not available on Azure SQL Database). Each stream needs temporary memory in Exasol: on
-nodes with little memory use fewer streams for very large tables. A very wide table gets fewer STATEMENTs so that
-its IMPORT fits the Exasol statement limits (a `PARALLEL` note names it).
-Clustered keys of every numeric, date/time, character, binary and GUID type are split; numeric, date and time keys
-are interpolated between the histogram steps. A clustered table whose histogram gives very uneven key ranges (e.g. a
-sequential `uniqueidentifier` key) is read by physical row locations instead, and a `PARALLEL` note names every table
-that gets fewer or uneven STATEMENTs (few partitions or distinct key values, key values very close together).
-Measured on a single machine shared by Exasol and SQL Server (16 vCPUs; on separate servers
-more streams help): 5,000,000 rows 91 s with one STATEMENT vs 38 s with 4 or 8 key ranges, 37 s with 8 partition groups,
-40 s for a heap with 8 STATEMENTs; 1,000,000 rows 18 s vs 10.5 s with 4 STATEMENTs. Each stream is one SQL Server
-session and about one CPU core: on a small or shared source server use fewer streams (16 streams were twice as slow as
-8 on the shared test machine).
+**Parallel import.** Leave `PARALLEL_STATEMENTS = 'AUTO'` - it is the recommended setting and needs no tuning: for
+every table the script picks a number of parallel `STATEMENT` clauses close to the fastest one, from the size of the
+table, the size of the Exasol cluster and the SQL Server processor count (tables below `PARALLEL_MIN_ROWS`, default
+250,000 rows, are read with one STATEMENT; the exact rule is in the script header). Each STATEMENT reads its own part of
+the table (exact 1:1): a partition, a key range of the clustered index or, for a heap or a columnstore table, its
+share of the physical row locations - no primary key needed; heaps load up to about half as fast,
+because every STATEMENT scans the whole table. A `PARALLEL` note names tables that get fewer STATEMENTs. **Do not write to the
+source tables during the load**: every STATEMENT is a separate transaction. For a consistent copy migrate from a
+database snapshot (`CREATE DATABASE … AS SNAPSHOT OF …`, then `DB_FILTER` = the snapshot name and `TARGET_SCHEMA` set;
+not available on Azure SQL Database). If other applications work on the same source at the same time, it can be
+helpful to set `PARALLEL_STATEMENTS` lower.
+
+**Benchmark.** Exasol with 4 nodes (4 x AWS r8a.4xlarge, 64 vCPUs), SQL Server 2025 on one r8a.4xlarge (16 cores) in the
+same AWS availability zone, one table with 10 columns and a clustered primary key:
+
+| Table | `AUTO` | 1 STATEMENT | faster |
+|---|---|---|---|
+| 720 million rows (106 GB) | **2 min 37 s** (32 STATEMENTs) | about 61 min (extrapolated) | 23x |
+| 72 million rows (10.6 GB) | **19.7 s** (32) | 6 min 6 s | 19x |
+| 7.2 million rows | **5.4 s** (16) | 38.2 s | 7.1x |
+| 720,000 rows | **2.4 s** (8) | 5.3 s | 2.2x |
+| 250,000 rows | **1.9 s** (4) | 2.7 s | 1.4x |
+| 72 million rows, heap (no clustered index) | **40.3 s** (16) | - | - |
+
+A 100 GB table loads in less than 3 minutes instead of about an hour.
 
 **Special tables.** Temporal history tables and ledger tables are migrated as plain tables (period columns in UTC,
 hidden ledger columns included; a history table named after the source object id - `MSSQL_TemporalHistoryFor_<id>` -

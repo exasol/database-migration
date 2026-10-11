@@ -67,11 +67,28 @@ create schema if not exists database_migration;
     clustered index (boundaries from the statistics histogram) or physical row locations of a heap / columnstore table -
     also of a clustered table whose histogram gives very uneven key ranges (e.g. a sequential uniqueidentifier key). A note
     names tables that get fewer or uneven STATEMENTs (few partitions or distinct key values, key values very close together).
-    AUTO = half the vCPUs of one Exasol node (VCPU/NODES/2), even, 4..64 - the rule of postgresql_to_exasol.sql and
-    snowflake_to_exasol.sql -, at most the SQL Server processor count. Each STATEMENT is a separate SQL Server transaction
-    - the source must not be written during the load; for a consistent copy migrate from a database snapshot (CREATE
-    DATABASE ... AS SNAPSHOT OF ..., then DB_FILTER = the snapshot name and TARGET_SCHEMA set; not on Azure SQL Database).
-    Each stream needs temporary memory in Exasol: on nodes with little memory use fewer streams for very large tables.
+    AUTO = per table ceil(sqrt(rows / 25000)) STATEMENTs (the same row estimate as PARALLEL_MIN_ROWS), at most half
+    the vCPUs of the Exasol cluster (VCPU/2, 4..64; 8 without rounding to the nodes when
+    EXA_STATISTICS.EXA_SYSTEM_EVENTS is not readable; the rule of postgresql_to_exasol.sql), at most 2 x the SQL
+    Server processor count for key ranges / partitions and 1 x for physical row locations (every such STATEMENT scans
+    the table; no processor cap when the processor count is not readable, e.g. on Azure SQL Database - a PARALLEL note
+    says so), and at most one STATEMENT per about 1,000 rows; a result of at least the Exasol node count is then
+    rounded to the nearest multiple of it (ties up) that stays within these limits; at least 2. E.g. 4 nodes, 64
+    vCPUs: 250,000 rows -> 4, 1,000,000 -> 8, 7,200,000 -> 16, 72,000,000 -> 32 (key ranges with a SQL Server of at
+    least 16 processors; a heap gets at most the processor count, e.g. 16); 5 nodes, 160 vCPUs, SQL Server with 16
+    processors: 72,000,000 rows -> 30 (key ranges, at most 32). A fixed number uses that many STATEMENTs for every
+    table with at least PARALLEL_MIN_ROWS rows (fewer where a table has few partitions or distinct key values, or is
+    very wide; a PARALLEL note names it). No primary key is needed: a heap or clustered columnstore table is split by
+    physical row locations, a clustered rowstore index (unique or not) by key ranges. Each STATEMENT is a separate SQL
+    Server transaction - the source must not be written during the load; for a consistent copy migrate from a database
+    snapshot (CREATE DATABASE ... AS SNAPSHOT OF ..., then DB_FILTER = the snapshot name and TARGET_SCHEMA set; not on
+    Azure SQL Database). AUTO sizes the streams for the Exasol cluster and the SQL Server processor count and assumes
+    that the source server may be used fully during the load: for a production, weak or shared SQL Server set
+    PARALLEL_STATEMENTS explicitly lower and try it on a medium-sized table first. Each stream is one SQL Server
+    session; with cached data it used about 0.05-0.12 CPU core of the source with key ranges (about 0.3 core for a
+    heap, where every STATEMENT scans the table), but about 1.5-2 CPU cores and up to about 2 GB of memory (large
+    tables) on its Exasol node (every STATEMENT runs in its own Java process): on Exasol nodes with little memory, use
+    fewer streams for very large tables.
 
     CONSTRAINTS: PK/FK are always created DISABLED (the primary key is named <TABLE>_PK, foreign keys keep their SQL Server
     names); a final CONSTRAINT STATE section enables them according to
@@ -121,8 +138,8 @@ create or replace script database_migration.SQLSERVER_TO_EXASOL(
   ,TARGET_SCHEMA                -- target schema on Exasol; '' = use the source schema (or, with DB2SCHEMA, the database) name
   ,TABLE_FILTER                 -- table(s): names or LIKE patterns, comma separated, '%' = all
   ,IDENTIFIER_CASE_INSENSITIVE  -- true (recommended) => fold all identifiers to UPPER case; false => keep them as in SQL Server
-  ,PARALLEL_STATEMENTS          -- 'AUTO' (recommended: Exasol VCPU/NODES/2, even, 4..64, at most the SQL Server processor count), a number >= 1, or 1 = one STATEMENT per table
-  ,PARALLEL_MIN_ROWS            -- tables with fewer rows are read with one STATEMENT (default 1000000); 0 = split every table that can be split
+  ,PARALLEL_STATEMENTS          -- 'AUTO' (recommended: per table ceil(sqrt(rows / 25000)), 2..VCPU/2 (4..64), at most 2 x / 1 x the SQL Server processor count, then, from the node count on, the nearest multiple of the Exasol nodes within these limits), a number >= 1 (no per-table sizing), or 1 = one STATEMENT per table
+  ,PARALLEL_MIN_ROWS            -- tables with fewer rows are read with one STATEMENT (default 250000); 0 = split every table that can be split
   ,CONSTRAINT_STATE             -- 'FORCE_DISABLE' (recommended), 'SET_AS_SOURCE' or 'FORCE_ENABLE'
   ,GENERATE_COMMENTS            -- true/false: migrate MS_Description comments of schemas, tables and columns
   ,GENERATE_VIEWS               -- true/false: list the source views as a commented manual-review section
@@ -257,7 +274,7 @@ do
 		PS_FIX = math.floor(n)
 	end
 end
-local PMIN = 1000000
+local PMIN = 250000
 do
 	local v = PARALLEL_MIN_ROWS
 	if not (isnull(v) or (type(v) == 'string' and trim(v) == '')) then
@@ -338,20 +355,20 @@ local FORBIDDEN_COL = {LEVEL = true, ROWNUM = true, ROWID = true, CONNECT_BY_ISL
 -- resolve PARALLEL_STATEMENTS
 local PS, PS_NOTE
 if PS_AUTO then
-	-- same rule as snowflake_to_exasol.sql and postgresql_to_exasol.sql: half the vCPUs of one Exasol node, even, 4..64
+	-- same rule as postgresql_to_exasol.sql: PS = upper bound per call, half the vCPUs of the Exasol cluster, 4..64;
+	-- the STATEMENTs per table follow from its row count (auto_n) and the SQL Server processor count (src_cap)
 	local why
 	if VCPU and NODES and NODES > 0 then
-		PS = math.floor(VCPU / NODES / 2)
-		if PS % 2 == 1 then PS = PS - 1 end
-		PS = math.max(4, math.min(PS, 64))
-		why = 'Exasol VCPU ' .. istr(VCPU) .. ' / nodes ' .. istr(NODES) .. ' / 2, even, 4..64'
+		PS = math.max(4, math.min(64, math.floor(VCPU / 2)))
+		why = 'Exasol VCPU ' .. istr(VCPU) .. ' / 2, 4..64'
 	else
-		PS = 4
+		PS = 8
 		why = 'fallback; EXA_STATISTICS.EXA_SYSTEM_EVENTS not readable'
 	end
-	if SRC_CPU and SRC_CPU >= 1 and SRC_CPU < PS then PS = SRC_CPU; why = why .. '; capped to the SQL Server processor count ' .. istr(SRC_CPU)
+	if SRC_CPU and SRC_CPU >= 1 then why = why .. '; at most ' .. istr(2 * SRC_CPU) .. ' for key ranges / partitions and ' .. istr(SRC_CPU) .. ' for physical row locations (2 x / 1 x the SQL Server processor count ' .. istr(SRC_CPU) .. ')'
 	elseif not SRC_CPU then why = why .. '; SQL Server processor count not readable (xp_msver), no cap' end
-	PS_NOTE = 'AUTO -> ' .. istr(PS) .. ' (' .. why .. ')'
+	PS_NOTE = 'AUTO -> per table ceil(sqrt(rows / 25000)), at least 2, at most ' .. istr(PS) .. ' (' .. why .. ')' ..
+	          ((NODES and NODES > 1) and ('; from ' .. istr(NODES) .. ' STATEMENTs on, rounded to the nearest multiple of the ' .. istr(NODES) .. ' nodes that stays within the limits of the table') or '')
 else
 	PS = PS_FIX
 	PS_NOTE = 'fixed -> ' .. istr(PS)
@@ -1591,10 +1608,37 @@ local function step_uneven(steps, idxs)
 	return total > 0 and big > total * 2 / (#idxs + 1)
 end
 local MINMAX = {}
-local function predicates(r, n)
+-- STATEMENTs per table: fixed = PS; AUTO = ceil(sqrt(rows / 25000)), 2..PS (rounded to the nodes in counts())
+local function auto_n(r)
+	if not PS_AUTO then return PS end
+	return math.max(math.min(math.ceil(math.sqrt(r.rows / 25000)), PS), 2)
+end
+-- AUTO only: at most 2 x the SQL Server processor count for key ranges / partitions, 1 x for physical row locations
+local function src_cap(n, physloc)
+	if PS_AUTO and SRC_CPU and SRC_CPU >= 1 then return math.min(n, physloc and SRC_CPU or 2 * SRC_CPU) end
+	return n
+end
+-- AUTO only: from NODES on the nearest multiple of NODES (ties up) that is not above lim, else the largest multiple below lim
+local function node_round(n, lim)
+	if PS_AUTO and NODES and NODES > 0 and n >= NODES then
+		n = NODES * math.floor(n / NODES + 0.5)
+		if n > lim then n = NODES * math.floor(lim / NODES) end
+	end
+	return n
+end
+-- final STATEMENT counts of a table for the wanted n and the upper limit lim (PS, or less after a row-limit reduction):
+-- all limits first (lim, about 1,000 rows per STATEMENT, AUTO: the SQL Server processors), then AUTO rounds to the nodes;
+-- returns the count for key ranges / partitions and the count for physical row locations (every such STATEMENT scans the table)
+local function counts(r, n, lim)
+	lim = src_cap(math.min(lim, math.max(2, r.rows // 1000)), false)
+	local limp = src_cap(lim, true)
+	return node_round(math.min(n, lim), lim), node_round(math.min(n, limp), limp)
+end
+local function predicates(r, n, lim)
 	-- returns a list of WHERE predicates (nil = single statement) and the method name
 	if n <= 1 or r.noimport or r.kind ~= 'U' or r.mo or r.rows < PMIN or r.rows <= 0 then return nil, 'SINGLE' end
-	n = math.min(n, math.max(2, r.rows // 1000))                    -- at least about 1,000 rows per STATEMENT
+	local np
+	n, np = counts(r, n, lim or n)
 	local B = qb(r.db)
 	local parts = PROWS[rkey(r.db, r.oid)]
 	if r.pf and parts and #parts >= 2 then
@@ -1703,8 +1747,9 @@ local function predicates(r, n)
 			end
 			if total - prev > big then big = total - prev end
 			if total > 0 and big > total / 2 then
+				if np <= 1 then return nil, 'SINGLE' end
 				local out = {}
-				for i = 0, n - 1 do out[#out + 1] = '((checksum(%%physloc%%) % ' .. istr(n) .. ') + ' .. istr(n) .. ') % ' .. istr(n) .. ' = ' .. istr(i) end
+				for i = 0, np - 1 do out[#out + 1] = '((checksum(%%physloc%%) % ' .. istr(np) .. ') + ' .. istr(np) .. ') % ' .. istr(np) .. ' = ' .. istr(i) end
 				return out, 'PHYSLOC (uneven key ranges)'
 			end
 			uneven = total > 0 and big > total * 2 / (#lits + 1)
@@ -1717,8 +1762,9 @@ local function predicates(r, n)
 		return out, uneven and 'KEYRANGE (uneven)' or 'KEYRANGE'
 	end
 	if r.itype == 0 or r.itype == 5 then
+		if np <= 1 then return nil, 'SINGLE' end
 		local out = {}
-		for i = 0, n - 1 do out[#out + 1] = '((checksum(%%physloc%%) % ' .. istr(n) .. ') + ' .. istr(n) .. ') % ' .. istr(n) .. ' = ' .. istr(i) end
+		for i = 0, np - 1 do out[#out + 1] = '((checksum(%%physloc%%) % ' .. istr(np) .. ') + ' .. istr(np) .. ') % ' .. istr(np) .. ' = ' .. istr(i) end
 		return out, 'PHYSLOC'
 	end
 	return nil, 'SINGLE (unsupported key)'
@@ -1742,7 +1788,7 @@ do
 end
 add('-- PARALLEL_STATEMENTS = ' .. PS_NOTE .. '; PARALLEL_MIN_ROWS = ' .. istr(PMIN))
 if PS_AUTO and not SRC_CPU then note('PARALLEL', 'the SQL Server processor count is not readable (xp_msver is not allowed for the connection user) - AUTO is not capped by it', false) end
-if PS > 1 then note('PARALLEL', ((PMIN > 1) and ('tables with at least ' .. istr(PMIN) .. ' rows') or 'all non-empty tables') .. ' are read with up to ' .. istr(PS) .. ' parallel STATEMENTs (partitions, clustered key ranges or physical row locations); each STATEMENT is a separate SQL Server transaction, so the source must not be written during the IMPORTs (otherwise rows can be duplicated or missed) - for a consistent copy run the migration from a database snapshot; verify with CHECK_MIGRATION', true) end
+if PS > 1 then note('PARALLEL', ((PMIN > 1) and ('tables with at least ' .. istr(PMIN) .. ' rows') or 'all non-empty tables') .. ' are read with up to ' .. istr(PS) .. ' parallel STATEMENTs (' .. (PS_AUTO and 'AUTO: by table size; ' or '') .. 'partitions, clustered key ranges or physical row locations); each STATEMENT is a separate SQL Server transaction, so the source must not be written during the IMPORTs (otherwise rows can be duplicated or missed) - for a consistent copy run the migration from a database snapshot; verify with CHECK_MIGRATION', true) end
 
 local migrated = {}
 for _, r in ipairs(RELS) do if r.migrate then migrated[#migrated + 1] = r end end
@@ -1799,8 +1845,8 @@ for _, r in ipairs(migrated) do
 		end
 		local base = 'select ' .. table.concat(srcs, ', ') .. from_clause(r)
 		local head = 'IMPORT INTO ' .. qi(r.exa_schema) .. '.' .. qi(r.exa_table) .. ' (' .. table.concat(tcols, ', ') .. ') FROM JDBC AT ' .. CONN
-		local function build(n)
-			local preds, how = predicates(r, n)
+		local function build(n, lim)
+			local preds, how = predicates(r, n, lim)
 			local raws = {}
 			if preds then for _, p in ipairs(preds) do raws[#raws + 1] = base .. ' where ' .. p end else raws[1] = base end
 			local stmts, len, maxl, rawmax = {}, #head + 80, 0, 0
@@ -1813,13 +1859,16 @@ for _, r in ipairs(migrated) do
 			end
 			return stmts, len, maxl, rawmax, how
 		end
-		local stmts, len, maxl, rawmax, how = build(PS)
+		local nt = auto_n(r)
+		local stmts, len, maxl, rawmax, how = build(nt, PS)
 		local reduced = false
 		if #stmts > 1 and len > ROW_LIMIT then
 			local nmax = math.max(1, math.floor((ROW_LIMIT - #head - 80) / (maxl + 11)))
-			stmts, len, maxl, rawmax, how = build(math.min(nmax, #stmts - 1))
+			local n0 = #stmts
+			local m = math.min(nmax, #stmts - 1)
+			stmts, len, maxl, rawmax, how = build(m, m)
 			reduced = true
-			note('PARALLEL', 'table ' .. r.label .. ' is read with ' .. istr(#stmts) .. ' instead of up to ' .. istr(PS) .. ' parallel STATEMENTs: every STATEMENT repeats the full select list, and its IMPORT must fit into one output row of 2,000,000 characters', false)
+			note('PARALLEL', 'table ' .. r.label .. ' is read with ' .. istr(#stmts) .. ' instead of up to ' .. istr(PS_AUTO and n0 or nt) .. ' parallel STATEMENTs: every STATEMENT repeats the full select list, and its IMPORT must fit into one output row of 2,000,000 characters', false)
 		end
 		if rawmax >= SIZE_LIMIT then
 			note('SIZE LIMIT', 'the longest STATEMENT of the IMPORT of ' .. r.label .. ' is ' .. istr(rawmax) .. ' bytes long; Exasol rejects a STATEMENT of 131072 bytes or more (ETL-1100) - reduce the number of columns or migrate the table in column groups; with many datetimeoffset columns TEMPORAL_OUT_OF_RANGE = NULL gives the shortest expressions (out-of-range values then load as NULL)', true)
@@ -1832,7 +1881,7 @@ for _, r in ipairs(migrated) do
 		elseif how == 'PHYSLOC (uneven key ranges)' then
 			note('PARALLEL', 'table ' .. r.label .. ': the statistics histogram of its clustered key gives very uneven key ranges (e.g. a sequential uniqueidentifier or binary key) - it is read by physical row locations instead (exact; every STATEMENT scans the table)', false)
 		elseif how and (how:find('^KEYRANGE') or how == 'PARTITION') and PS > 1 and not reduced then
-			local want = math.min(PS, math.max(2, r.rows // 1000))
+			local want = counts(r, nt, PS)
 			if how == 'PARTITION' and #stmts < (want + 1) // 2 then
 				note('PARALLEL', 'table ' .. r.label .. ' is read with ' .. istr(#stmts) .. ' of up to ' .. istr(want) .. ' STATEMENTs: one STATEMENT reads one or more whole partitions, and the table has only that many partitions with rows', false)
 			elseif #stmts < (want + 1) // 2 then
@@ -2202,8 +2251,8 @@ EXECUTE SCRIPT DATABASE_MIGRATION.SQLSERVER_TO_EXASOL(
     '',                 -- TARGET_SCHEMA: Exasol target schema; '' (recommended) => use the source schema (or database) name; '"MySchema"' => this exact name (no upper-casing); at most 128 characters
     '%',                -- TABLE_FILTER: table name(s) or LIKE pattern(s), e.g. 'orders', 'fact%', '%' (all)
     true,               -- IDENTIFIER_CASE_INSENSITIVE: true (recommended) => fold all identifiers to UPPER case; false => keep them as in SQL Server (quoted)
-    'AUTO',             -- PARALLEL_STATEMENTS: 'AUTO' (recommended; Exasol VCPU/NODES/2, even, 4..64, at most the SQL Server processor count), a number >= 1, or 1 = one STATEMENT per table. Do not write to the source during the load
-    1000000,            -- PARALLEL_MIN_ROWS: tables with fewer rows are read with one STATEMENT (default 1000000); 0 => split every table that can be split
+    'AUTO',             -- PARALLEL_STATEMENTS: 'AUTO' (recommended; per table ceil(sqrt(rows / 25000)), 2..VCPU/2 (4..64), at most 2 x / 1 x the SQL Server processor count, then, from the node count on, the nearest multiple of the Exasol nodes within these limits), a number >= 1 (no per-table sizing), or 1 = one STATEMENT per table. Do not write to the source during the load
+    250000,             -- PARALLEL_MIN_ROWS: tables with fewer rows are read with one STATEMENT (default 250000); 0 => split every table that can be split
     'FORCE_DISABLE',    -- CONSTRAINT_STATE: 'FORCE_DISABLE' (recommended; keys stay metadata for BI tools), 'SET_AS_SOURCE' (enable keys that are enabled and trusted in SQL Server) or 'FORCE_ENABLE' (Exasol validates all keys)
     true,               -- GENERATE_COMMENTS: true (recommended) => migrate MS_Description comments of schemas, tables and columns
     true,               -- GENERATE_VIEWS: true => list the source views as a commented manual-review section
