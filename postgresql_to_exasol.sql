@@ -53,12 +53,22 @@ create schema if not exists database_migration;
     PARALLEL IMPORT: from PostgreSQL 14 on, a table with at least PARALLEL_MIN_ROWS rows is read by up to
     PARALLEL_STATEMENTS parallel STATEMENT clauses, each reading a disjoint ctid block range (exact 1:1). Each
     STATEMENT is a separate PostgreSQL transaction - the source must not be written during the load. 1 = off.
-    AUTO = half the vCPUs of one Exasol node (VCPU/NODES/2), even, 4..64 - the rule of snowflake_to_exasol.sql -,
-    at most half of the free PostgreSQL connections. Each stream is one PostgreSQL backend (about one CPU core) and
-    needs temporary memory in Exasol: for a weak PostgreSQL server set PARALLEL_STATEMENTS to at most about twice its
-    CPU cores; on Exasol nodes with little memory use fewer streams for very large tables. PARALLEL_MIN_ROWS
-    (default 1,000,000): every stream starts with a delay of about one second, so smaller tables load faster with
-    one STATEMENT (measured on a single node: 200,000 rows 5 s with 1 vs 10 s with 8 STATEMENTs; 1,000,000 rows 20 s vs 12 s with 4).
+    AUTO = per table ceil(sqrt(estimated rows / 25,000)), at most half the vCPUs of the Exasol cluster (VCPU/2, 4..64;
+    8 without rounding to the nodes when EXA_STATISTICS.EXA_SYSTEM_EVENTS is not readable) and at most half of the
+    free PostgreSQL connections; a result of at least the Exasol node count is then rounded to the nearest multiple of
+    it (ties up) that stays within these limits; at least 2. E.g. on 4 nodes with 64 vCPUs: 250,000 rows 4, 1,000,000
+    rows 8, 7,200,000 rows 16, 72,000,000 rows 32 STATEMENTs; on 5 nodes with 160 vCPUs and at least 128 free
+    PostgreSQL connections: 1,000,000 rows 5, 7,200,000 rows 15, 72,000,000 rows 55, 720,000,000 rows 60 (not 65:
+    never above the maximum of 64); with the default max_connections = 100 the limit is about 48 (45 on 5 nodes). A fixed number is
+    used for every table with at least PARALLEL_MIN_ROWS rows (fewer only where a table cannot be split further or is
+    very wide). AUTO sizes the streams for the Exasol cluster and assumes that the source server may be used fully
+    during the load: for a production, weak or shared PostgreSQL server set PARALLEL_STATEMENTS explicitly lower (e.g.
+    about twice its CPU cores) and try it on a medium-sized table first. Each stream is one PostgreSQL backend; it
+    used about 0.05-0.12 CPU core of the source with cached data (about 0.2 core when read from disk), but about 1.5-2
+    CPU cores and up to about 2 GB of memory (large tables) on its Exasol node (every STATEMENT runs in its own Java process): on Exasol
+    nodes with little memory, use fewer streams for very large tables. A table needs no primary key or index for this:
+    the ctid ranges are physical. PARALLEL_MIN_ROWS (default 250,000): tables with fewer estimated rows are read with
+    one STATEMENT (a conservative threshold: below it the gain of splitting is small).
     The row estimate comes from the PostgreSQL statistics (reltuples scaled to the current table size); a table
     without statistics (never analyzed) is estimated at one row per 80 bytes. Long-running STATEMENTs keep their
     source transactions open, which holds back VACUUM on the source for that time.
@@ -102,8 +112,8 @@ create or replace script database_migration.POSTGRESQL_TO_EXASOL(
   ,SCHEMA_FILTER                -- LIKE pattern for the source schemas, '%' = all ('_' and '%' are wildcards; system schemas are always excluded)
   ,TABLE_FILTER                 -- LIKE pattern for the tables/views, '%' = all
   ,TARGET_SCHEMA                -- target schema on Exasol; '' = use the source schema name
-  ,PARALLEL_STATEMENTS          -- 'AUTO' (recommended: Exasol VCPU/NODES/2, even, 4..64, at most half of the free PostgreSQL connections), a number >= 1, or 1 = no parallel reading (one STATEMENT per table)
-  ,PARALLEL_MIN_ROWS            -- tables with fewer (estimated) rows are read with one STATEMENT (default 1000000); 0 = always split
+  ,PARALLEL_STATEMENTS          -- 'AUTO' (recommended: per table ceil(sqrt(rows / 25000)), 2..VCPU/2 (4..64), at most half of the free PostgreSQL connections, then, from the node count on, the nearest multiple of the Exasol nodes within these limits), a number >= 1 (no per-table sizing), or 1 = no parallel reading (one STATEMENT per table)
+  ,PARALLEL_MIN_ROWS            -- tables with fewer (estimated) rows are read with one STATEMENT (default 250000); 0 = always split
   ,CONSTRAINT_STATE             -- 'FORCE_DISABLE' (recommended), 'SET_AS_SOURCE' or 'FORCE_ENABLE'
   ,GENERATE_COMMENTS            -- true/false: migrate schema, table and column comments
   ,GENERATE_VIEWS               -- true/false: list the source views as a commented manual-review section
@@ -226,7 +236,7 @@ do
 		PS_FIX = math.floor(n)
 	end
 end
-local PMIN = 1000000
+local PMIN = 250000
 do
 	local v = PARALLEL_MIN_ROWS
 	if not (isnull(v) or (type(v) == 'string' and trim(v) == '')) then
@@ -300,20 +310,21 @@ if VNUM < 140000 then
 	PS = 1
 	PS_NOTE = 'PostgreSQL ' .. VER .. ' has no TID range scan (needs 14+): every table is read with one STATEMENT'
 elseif PS_AUTO then
-	-- same rule as snowflake_to_exasol.sql: half the vCPUs of one Exasol node, even, 4..64
-	local why
+	-- PS = upper bound per table: half the vCPUs of the Exasol cluster (VCPU is the cluster total), 4..64;
+	-- the number per table is chosen in ranges() from its estimated rows (auto_n)
+	local why, rnd = nil, ''
 	if VCPU and NODES and NODES > 0 then
-		PS = math.floor(VCPU / NODES / 2)
-		if PS % 2 == 1 then PS = PS - 1 end
-		PS = math.max(4, math.min(PS, 64))
-		why = 'Exasol VCPU ' .. istr(VCPU) .. ' / nodes ' .. istr(NODES) .. ' / 2, even, 4..64'
+		PS = math.max(4, math.min(64, math.floor(VCPU / 2)))
+		why = 'Exasol VCPU ' .. istr(VCPU) .. ' / 2, 4..64'
+		if NODES > 1 then rnd = '; from ' .. istr(NODES) .. ' STATEMENTs on, rounded to the nearest multiple of the ' .. istr(NODES) .. ' nodes that stays within the limits of the table' end
 	else
-		PS = 4
+		PS = 8
 		why = 'fallback; EXA_STATISTICS.EXA_SYSTEM_EVENTS not readable'
 	end
 	local cap = math.floor(HEADROOM / 2)
 	if cap < PS then PS = math.max(1, cap); why = why .. '; capped to half of the PostgreSQL connection headroom ' .. istr(HEADROOM) end
-	PS_NOTE = 'AUTO -> ' .. istr(PS) .. ' (' .. why .. ')'
+	PS_NOTE = 'AUTO -> per table ceil(sqrt(rows / 25000)), at least 2, at most ' .. istr(PS) .. ' (' .. why .. ')' .. ((NODES and PS >= NODES) and rnd or '')
+	if PS <= 1 then PS_NOTE = 'AUTO -> 1 (' .. why .. ')' end
 else
 	PS = PS_FIX
 	PS_NOTE = 'fixed -> ' .. istr(PS)
@@ -1041,6 +1052,16 @@ local function est_rows(blocks, reltuples, relpages)
 	if blocks ~= nil and blocks > 0 then return nil end
 	return reltuples
 end
+local function auto_n(est, cap)
+	-- PARALLEL_STATEMENTS = AUTO: ceil(sqrt(rows / 25000)), at most cap (all limits of the table); from NODES on the
+	-- nearest multiple of NODES (ties up) that is not above cap, else the largest multiple below cap; at least 2
+	local n = math.min(math.ceil(math.sqrt(est / 25000)), cap)
+	if NODES and NODES > 0 and n >= NODES then
+		n = NODES * math.floor(n / NODES + 0.5)
+		if n > cap then n = NODES * math.floor(cap / NODES) end
+	end
+	return math.max(n, math.min(2, cap))
+end
 local function ranges(r, nmax)
 	-- returns a list of {lo, hi} block bounds (nil = open), or nil for a single statement
 	local PS = math.min(PS, nmax or PS)
@@ -1067,7 +1088,7 @@ local function ranges(r, nmax)
 	-- without usable statistics the row count is estimated from the size (about one row per 80 bytes)
 	if est == nil then est = blocks * math.floor(BS / 80) end
 	if est < PMIN then return nil end
-	local n = math.min(PS, blocks)
+	local n = PS_AUTO and auto_n(est, math.min(PS, blocks)) or math.min(PS, blocks)
 	if n <= 1 then return nil end
 	local bounds = {}
 	if sizes then
@@ -1109,7 +1130,7 @@ end
 add('-- ### PostgreSQL -> Exasol migration generated by ' .. SCRIPT_SCHEMA .. '.' .. exa.meta.script_name .. ' ###')
 add('-- source PostgreSQL ' .. oneline(VER) .. ', server_encoding ' .. oneline(ENC) .. '; generated in an Exasol session with TIME_ZONE ' .. SESSION_TZ)
 add('-- PARALLEL_STATEMENTS = ' .. PS_NOTE .. '; PARALLEL_MIN_ROWS = ' .. istr(PMIN))
-if PS > 1 then note('PARALLEL', 'tables with at least ' .. istr(PMIN) .. ' estimated rows are read with up to ' .. istr(PS) .. ' parallel STATEMENTs; each STATEMENT is a separate PostgreSQL transaction, so the source must not be written during the IMPORTs (otherwise rows can be duplicated or missed) - verify with CHECK_MIGRATION', true)
+if PS > 1 then note('PARALLEL', 'tables with at least ' .. istr(PMIN) .. ' estimated rows are read with ' .. 'up to ' .. istr(PS) .. ' parallel STATEMENTs' .. (PS_AUTO and ' (the number grows with the table size)' or '') .. '; each STATEMENT is a separate PostgreSQL transaction, so the source must not be written during the IMPORTs (otherwise rows can be duplicated or missed) - verify with CHECK_MIGRATION', true)
 elseif VNUM < 140000 then note('VERSION', PS_NOTE, false) end
 
 local migrated = {}
@@ -1189,8 +1210,9 @@ for _, r in ipairs(migrated) do
 		local stmts, len, maxl, rawmax = build(nil)
 		if #stmts > 1 and len > ROW_LIMIT then
 			local nmax = math.floor((ROW_LIMIT - #head - 80) / (maxl + 11))
+			local n0 = #stmts
 			stmts, len, maxl, rawmax = build(nmax)
-			note('PARALLEL', 'table ' .. r.label .. ' is read with ' .. istr(#stmts) .. ' instead of up to ' .. istr(PS) .. ' parallel STATEMENTs: every STATEMENT repeats the full select list, and its IMPORT must fit into one output row of 2,000,000 characters', false)
+			note('PARALLEL', 'table ' .. r.label .. ' is read with ' .. istr(#stmts) .. ' instead of up to ' .. istr(PS_AUTO and n0 or PS) .. ' parallel STATEMENTs: every STATEMENT repeats the full select list, and its IMPORT must fit into one output row of 2,000,000 characters', false)
 		end
 		if rawmax >= SIZE_LIMIT then
 			note('SIZE LIMIT', 'the longest STATEMENT of the IMPORT of ' .. r.label .. ' is ' .. istr(rawmax) .. ' bytes long; Exasol rejects a STATEMENT of 131072 bytes or more (ETL-1100) - reduce the number of columns, or use TEMPORAL_OUT_OF_RANGE = NULL (shortest expressions; out-of-range values then load as NULL)', true)
@@ -1496,8 +1518,8 @@ EXECUTE SCRIPT DATABASE_MIGRATION.POSTGRESQL_TO_EXASOL(
     '%',                -- SCHEMA_FILTER: source schema(s) as a LIKE pattern, e.g. 'public', 'sales%', '%' (all; system schemas always excluded). '_' is a wildcard too
     '%',                -- TABLE_FILTER: table(s) as a LIKE pattern, e.g. 'orders', 'fact%', '%' (all)
     '',                 -- TARGET_SCHEMA: Exasol target schema; '' (recommended) => use the source schema name
-    'AUTO',             -- PARALLEL_STATEMENTS: 'AUTO' (recommended; Exasol VCPU/NODES/2, even, 4..64, at most half of the free PostgreSQL connections), a number >= 1, or 1 = no parallel reading. Parallel reading needs PostgreSQL 14+; each STATEMENT is a separate transaction - do not write to the source during the load
-    1000000,            -- PARALLEL_MIN_ROWS: tables with fewer estimated rows are read with one STATEMENT (default 1000000; splitting smaller tables costs more than it saves); 0 => always split
+    'AUTO',             -- PARALLEL_STATEMENTS: 'AUTO' (recommended; per table ceil(sqrt(rows / 25000)), 2..VCPU/2 (4..64), at most half of the free PostgreSQL connections, then, from the node count on, the nearest multiple of the Exasol nodes within these limits), a number >= 1 (no per-table sizing), or 1 = no parallel reading. Parallel reading needs PostgreSQL 14+; each STATEMENT is a separate transaction - do not write to the source during the load
+    250000,             -- PARALLEL_MIN_ROWS: tables with fewer estimated rows are read with one STATEMENT (default 250000); 0 => always split
     'FORCE_DISABLE',    -- CONSTRAINT_STATE: 'FORCE_DISABLE' (recommended; keys stay metadata for the optimizer and BI tools), 'SET_AS_SOURCE' (enable keys that are valid and enforced in PostgreSQL) or 'FORCE_ENABLE' (Exasol validates all keys)
     true,               -- GENERATE_COMMENTS: true (recommended) => migrate schema, table and column comments
     true,               -- GENERATE_VIEWS: true => list the source views as a commented manual-review section
